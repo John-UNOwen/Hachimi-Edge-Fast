@@ -369,11 +369,11 @@ impl<T> OsOption<T> {
     }
 }
 
-#[derive(Default, Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Copy, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[allow(non_camel_case_types)]
 pub enum Language {
     #[serde(rename = "en")]
-    #[default] English,
+    English,
 
     #[serde(rename = "zh-tw")]
     TChinese,
@@ -386,6 +386,23 @@ pub enum Language {
 
     #[serde(rename = "es")]
     Spanish
+}
+
+impl Default for Language {
+    fn default() -> Self {
+        let locale = sys_locale::get_locale().as_deref().unwrap_or("en").to_lowercase();
+        if locale.contains("zh-hk") || locale.contains("zh-tw") || locale.contains("zh-hant") {
+            Self::TChinese
+        } else if locale.contains("zh") {
+            Self::SChinese
+        } else if locale.starts_with("vi") {
+            Self::Vietnamese
+        } else if locale.starts_with("es") {
+            Self::Spanish
+        } else {
+            Self::English
+        }
+    }
 }
 
 impl Language {
