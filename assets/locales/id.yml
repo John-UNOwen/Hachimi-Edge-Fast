@@ -108,7 +108,7 @@ config_editor:
   title: "Editor Konfigurasi"
   general_tab: "\uf013 Umum"
   graphics_tab: "\uf03e Grafik"
-  gameplay_tab: "\uf11b game"
+  gameplay_tab: "\uf11b Game"
   language: "Bahasa"
   restore_defaults: "Kembalikan semula"
   disable_overlay: "Matikan overlay (GUI)"
@@ -118,7 +118,7 @@ config_editor:
     Jika tidak disengaja dinyalakan, mohon tutup dialog ini dan matikan opsinya!
   debug_mode: "Mode Debug"
   translator_mode: "Mode Translasi"
-  skip_first_time_setup: "Lewati setup pertama kali"
+  skip_first_time_setup: "Lewati setup\npertama kali"
   disable_auto_update_check: "Matikan cek\npembaruan otomatis"
   disable_translations: "Matikan translasi"
   enable_ipc: "Nyalakan IPC"
