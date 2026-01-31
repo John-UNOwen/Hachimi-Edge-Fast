@@ -22,9 +22,7 @@ extern "C" fn GetRenderTextureDescriptor(cameraData: *mut isize, renderPass: *mu
 pub fn init(Unity_RenderPipelines_Universal_Runtime: *const Il2CppImage) {
     get_class_or_return!(Unity_RenderPipelines_Universal_Runtime, "UnityEngine.Rendering.Universal", ScriptableRenderer);
 
-    unsafe {
-        let GetRenderTextureDescriptor_addr = get_method_addr(ScriptableRenderer, c"GetRenderTextureDescriptor", 3);
-        new_hook!(GetRenderTextureDescriptor_addr, GetRenderTextureDescriptor);
-    }
+    let GetRenderTextureDescriptor_addr = get_method_addr(ScriptableRenderer, c"GetRenderTextureDescriptor", 3);
+    new_hook!(GetRenderTextureDescriptor_addr, GetRenderTextureDescriptor);
 }
 
