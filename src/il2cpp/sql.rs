@@ -1,11 +1,74 @@
 use std::{ptr, sync::atomic::{self, AtomicPtr}};
-
+use rusqlite::{Connection, OpenFlags};
+use fnv::{FnvHashMap, FnvHashSet};
 use sqlparser::ast;
-
 use crate::{
-    core::{utils, Hachimi},
+    core::{utils::{get_masterdb_path, fit_text, wrap_fit_text}, Hachimi},
     il2cpp::{ext::StringExt, hook::LibNative_Runtime, types::{Il2CppObject, Il2CppString}}
 };
+
+// public API
+pub struct CharacterData {
+    pub chara_ids: FnvHashSet<i32>,
+    pub chara_names: FnvHashMap<i32, String>
+}
+
+impl CharacterData {
+    pub fn load_from_db() -> Result<Self, rusqlite::Error> {
+        let mut chara_ids = FnvHashSet::default();
+        let mut chara_names = FnvHashMap::default();
+        
+        // open read-only + no mutex for maximum performance and zero game interference
+        let conn = Connection::open_with_flags(
+            get_masterdb_path(), 
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        )?;
+
+        // query joining chara_data (for the IDs) and text_data (for the names)
+        let mut stmt = conn.prepare(
+            "SELECT C.id, T.text 
+             FROM chara_data AS C 
+             JOIN text_data AS T ON C.id = T.\"index\" 
+             WHERE T.id = 6"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i32>(0)?, // id
+                row.get::<_, String>(1)? // name
+            ))
+        })?;
+
+        for row in rows.flatten() {
+            let (id, name) = row;
+            chara_ids.insert(id);
+            chara_names.insert(id, name);
+        }
+
+        Ok(CharacterData { chara_ids, chara_names })
+    }
+
+    pub fn exists(&self, id: i32) -> bool {
+        self.chara_ids.contains(&id)
+    }
+
+    pub fn get_name(&self, id: i32) -> String {
+        // check text_data_dict.json (category 170)
+        if let Some(category_170) = Hachimi::instance().localized_data.load().text_data_dict.get(&170) {
+            if let Some(name) = category_170.get(&id) {
+                return name.clone();
+            }
+        }
+
+        // fallback to default Japanese name from mdb
+        if let Some(name) = self.chara_names.get(&id) {
+            return name.clone();
+        }
+
+        // unknown character name
+        "???".to_string()
+    }
+}
 
 // All of this add column/param stuff could be simplified to two hash maps, but that's overkill.
 pub trait SelectQueryState {
@@ -133,7 +196,7 @@ impl TextDataQuery {
         Ok(unsafe{&mut *cfg_ptr})
     }
 
-    fn get_skill_name(index: i32) -> Option<*mut Il2CppString> {
+    pub fn get_skill_name(index: i32) -> Option<*mut Il2CppString> {
         // Return None if skill name translation is disabled
         if Hachimi::instance().config.load().disable_skill_name_translation {
             return None;
@@ -154,8 +217,8 @@ impl TextDataQuery {
                     cfg.name.as_ref()
                 })
                 .and_then(|name| { match name.line_count {
-                    1 => utils::fit_text(text, name.line_len, name.font_size),
-                    _ => utils::wrap_fit_text(text, name.line_len, name.line_count, name.font_size)
+                    1 => fit_text(text, name.line_len, name.font_size),
+                    _ => wrap_fit_text(text, name.line_len, name.line_count, name.font_size)
                     }
                 })
                 .map_or_else(
@@ -168,7 +231,7 @@ impl TextDataQuery {
         }
     }
 
-    fn get_skill_desc(index: i32) -> Option<*mut Il2CppString> {
+    pub fn get_skill_desc(index: i32) -> Option<*mut Il2CppString> {
         let localized_data = Hachimi::instance().localized_data.load();
         let text_opt = localized_data
             .text_data_dict
@@ -183,7 +246,7 @@ impl TextDataQuery {
                     cfg.is_localized = true;
                     cfg.desc.as_ref()
                 })
-                .and_then(|desc| utils::wrap_fit_text(text, desc.line_len, desc.line_count, desc.font_size))
+                .and_then(|desc| wrap_fit_text(text, desc.line_len, desc.line_count, desc.font_size))
                 .map_or_else(
                     || Some(text.to_il2cpp_string()),
                     |fitted| Some(fitted.to_il2cpp_string()),
