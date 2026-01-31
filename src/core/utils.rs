@@ -8,6 +8,27 @@ use crate::{core::Gui, il2cpp::{ext::{Il2CppStringExt, StringExt}, types::Il2Cpp
 
 use super::{Error, Hachimi};
 
+pub fn char_to_utf16_index(text: &str, char_idx: usize) -> i32 {
+    text.chars()
+        .take(char_idx)
+        .map(|c| c.len_utf16())
+        .sum::<usize>() as i32
+}
+
+pub fn utf16_to_char_index(text: &str, utf16_idx: usize) -> usize {
+    let mut current_utf16_pos = 0;
+    let mut char_pos = 0;
+    
+    for c in text.chars() {
+        if current_utf16_pos >= utf16_idx {
+            break;
+        }
+        current_utf16_pos += c.len_utf16();
+        char_pos += 1;
+    }
+    char_pos
+}
+
 pub fn concat_unix_path(left: &str, right: &str) -> String {
     let mut str = String::with_capacity(left.len() + 1 + right.len());
     str.push_str(left);

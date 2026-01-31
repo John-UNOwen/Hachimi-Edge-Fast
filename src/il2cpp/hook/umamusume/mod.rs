@@ -18,7 +18,7 @@ mod MasterMissionData;
 mod TrainingParamChangeA2U;
 pub mod WebViewDefine;
 pub mod TextFrame;
-mod PartsSingleModeSkillListItem;
+pub mod PartsSingleModeSkillListItem;
 pub mod FlashActionPlayer;
 pub mod TextRubyData;
 pub mod TextDotData;
@@ -52,6 +52,12 @@ mod ApplicationSettingSaveLoader;
 mod LiveTheaterCharaSelect;
 mod LiveTheaterViewController;
 pub mod CySpringController;
+mod LiveUtil;
+pub mod MasterDataUtil;
+pub mod DialogCommonBase;
+pub mod DialogObject;
+pub mod ImageCommon;
+pub mod TimeUtil;
 pub mod CameraData;
 
 #[cfg(target_os = "windows")]
@@ -117,6 +123,12 @@ pub fn init() {
     LiveTheaterCharaSelect::init(image);
     LiveTheaterViewController::init(image);
     CySpringController::init(image);
+    LiveUtil::init(image);
+    MasterDataUtil::init(image);
+    DialogCommonBase::init(image);
+    DialogObject::init(image);
+    ImageCommon::init(image);
+    TimeUtil::init(image);
 
     #[cfg(target_os = "windows")]
     {

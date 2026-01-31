@@ -65,7 +65,7 @@ pub fn open_app_or_fallback(package_name: &str, activity_class: &str, fallback_u
         }
         
         info!("open_app_or_fallback: Launch failed for {}, falling back to URL {}", package_name, fallback_url);
-        let url_ptr = fallback_url.to_string().to_il2cpp_string();
+        let url_ptr = fallback_url.to_il2cpp_string();
         Application::OpenURL(url_ptr);
     }
 }
