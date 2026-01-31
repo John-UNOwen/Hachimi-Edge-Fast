@@ -1,6 +1,6 @@
 [package]
 name = "hachimi"
-version = "0.21.6"
+version = "0.22.0"
 rust-version = "1.91.1"
 edition = "2021"
 
@@ -9,7 +9,10 @@ name = "hachimi"
 crate-type = ["cdylib"]
 
 [profile.release]
+opt-level = "z"
 strip = true
+lto = "fat"
+codegen-units = 1
 
 [profile.dev]
 debug = "limited"
@@ -42,6 +45,7 @@ unicode-width = "0.1"
 tiny_http = "0.12"
 rust-i18n = "3.1"
 sys-locale = "0.3.2"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 simplelog = "0.12.2"
 
 [target.'cfg(target_os = "android")'.dependencies]
