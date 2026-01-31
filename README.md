@@ -1,6 +1,6 @@
 <img align="left" width="80" height="80" src="assets/icon.png">
 
-# Hachimi
+# Hachimi Edge
 
 English | [简体中文](README-zh_cn.md) | [繁體中文](README-zh_tw.md)
 
