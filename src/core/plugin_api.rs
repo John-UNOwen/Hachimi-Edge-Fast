@@ -326,9 +326,8 @@ unsafe extern "C" fn gui_ui_text_edit_singleline(
     let end = bytes.iter().position(|b| *b == 0).unwrap_or(buffer_len);
     let mut value = String::from_utf8_lossy(&bytes[..end]).into_owned();
     let response = ui.add(egui::TextEdit::singleline(&mut value).desired_width(80.0));
-    if response.clicked() || response.gained_focus() {
-        gui::request_ime();
-    }
+    #[cfg(target_os = "android")]
+    gui::handle_android_keyboard(&response, &mut value);
     if response.gained_focus() {
         response.scroll_to_me(Some(Align::Center));
     }

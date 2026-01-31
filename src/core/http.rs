@@ -95,7 +95,7 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
     };
 
     if use_parallel {
-        let mut downloaded_file = fs::File::create(file_path)?;
+        let downloaded_file = fs::File::create(file_path)?;
         downloaded_file.set_len(actual_length)?;
         drop(downloaded_file);
 

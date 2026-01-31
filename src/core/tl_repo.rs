@@ -8,7 +8,7 @@ use size::Size;
 use thread_priority::{ThreadBuilderExt, ThreadPriority};
 
 use crate::core::game::Region;
-use super::{gui::SimpleYesNoDialog, hachimi::{LocalizedData, Language}, http::{self, AsyncRequest}, utils, Error, Gui, Hachimi};
+use super::{gui::SimpleYesNoDialog, hachimi::LocalizedData, http::{self, AsyncRequest}, utils, Error, Gui, Hachimi};
 use once_cell::sync::Lazy;
 
 #[derive(Deserialize)]
@@ -89,8 +89,10 @@ struct UpdateInfo {
     is_new_repo: bool,
     cached_files: FnvHashMap<String, String>, // from repo cache
     size: usize,
-    // New fields for better user communication
+    // New fields for better user communication, idk why it complains about these never being read
+    #[allow(dead_code)]
     update_size: usize,      // Size of changed files only
+    #[allow(dead_code)]
     total_size: usize,       // Total size of all files (for ZIP downloads)
     will_use_zip: bool,      // Whether ZIP download will be used
 }
@@ -551,6 +553,8 @@ impl Updater {
         cached_files: Arc<Mutex<FnvHashMap<String, String>>>
     ) -> Result<usize, Error> {
         let zip_path = localized_data_dir.join(".tmp.zip");
+        // idk compiler going monkey mode unless i add this
+        #[allow(unused_assignments)]
         let mut error_count = 0;
 
         {

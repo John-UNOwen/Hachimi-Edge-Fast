@@ -507,10 +507,10 @@ pub fn scale_to_aspect_ratio(sizes: (i32, i32), aspect_ratio: f32, prefer_larger
     let scale_by_height = if prefer_larger { height > width } else { width > height };
     if scale_by_height {
         width = (height as f32 * aspect_ratio).round() as i32;
-        height = height;
+        // height = height;
     }
     else {
-        width = width;
+        // width = width;
         height = (width as f32 / aspect_ratio).round() as i32;
     }
 
@@ -521,6 +521,19 @@ pub fn get_file_modified_time<P: AsRef<Path>>(path: P) -> Option<SystemTime> {
     let metadata = std::fs::metadata(path).ok()?;
     if !metadata.is_file() { return None; }
     metadata.modified().ok()
+}
+
+pub fn get_masterdb_path() -> String {
+    #[cfg(target_os = "android")]
+    {
+        format!("/data/data/{}/files/master/master.mdb", Hachimi::instance().game.package_name)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let base = unsafe { (*crate::il2cpp::hook::UnityEngine_CoreModule::Application::get_persistentDataPath()).as_utf16str() }.to_string();
+        format!("{}/master/master.mdb", base)
+    }
 }
 
 // Intentionally dumb png loader implementation that only loads RGBA8 images
