@@ -1,4 +1,4 @@
-hachimi: "Hachimi"
+hachimi: "Hachimi Edge"
 
 windows:
   menu_open_key: "Flecha Derecha"
@@ -8,6 +8,8 @@ android:
 
 splash_sub: "\uf015 Pulsa %{open_key_str} para abrir el menú."
 loading_label: "Cargando..."
+search_filter: "Escribe para buscar..."
+open: "Abrir"
 cancel: "Cancelar"
 save: "Guardar"
 done: "Listo"
@@ -29,6 +31,7 @@ in_game_browser_confirm_content: "¿Seguro que quieres abrir el navegador del ju
 browser_dialog_title: "Navegador"
 
 menu:
+  check_for_updates: "\uf0aa Buscar actualizaciones"
   fps_text: "FPS: %{fps}"
   close_menu: "\uf00d Cerrar menú"
   stats_heading: "\uf022 Estadísticas"
@@ -44,8 +47,8 @@ menu:
   stay_on_top: "Siempre visible"
   translation_heading: "\uf02d Traducción"
   reload_localized_data: "\uf021 Recargar datos localizados"
-  check_for_updates: "\uf0aa Buscar actualizaciones"
-  check_for_updates_pedantic: "\uf0aa Buscar actualizaciones (exhaustivo)"
+  tl_check_for_updates: "\uf0aa Buscar actualizaciones de traducción"
+  tl_check_for_updates_pedantic: "\uf0aa Buscar actualizaciones de traducción (exhaustivo)"
   dump_localize_dict: "Exportar localize dict"
   danger_zone_heading: "\uf071 Zona Peligrosa"
   danger_zone_warning: "Las siguientes opciones podrían tener efectos adversos en el juego. ¡Úsalas con precaución!"
@@ -68,7 +71,7 @@ notification:
   no_updates: "No hay actualizaciones."
   press_to_set_menu_key: "Pulsa una tecla para establecer la tecla que abre el menú."
   menu_open_key_set: "Tecla para abrir el menú: %{key}"
-  ipc_softreset_exec: "Reinicio suave (IPC) ejecutado con éxito."
+  ipc_softreset_exec: "Se ha ejecutado un reinicio suave remoto (IPC)."
 
 
 first_time_setup:
@@ -96,9 +99,10 @@ first_time_setup:
 
 about:
   title: "Acerca de"
-  copyright: "© 2024-%{year} LeadRDRK y contribuidores"
+  copyright: "© 2024-%{year} LeadRDRK, kairusds y contribuidores"
   view_license: "Ver licencia"
-  check_for_updates: "Buscar actualizaciones"
+  open_website: "Abrir sitio web"
+  view_source_code: "Ver código fuente"
 
 license:
   title: "Licencia"
@@ -119,6 +123,7 @@ config_editor:
     Esta opción desactivará el overlay de Hachimi una vez reinicies el juego.
     Esto se traduce en que NO podrás acceder al Editor de Configuración tras ello.
     Si no es un cambio intencional, cierra este diálogo y DESACTIVA esta opción.
+  meta_index_url: "URL meta de traducciones"
   debug_mode: "Modo depuración"
   translator_mode: "Modo traductor"
   skip_first_time_setup: "Omitir instalación inicial"
@@ -138,7 +143,7 @@ config_editor:
   target_fps: "FPS objetivo"
   virtual_resolution_multiplier: "Multiplicador de\nresolución virtual"
   ui_scale: "Escala del UI"
-  gui_scale: "Escala del overlay"
+  gui_scale: "Escala de la superposición"
   ui_animation_scale: "Escala de\nanimación del UI"
   graphics_quality: "Calidad gráfica"
   vsync: "VSync"
@@ -169,6 +174,10 @@ config_editor:
   menu_open_key_set: "Establecer"
   render_scale: "Escala de renderizado"
   aniso_level: "Filtrado anisotrópico"
+  live_vocals_swap: "Cambio de voces en vivo"
+  live_vocals_swap_character_n: "Personaje %{index}"
+  skill_info_dialog: "Mostrar info. de\nhabilidad en la GUI"
+  homescreen_bgseason: "Temporada de fondo\nde la pantalla principal"
   shadow_resolution: "Resolución de sombras"
 
 tl_update_dialog:

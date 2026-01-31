@@ -1,4 +1,4 @@
-hachimi: "Hachimi"
+hachimi: "Hachimi Edge"
 
 windows:
   menu_open_key: "Mũi tên phải"
@@ -8,6 +8,8 @@ android:
 
 splash_sub: "\uf015 Nhấn nút %{open_key_str} để mở menu."
 loading_label: "Đang tải..."
+search_filter: "Nhập để tìm kiếm..."
+open: "Mở"
 cancel: "Hủy"
 save: "Lưu"
 done: "Hoàn tất"
@@ -29,6 +31,7 @@ in_game_browser_confirm_content: "Bạn có muốn mở trình duyệt trong gam
 browser_dialog_title: "Trình duyệt"
 
 menu:
+  check_for_updates: "\uf0aa Kiểm tra cập nhật"
   fps_text: "FPS: %{fps}"
   close_menu: "\uf00d Đóng menu"
   stats_heading: "\uf022 Thống kê"
@@ -44,8 +47,8 @@ menu:
   stay_on_top: "Giữ cửa sổ trên cùng"
   translation_heading: "\uf02d Bản dịch"
   reload_localized_data: "\uf021 Tải lại dữ liệu dịch"
-  check_for_updates: "\uf0aa Kiểm tra cập nhật"
-  check_for_updates_pedantic: "\uf0aa Kiểm tra cập nhật (sâu)"
+  tl_check_for_updates: "\uf0aa Kiểm tra cập nhật bản dịch"
+  tl_check_for_updates_pedantic: "\uf0aa Kiểm tra cập nhật bản dịch (sâu)"
   dump_localize_dict: "Xuất file localize dict"
   danger_zone_heading: "\uf071 Vùng nguy hiểm"
   danger_zone_warning: "Những lựa chọn này có thể gây ra các tác dụng không mong muốn. Hãy sử dụng cẩn thận!"
@@ -83,9 +86,10 @@ first_time_setup:
 
 about:
   title: "Giới thiệu"
-  copyright: "© 2024-%{year} LeadRDRK and contributors"
+  copyright: "© 2024-%{year} LeadRDRK, kairusds and contributors"
   view_license: "Xem bản quyền"
-  check_for_updates: "Kiểm tra cập nhật"
+  open_website: "Mở trang web"
+  view_source_code: "Xem mã nguồn"
 
 license:
   title: "Bản quyền"
@@ -105,6 +109,7 @@ config_editor:
     Tùy chọn này sẽ tắt GUI của Hachimi sau khi bạn khởi động lại game,
     nghĩa là bạn sẽ KHÔNG thể truy cập trình chỉnh sửa cài đặt nữa.
     Nếu như bạn không có ý định này, hãy đóng hộp thoại và TẮT tùy chọn.
+  meta_index_url: "URL Meta bản dịch"
   debug_mode: "Chế độ gỡ lỗi"
   translator_mode: "Chế độ dịch"
   skip_first_time_setup: "Bỏ qua thiết lập\nlần đầu"
@@ -144,6 +149,10 @@ config_editor:
   menu_open_key_set: "Nhấn để thiết lập"
   render_scale: "Tỷ lệ kết xuất"
   aniso_level: "Lọc dị hướng"
+  live_vocals_swap: "Thay đổi giọng hát trực tiếp"
+  live_vocals_swap_character_n: "Nhân vật %{index}"
+  skill_info_dialog: "Hiện thông tin\nkỹ năng trên GUI"
+  homescreen_bgseason: "Mùa nền\nMàn hình chính"
   shadow_resolution: "Độ phân giải bóng đổ"
 
 tl_update_dialog:

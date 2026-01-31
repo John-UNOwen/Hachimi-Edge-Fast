@@ -1,4 +1,4 @@
-hachimi: "Hachimi"
+hachimi: "Hachimi Edge"
 
 windows:
   menu_open_key: "Right arrow"
@@ -8,6 +8,8 @@ android:
 
 splash_sub: "\uf015 Press %{open_key_str} to open menu."
 loading_label: "Loading..."
+search_filter: "Type to search..."
+open: "Open"
 cancel: "Cancel"
 save: "Save"
 done: "Done"
@@ -29,6 +31,7 @@ in_game_browser_confirm_content: "Are you sure you want to open the in-game brow
 browser_dialog_title: "Browser"
 
 menu:
+  check_for_updates: "\uf0aa Check for updates"
   fps_text: "FPS: %{fps}"
   close_menu: "\uf00d Close menu"
   stats_heading: "\uf022 Stats"
@@ -44,8 +47,8 @@ menu:
   stay_on_top: "Stay on top"
   translation_heading: "\uf02d Translation"
   reload_localized_data: "\uf021 Reload localized data"
-  check_for_updates: "\uf0aa Check for updates"
-  check_for_updates_pedantic: "\uf0aa Check for updates (pedantic)"
+  tl_check_for_updates: "\uf0aa Check for translation updates"
+  tl_check_for_updates_pedantic: "\uf0aa Check for translation updates (pedantic)"
   dump_localize_dict: "Dump localize dict"
   danger_zone_heading: "\uf071 Danger Zone"
   danger_zone_warning: "These options might have unintended effects on the game. Use with caution!"
@@ -58,6 +61,7 @@ notification:
   saved_localize_dump: "Saved to localize_dump.json"
   config_reloaded: "Config reloaded."
   config_saved: "Config saved."
+  config_error: "The config has been corrupted. Using defaults instead..."
   localized_data_reloaded: "Localized data reloaded."
   checking_for_tl_updates: "Checking for translation updates..."
   no_tl_updates: "No translation updates available."
@@ -93,12 +97,21 @@ first_time_setup:
 
 about:
   title: "About"
-  copyright: "© 2024-%{year} LeadRDRK and contributors"
+  copyright: "© 2024-%{year} LeadRDRK, kairusds and contributors"
   view_license: "View license"
-  check_for_updates: "Check for updates"
+  open_website: "Open website"
+  view_source_code: "View source code"
 
 license:
   title: "License"
+  gpl_v3_only_notice: "GPL-3.0-only License Text"
+  font_alibaba_header: "Alibaba PuHuiTi 3.0"
+  font_alibaba_body: "Copyright (c) 2020-2023 Alibaba (China) Co., Ltd. All rights reserved."
+  ofl_fonts_header: "This software bundles the following fonts under the SIL Open Font License 1.1:"
+  font_noto_sans_jp: "Noto Sans JP:\nCopyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'"
+  font_noto_sans: "Noto Sans:\nCopyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)"
+  font_font_awesome: "Font Awesome Version 4.7.0:\nCopyright Dave Gandy (https://fontawesome.com) 2016. All rights reserved."
+  ofl_notice: "SIL OFL 1.1 License Text"
 
 tl_updater:
   title: "Updating..."
@@ -116,6 +129,7 @@ config_editor:
     This option will disable the Hachimi overlay after you restart the game,
     which means that you will NOT be able to access the Config Editor after this.
     If this was not intentional, close this dialog and DISABLE the option.
+  meta_index_url: "Translations Meta URL"
   debug_mode: "Debug mode"
   enable_file_logging: "Enable file logging"
   translator_mode: "Translator mode"
@@ -166,6 +180,10 @@ config_editor:
   msaa: "MSAA"
   render_scale: "Render Scale"
   aniso_level: "Anisotropic Filtering"
+  live_vocals_swap: "Live Vocals Swap"
+  live_vocals_swap_character_n: "Character %{index}"
+  skill_info_dialog: "Show skill info in GUI"
+  homescreen_bgseason: "Homescreen Background\nSeason"
   shadow_resolution: "Shadow Resolution"
 
 tl_update_dialog:

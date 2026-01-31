@@ -1,4 +1,4 @@
-hachimi: "Hachimi"
+hachimi: "Hachimi Edge"
 
 windows:
   menu_open_key: "右方向键"
@@ -8,6 +8,8 @@ android:
 
 splash_sub: "\uf015 按 %{open_key_str} 打开菜单"
 loading_label: "加载中..."
+search_filter: "输入以搜索..."
+open: "打开"
 cancel: "取消"
 save: "保存"
 done: "完成"
@@ -29,6 +31,7 @@ in_game_browser_confirm_content: "确定要打开游戏内浏览器吗？"
 browser_dialog_title: "浏览器"
 
 menu:
+  check_for_updates: "\uf0aa 检查更新"
   fps_text: "帧率: %{fps}"
   close_menu: "\uf00d 关闭菜单"
   stats_heading: "\uf022 统计数据"
@@ -44,8 +47,8 @@ menu:
   stay_on_top: "窗口置顶"
   translation_heading: "\uf02d 翻译"
   reload_localized_data: "\uf021 重新加载本地化数据"
-  check_for_updates: "\uf0aa 检查更新"
-  check_for_updates_pedantic: "\uf0aa 检查更新（详细）"
+  tl_check_for_updates: "\uf0aa 检查翻译更新"
+  tl_check_for_updates_pedantic: "\uf0aa 检查翻译更新（详细）"
   dump_localize_dict: "导出本地化字典"
   danger_zone_heading: "\uf071 危险操作"
   danger_zone_warning: "这些选项可能会对游戏产生异常影响，请谨慎使用！"
@@ -93,9 +96,10 @@ first_time_setup:
 
 about:
   title: "关于"
-  copyright: "© 2024-%{year} LeadRDRK 及贡献者"
+  copyright: "© 2024-%{year} LeadRDRK, kairusds 及贡献者"
   view_license: "查看许可证"
-  check_for_updates: "检查更新"
+  open_website: "打开网站"
+  view_source_code: "查看源代码"
 
 license:
   title: "许可证"
@@ -116,6 +120,7 @@ config_editor:
     此选项将在游戏重启后禁用Hachimi的GUI，
     您将无法再访问配置编辑器。
     如非本意，请关闭此窗口并禁用此选项。
+  meta_index_url: "翻译 Meta URL"
   debug_mode: "调试模式"
   translator_mode: "翻译者模式"
   skip_first_time_setup: "跳过初始化设置"
@@ -162,6 +167,10 @@ config_editor:
   menu_open_key_set: "按下以设置"
   render_scale: "渲染比例"
   aniso_level: "各向异性过滤"
+  live_vocals_swap: "Live演唱人声切换"
+  live_vocals_swap_character_n: "角色 %{index}"
+  skill_info_dialog: "在GUI中显示技能信息"
+  homescreen_bgseason: "主界面背景季节"
   shadow_resolution: "阴影分辨率"
 
 tl_update_dialog:

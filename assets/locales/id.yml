@@ -1,4 +1,4 @@
-hachimi: "Hachimi"
+hachimi: "Hachimi Edge"
 
 windows:
   menu_open_key: "Arrow Key - Kanan"
@@ -8,6 +8,8 @@ android:
 
 splash_sub: "\uf015 Tekan %{open_key_str} untuk buka menu."
 loading_label: "Memuat..."
+search_filter: "Ketik untuk mencari..."
+open: "Buka"
 cancel: "Batal"
 save: "Simpan"
 done: "Selesai"
@@ -29,6 +31,7 @@ in_game_browser_confirm_content: "Apa kamu yakin ingin buka peramban web dalam g
 browser_dialog_title: "Peramban Web"
 
 menu:
+  check_for_updates: "\uf0aa Cek pembaruan"
   fps_text: "FPS: %{fps}"
   close_menu: "\uf00d Tutup menu"
   stats_heading: "\uf022 Status"
@@ -44,8 +47,8 @@ menu:
   stay_on_top: "Sematkan di atas"
   translation_heading: "\uf02d Translasi"
   reload_localized_data: "\uf021 Muat ulang data lokalisasi"
-  check_for_updates: "\uf0aa Cek pembaruan"
-  check_for_updates_pedantic: "\uf0aa Cek pembaruan (pedantik/ketat)"
+  tl_check_for_updates: "\uf0aa Periksa pembaruan terjemahan"
+  tl_check_for_updates_pedantic: "\uf0aa Periksa pembaruan terjemahan (pedantik/ketat)"
   dump_localize_dict: "Ekstrak localize_dump"
   danger_zone_heading: "\uf071 Zona Rawan"
   danger_zone_warning: "Hati-hati!\nMenggunakan opsi di bawah akan membuat game tidak stabil."
@@ -93,9 +96,10 @@ first_time_setup:
 
 about:
   title: "Tentang"
-  copyright: "© 2024-%{year} LeadRDRK dan kontributor"
+  copyright: "© 2024-%{year} LeadRDRK, kairusds dan kontributor"
   view_license: "Lihat lisensi"
-  check_for_updates: "Cek pembaruan"
+  open_website: "Buka situs web"
+  view_source_code: "Lihat kode sumber"
 
 license:
   title: "Lisensi"
@@ -116,6 +120,7 @@ config_editor:
     Opsi ini akan mematikan overlay (GUI) Hachimi.
     Kamu tidak bisa mengakses editor konfigurasi setelah kamu memulai ulang game.
     Jika tidak disengaja dinyalakan, mohon tutup dialog ini dan matikan opsinya!
+  meta_index_url: "URL Meta Terjemahan"
   debug_mode: "Mode Debug"
   translator_mode: "Mode Translasi"
   skip_first_time_setup: "Lewati setup\npertama kali"
@@ -165,6 +170,10 @@ config_editor:
   msaa: "MSAA"
   render_scale: "Skala render"
   aniso_level: "Filter Anisotropik"
+  live_vocals_swap: "Tukar Vokal Langsung"
+  live_vocals_swap_character_n: "Karakter %{index}"
+  skill_info_dialog: "Tampilkan info skill di GUI"
+  homescreen_bgseason: "Musim Latar Belakang\nLayar Beranda"
   shadow_resolution: "Resolusi Bayangan"
 
 tl_update_dialog:
