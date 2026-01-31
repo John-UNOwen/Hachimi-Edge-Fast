@@ -111,6 +111,7 @@ config_editor:
     Nếu như bạn không có ý định này, hãy đóng hộp thoại và TẮT tùy chọn.
   meta_index_url: "URL Meta bản dịch"
   debug_mode: "Chế độ gỡ lỗi"
+  enable_file_logging: "Bật ghi nhật\nký tệp"
   translator_mode: "Chế độ dịch"
   skip_first_time_setup: "Bỏ qua thiết lập\nlần đầu"
   disable_auto_update_check: "Tắt kiểm tra cập\nnhật tự động"

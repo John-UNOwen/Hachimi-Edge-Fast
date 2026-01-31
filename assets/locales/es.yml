@@ -125,6 +125,7 @@ config_editor:
     Si no es un cambio intencional, cierra este diálogo y DESACTIVA esta opción.
   meta_index_url: "URL meta de traducciones"
   debug_mode: "Modo depuración"
+  enable_file_logging: "Habilitar registro\nen archivo"
   translator_mode: "Modo traductor"
   skip_first_time_setup: "Omitir instalación inicial"
   disable_auto_update_check: "Desactivar búsquedas\nde actualizaciones"

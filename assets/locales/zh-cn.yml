@@ -122,6 +122,7 @@ config_editor:
     如非本意，请关闭此窗口并禁用此选项。
   meta_index_url: "翻译 Meta URL"
   debug_mode: "调试模式"
+  enable_file_logging: "启用文件日志记录"
   translator_mode: "翻译者模式"
   skip_first_time_setup: "跳过初始化设置"
   disable_auto_update_check: "禁用自动更新检查"

@@ -122,6 +122,7 @@ config_editor:
     Jika tidak disengaja dinyalakan, mohon tutup dialog ini dan matikan opsinya!
   meta_index_url: "URL Meta Terjemahan"
   debug_mode: "Mode Debug"
+  enable_file_logging: "Aktifkan pencatatan\nfile"
   translator_mode: "Mode Translasi"
   skip_first_time_setup: "Lewati setup\npertama kali"
   disable_auto_update_check: "Matikan cek\npembaruan otomatis"
