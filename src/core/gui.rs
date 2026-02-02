@@ -1,8 +1,16 @@
-use std::{borrow::Cow, collections::HashMap, ops::RangeInclusive, os::raw::c_void, panic::{self, AssertUnwindSafe}, sync::{atomic::{self, AtomicBool}, Arc, Mutex}, thread, time::Instant};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    ops::RangeInclusive,
+    os::raw::c_void,
+    panic::{self, AssertUnwindSafe},
+    sync::{atomic::{self, AtomicBool}, Arc, LazyLock, Mutex, OnceLock},
+    thread,
+    time::Instant
+};
 
 use egui_scale::EguiScale;
-use fnv::{FnvHashSet, FnvHashMap};
-use once_cell::sync::{Lazy, OnceCell};
+use fnv::FnvHashSet;
 use rust_i18n::t;
 use chrono::{Utc, Datelike};
 
@@ -12,15 +20,14 @@ use crate::il2cpp::{
         umamusume::{CameraData::ShadowResolution, CySpringController::SpringUpdateMode, GameSystem, GraphicSettings::{GraphicsQuality, MsaaQuality}, Localize, TimeUtil::BgSeason},
         UnityEngine_CoreModule::{Application, Texture::AnisoLevel}
     },
-    symbols::Thread,
-    types::Il2CppObject
+    symbols::Thread
 };
 
 #[cfg(target_os = "android")]
 use crate::il2cpp::{
     hook::{umamusume::WebViewManager, UnityEngine_CoreModule::{TouchScreenKeyboard, TouchScreenKeyboardType}},
     symbols::GCHandle,
-    types::{Il2CppString, RangeInt}
+    types::{Il2CppObject, Il2CppString, RangeInt}
 };
 
 #[cfg(target_os = "windows")]
@@ -30,7 +37,7 @@ use super::{
     hachimi::{self, Language, REPO_PATH, WEBSITE_URL},
     http::AsyncRequest,
     tl_repo::{self, RepoInfo},
-    utils,
+    utils::{self, SendPtr},
     Hachimi
 };
 
@@ -44,41 +51,18 @@ macro_rules! add_font {
     };
 }
 
-use egui::Color32;
+static PENDING_THEME: Mutex<Option<hachimi::Config>> = Mutex::new(None);
 
-static UNITY_COLORS: std::sync::OnceLock<FnvHashMap<&'static str, Color32>> = std::sync::OnceLock::new();
-pub fn get_unity_colors() -> &'static FnvHashMap<&'static str, Color32> {
-    UNITY_COLORS.get_or_init(|| {
-        let mut m = FnvHashMap::with_capacity_and_hasher(22, Default::default());
-        m.insert("aqua", Color32::from_rgb(0, 255, 255));
-        m.insert("cyan", Color32::from_rgb(0, 255, 255));
-        m.insert("black", Color32::from_rgb(0, 0, 0));
-        m.insert("blue", Color32::from_rgb(0, 0, 255));
-        m.insert("brown", Color32::from_rgb(165, 42, 42));
-        m.insert("darkblue", Color32::from_rgb(0, 0, 160));
-        m.insert("fuchsia", Color32::from_rgb(255, 0, 255));
-        m.insert("magenta", Color32::from_rgb(255, 0, 255));
-        m.insert("green", Color32::from_rgb(0, 128, 0));
-        m.insert("grey", Color32::from_rgb(128, 128, 128));
-        m.insert("lightblue", Color32::from_rgb(173, 216, 230));
-        m.insert("lime", Color32::from_rgb(0, 255, 0));
-        m.insert("maroon", Color32::from_rgb(128, 0, 0));
-        m.insert("navy", Color32::from_rgb(0, 0, 128));
-        m.insert("olive", Color32::from_rgb(128, 128, 0));
-        m.insert("orange", Color32::from_rgb(255, 165, 0));
-        m.insert("purple", Color32::from_rgb(128, 0, 128));
-        m.insert("red", Color32::from_rgb(255, 0, 0));
-        m.insert("silver", Color32::from_rgb(192, 192, 192));
-        m.insert("teal", Color32::from_rgb(0, 128, 128));
-        m.insert("white", Color32::from_rgb(255, 255, 255));
-        m.insert("yellow", Color32::from_rgb(255, 255, 0));
-        m
-    })
+pub fn enqueue_theme_preview(config: hachimi::Config) {
+    if let Ok(mut lock) = PENDING_THEME.lock() {
+        *lock = Some(config);
+    }
 }
 
 type BoxedWindow = Box<dyn Window + Send + Sync>;
 pub struct Gui {
     pub context: egui::Context,
+    config: hachimi::Config,
     pub input: egui::RawInput,
     default_style: egui::Style,
     pub gui_scale: f32,
@@ -89,6 +73,10 @@ pub struct Gui {
     last_fps_update: Instant,
     tmp_frame_count: u32,
     fps_text: String,
+    #[cfg(target_os = "android")]
+    last_focused: Option<egui::Id>,
+    #[cfg(target_os = "android")]
+    ime_cooldown: Option<Instant>,
 
     show_menu: bool,
 
@@ -110,17 +98,15 @@ pub struct Gui {
 }
 
 const PIXELS_PER_POINT_RATIO: f32 = 3.0/1080.0;
-const BACKGROUND_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(27, 27, 27, 220);
-const TEXT_COLOR: egui::Color32 = egui::Color32::from_gray(170);
 
-static INSTANCE: OnceCell<Mutex<Gui>> = OnceCell::new();
+static INSTANCE: OnceLock<Mutex<Gui>> = OnceLock::new();
 static IS_CONSUMING_INPUT: AtomicBool = AtomicBool::new(false);
-static mut DISABLED_GAME_UIS: once_cell::unsync::Lazy<FnvHashSet<*mut Il2CppObject>> =
-    once_cell::unsync::Lazy::new(|| FnvHashSet::default());
-static PLUGIN_MENU_ITEMS: Lazy<Mutex<Vec<PluginMenuItem>>> = Lazy::new(|| Mutex::new(Vec::new()));
-static PLUGIN_MENU_SECTIONS: Lazy<Mutex<Vec<PluginMenuSection>>> = Lazy::new(|| Mutex::new(Vec::new()));
-static PLUGIN_MENU_ICONS: Lazy<Mutex<HashMap<String, PluginMenuIcon>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-static PLUGIN_NOTIFICATIONS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static DISABLED_GAME_UIS: LazyLock<Mutex<FnvHashSet<SendPtr>>> =
+    LazyLock::new(|| Mutex::new(FnvHashSet::default()));
+static PLUGIN_MENU_ITEMS: LazyLock<Mutex<Vec<PluginMenuItem>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static PLUGIN_MENU_SECTIONS: LazyLock<Mutex<Vec<PluginMenuSection>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static PLUGIN_MENU_ICONS: LazyLock<Mutex<HashMap<String, PluginMenuIcon>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static PLUGIN_NOTIFICATIONS: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub type PluginMenuCallback = extern "C" fn(userdata: *mut c_void);
 pub type PluginMenuSectionCallback = extern "C" fn(ui: *mut c_void, userdata: *mut c_void);
@@ -225,11 +211,20 @@ static PENDING_KEYBOARD_TEXT: AtomicPtr<Il2CppString> = AtomicPtr::new(std::ptr:
 #[cfg(target_os = "android")]
 static ACTIVE_KEYBOARD: AtomicPtr<Il2CppObject> = AtomicPtr::new(std::ptr::null_mut());
 #[cfg(target_os = "android")]
-pub static KEYBOARD_GC_HANDLE: Lazy<Mutex<Option<GCHandle>>> = Lazy::new(|| Mutex::default());
+pub static KEYBOARD_GC_HANDLE: LazyLock<Mutex<Option<GCHandle>>> = LazyLock::new(|| Mutex::default());
 #[cfg(target_os = "android")]
-static KEYBOARD_SELECTION: std::sync::LazyLock<Mutex<RangeInt>> = std::sync::LazyLock::new(|| {
+static KEYBOARD_SELECTION: LazyLock<Mutex<RangeInt>> = LazyLock::new(|| {
     Mutex::new(RangeInt::new(0, 1))
 });
+#[cfg(target_os = "android")]
+pub static KEYBOARD_OWNER: LazyLock<Mutex<Option<KeyboardOwner>>> = 
+    LazyLock::new(|| Mutex::new(None));
+#[cfg(target_os = "android")]
+#[derive(PartialEq)]
+pub enum KeyboardOwner {
+    JNI(egui::Id),
+    Unity(egui::Id)
+}
 
 fn get_scale_salt(ctx: &egui::Context) -> f32 {
     ctx.data(|d| d.get_temp::<f32>(egui::Id::new("gui_scale_salt"))).unwrap_or(1.0)
@@ -241,11 +236,15 @@ fn get_scale(ctx: &egui::Context) -> f32 {
 
 #[cfg(target_os = "android")]
 fn is_ime_visible() -> bool {
-    let kb_ptr = ACTIVE_KEYBOARD.load(Ordering::Relaxed);
-    if kb_ptr.is_null() {
-        return false;
-    }
-    TouchScreenKeyboard::get_status(kb_ptr) == TouchScreenKeyboard::Status::Visible
+    let kb_ptr = ACTIVE_KEYBOARD.load(Ordering::Acquire);
+    let unity_visible = if !kb_ptr.is_null() {
+        TouchScreenKeyboard::get_status(kb_ptr) == TouchScreenKeyboard::Status::Visible
+    } else {
+        false
+    };
+    let jni_visible = crate::android::utils::IS_IME_VISIBLE.load(Ordering::Acquire);
+
+    unity_visible || jni_visible
 }
 
 #[cfg(target_os = "android")]
@@ -258,14 +257,26 @@ fn ime_scroll_padding(ctx: &egui::Context) -> f32 {
 
 #[cfg(target_os = "android")]
 pub fn handle_android_keyboard<T: 'static>(res: &egui::Response, val: &mut T) {
-    if res.lost_focus() {
-        let kb_ptr = ACTIVE_KEYBOARD.load(Ordering::Relaxed);
-        if !kb_ptr.is_null() {
-            TouchScreenKeyboard::set_active(kb_ptr, false);
-            ACTIVE_KEYBOARD.store(std::ptr::null_mut(), Ordering::Relaxed);
-            *KEYBOARD_GC_HANDLE.lock().unwrap() = None;
+    {
+        let Ok(mut owner_lock) = KEYBOARD_OWNER.try_lock() else { return; };
+        if let Some(KeyboardOwner::JNI(_)) = *owner_lock {
+            return;
         }
-        return;
+
+        if res.lost_focus() {
+            if let Some(KeyboardOwner::Unity(id)) = *owner_lock {
+                if id == res.id {
+                    let kb_ptr = ACTIVE_KEYBOARD.load(Ordering::Acquire);
+                    if !kb_ptr.is_null() {
+                        TouchScreenKeyboard::set_active(kb_ptr, false);
+                        ACTIVE_KEYBOARD.store(std::ptr::null_mut(), Ordering::Release);
+                        *KEYBOARD_GC_HANDLE.lock().unwrap() = None;
+                    }
+                    *owner_lock = None;
+                }
+            }
+            return;
+        }
     }
 
     if !res.has_focus() {
@@ -276,25 +287,30 @@ pub fn handle_android_keyboard<T: 'static>(res: &egui::Response, val: &mut T) {
     use egui::{text::{CCursor, CCursorRange}, widgets::text_edit::TextEditState};
 
     let val_any = val as &dyn std::any::Any;
-    PENDING_KB_TYPE.store(TouchScreenKeyboardType::KeyboardType::Default as i32, Ordering::Relaxed);
+    PENDING_KB_TYPE.store(TouchScreenKeyboardType::KeyboardType::Default as i32, Ordering::Release);
 
     let text = if let Some(s) = val_any.downcast_ref::<String>() {
         s.clone()
     } else if let Some(f) = val_any.downcast_ref::<f32>() {
-        PENDING_KB_TYPE.store(TouchScreenKeyboardType::KeyboardType::DecimalPad as i32, Ordering::Relaxed);
+        PENDING_KB_TYPE.store(TouchScreenKeyboardType::KeyboardType::DecimalPad as i32, Ordering::Release);
         if f.fract() == 0.0 { format!("{:.1}", f) } else { f.to_string() }
     } else if let Some(i) = val_any.downcast_ref::<i32>() {
-        PENDING_KB_TYPE.store(TouchScreenKeyboardType::KeyboardType::NumberPad as i32, Ordering::Relaxed);
+        PENDING_KB_TYPE.store(TouchScreenKeyboardType::KeyboardType::NumberPad as i32, Ordering::Release);
         i.to_string()
     } else {
         String::new() 
     };
     
     if res.gained_focus() {
+        {
+            let mut owner_lock = KEYBOARD_OWNER.lock().unwrap();
+            *owner_lock = Some(KeyboardOwner::Unity(res.id));
+        }
+
         res.scroll_to_me(Some(egui::Align::Center));
 
         let ptr = text.to_il2cpp_string();
-        PENDING_KEYBOARD_TEXT.store(ptr, Ordering::Relaxed);
+        PENDING_KEYBOARD_TEXT.store(ptr, Ordering::Release);
 
         let initial_selection = res.ctx.data(|data| {
             data.get_temp::<TextEditState>(res.id)
@@ -313,20 +329,20 @@ pub fn handle_android_keyboard<T: 'static>(res: &egui::Response, val: &mut T) {
         *KEYBOARD_SELECTION.lock().unwrap() = initial_selection;
 
         Thread::main_thread().schedule(|| {
-            let ptr = PENDING_KEYBOARD_TEXT.swap(std::ptr::null_mut(), Ordering::Relaxed);
-            let typ: TouchScreenKeyboardType::KeyboardType = unsafe { *(&PENDING_KB_TYPE.load(Ordering::Relaxed) as *const i32 as *const TouchScreenKeyboardType::KeyboardType) };
+            let ptr = PENDING_KEYBOARD_TEXT.swap(std::ptr::null_mut(), Ordering::AcqRel);
+            let typ: TouchScreenKeyboardType::KeyboardType = unsafe { *(&PENDING_KB_TYPE.load(Ordering::Acquire) as *const i32 as *const TouchScreenKeyboardType::KeyboardType) };
 
             if !ptr.is_null() {
                 let keyboard = TouchScreenKeyboard::Open(ptr, typ, false, false, false);
                 TouchScreenKeyboard::set_selection(keyboard, *KEYBOARD_SELECTION.lock().unwrap());
                 let handle = GCHandle::new(keyboard, false);
                 *KEYBOARD_GC_HANDLE.lock().unwrap() = Some(handle);
-                ACTIVE_KEYBOARD.store(keyboard, Ordering::Relaxed);
+                ACTIVE_KEYBOARD.store(keyboard, Ordering::Release);
             }
         });
     }
 
-    let kb_ptr = ACTIVE_KEYBOARD.load(Ordering::Relaxed);
+    let kb_ptr = ACTIVE_KEYBOARD.load(Ordering::Acquire);
     if !kb_ptr.is_null() {
         let status = TouchScreenKeyboard::get_status(kb_ptr);
 
@@ -381,7 +397,7 @@ pub fn handle_android_keyboard<T: 'static>(res: &egui::Response, val: &mut T) {
                 data.remove::<egui::widgets::text_edit::TextEditState>(res.id);
             });
 
-            ACTIVE_KEYBOARD.store(std::ptr::null_mut(), Ordering::Relaxed);
+            ACTIVE_KEYBOARD.store(std::ptr::null_mut(), Ordering::Release);
             *KEYBOARD_GC_HANDLE.lock().unwrap() = None;
             res.ctx.request_repaint();
         }
@@ -389,6 +405,26 @@ pub fn handle_android_keyboard<T: 'static>(res: &egui::Response, val: &mut T) {
 }
 
 impl Gui {
+    pub fn apply_theme(ctx: &egui::Context, style: &mut egui::Style, config: &hachimi::Config) {
+        let mut visuals = egui::Visuals::dark(); // Base theme
+
+        visuals.window_fill = config.ui_window_fill;
+        visuals.panel_fill = config.ui_panel_fill;
+        visuals.extreme_bg_color = config.ui_extreme_bg_color;
+        visuals.window_corner_radius = config.ui_window_rounding.into();
+
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, config.ui_text_color);
+
+        visuals.widgets.active.bg_fill = config.ui_accent_color;
+        visuals.widgets.hovered.bg_fill = config.ui_accent_color.linear_multiply(0.8);
+        visuals.selection.bg_fill = config.ui_accent_color.linear_multiply(0.5);
+
+        visuals.override_text_color = Some(config.ui_text_color);
+
+        style.visuals = visuals.clone();
+        ctx.set_visuals(visuals);
+    }
+
     // Call this from the render thread!
     pub fn instance_or_init(
         #[cfg_attr(target_os = "windows", allow(unused))] open_key_id: &str
@@ -398,7 +434,7 @@ impl Gui {
         }
 
         let hachimi = Hachimi::instance();
-        let config = hachimi.config.load();
+        let config = (**Hachimi::instance().config.load()).clone();
 
         let context = egui::Context::default();
         egui_extras::install_image_loaders(&context);
@@ -409,14 +445,11 @@ impl Gui {
         style.spacing.button_padding = egui::Vec2::new(8.0, 5.0);
         style.interaction.selectable_labels = false;
 
-        context.set_style(style);
+        Self::apply_theme(&context, &mut style, &config);
 
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = BACKGROUND_COLOR;
-        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_COLOR);
-        context.set_visuals(visuals);
+        context.set_style(style.clone());
 
-        let default_style = context.style().as_ref().clone();
+        let default_style = style.clone();
 
         let mut fps_value = hachimi.target_fps.load(atomic::Ordering::Relaxed);
         if fps_value == -1 {
@@ -431,6 +464,7 @@ impl Gui {
         let now = Instant::now();
         let instance = Gui {
             context,
+            config,
             input: egui::RawInput::default(),
             gui_scale: 1.0,
             finalized_scale: 1.0,
@@ -440,6 +474,10 @@ impl Gui {
             last_fps_update: now,
             tmp_frame_count: 0,
             fps_text: "FPS: 0".to_string(),
+            #[cfg(target_os = "android")]
+            last_focused: None,
+            #[cfg(target_os = "android")]
+            ime_cooldown: None,
 
             show_menu: false,
 
@@ -469,6 +507,7 @@ impl Gui {
             notifications: Vec::new(),
             windows
         };
+
         unsafe {
             INSTANCE.set(Mutex::new(instance)).unwrap_unchecked();
 
@@ -487,9 +526,8 @@ impl Gui {
         let mut fonts = egui::FontDefinitions::default();
         let proportional_fonts = fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap();
 
+        add_font!(fonts, proportional_fonts, "Inter_24pt-Regular.ttf");
         add_font!(fonts, proportional_fonts, "AlibabaPuHuiTi-3-45-Light.otf");
-        add_font!(fonts, proportional_fonts, "NotoSans-Regular.ttf");
-        add_font!(fonts, proportional_fonts, "NotoSansJP-Regular.ttf");
         add_font!(fonts, proportional_fonts, "FontAwesome.otf");
 
         fonts
@@ -530,14 +568,32 @@ impl Gui {
     }
 
     pub fn run(&mut self) -> egui::FullOutput {
+        if let Ok(mut lock) = PENDING_THEME.lock() {
+            if let Some(config) = lock.take() {
+                self.config = config.clone();
+                Self::apply_theme(&self.context, &mut self.default_style, &config);
+
+                let mut style = self.default_style.clone();
+                style.scale(self.gui_scale);
+                self.context.set_style(style)
+            }
+        }
+
         self.update_fps();
         let input = self.take_input();
 
         let live_scale = Hachimi::instance().config.load().gui_scale;
-        self.gui_scale = live_scale;
+        if self.gui_scale != live_scale {
+            self.gui_scale = live_scale;
+            if !self.context.is_using_pointer() {
+                self.finalized_scale = live_scale;
+            }
 
-        if !self.context.is_using_pointer() {
-            self.finalized_scale = live_scale;
+            let mut style = self.default_style.clone();
+            if live_scale != 1.0 {
+                style.scale(live_scale);
+            }
+            self.context.set_style(style);
         }
 
         self.context.data_mut(|d| {
@@ -560,8 +616,72 @@ impl Gui {
         self.run_notifications();
 
         if self.splash_visible { self.run_splash(); }
-        if hachimi::CONFIG_LOAD_ERROR.swap(false, Ordering::Relaxed) {
+        if hachimi::CONFIG_LOAD_ERROR.swap(false, Ordering::AcqRel) {
             self.show_notification(&t!("notification.config_error"));
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            use crate::android::utils::{set_keyboard_visible, check_keyboard_status, BACK_BUTTON_PRESSED, IS_IME_VISIBLE};
+
+            let focused = self.context.memory(|m| m.focused());
+            let wants_kb = self.context.wants_keyboard_input();
+
+            if let Ok(mut owner_lock) = KEYBOARD_OWNER.try_lock() {
+                if focused.is_some() && focused != self.last_focused && wants_kb {
+                    if owner_lock.is_none() {
+                        if !IS_IME_VISIBLE.load(Ordering::Acquire) {
+                            set_keyboard_visible(true);
+                            if let Some(id) = focused {
+                                *owner_lock = Some(KeyboardOwner::JNI(id));
+                            }
+                            self.ime_cooldown = Some(Instant::now() + std::time::Duration::from_millis(500));
+                        }
+                    }
+                } else if focused.is_none() && self.last_focused.is_some() {
+                    if let Some(KeyboardOwner::JNI(_)) = *owner_lock {
+                        set_keyboard_visible(false);
+                        *owner_lock = None;
+                    }
+                }
+
+                if let Some(KeyboardOwner::JNI(_)) = *owner_lock {
+                    if BACK_BUTTON_PRESSED.swap(false, Ordering::AcqRel) {
+                        *owner_lock = None;
+                        set_keyboard_visible(false);
+                        self.context.memory_mut(|mem| mem.stop_text_input());
+                        IS_IME_VISIBLE.store(false, Ordering::Release);
+                        self.last_focused = None;
+                        self.ime_cooldown = None;
+                    }
+                }
+            }
+
+            // zombie check
+            if self.tmp_frame_count % 20 == 0 {
+                let should_check = if let Some(until) = self.ime_cooldown {
+                    Instant::now() > until
+                } else {
+                    true
+                };
+
+                if should_check && IS_IME_VISIBLE.load(Ordering::Acquire) {
+                    if !check_keyboard_status() {
+                        self.context.memory_mut(|mem| mem.stop_text_input());
+                        IS_IME_VISIBLE.store(false, Ordering::Release);
+
+                        if let Ok(mut lock) = KEYBOARD_OWNER.try_lock() {
+                            if let Some(KeyboardOwner::JNI(_)) = *lock {
+                                *lock = None;
+                            }
+                        }
+                        self.last_focused = None;
+                        self.ime_cooldown = None;
+                    }
+                }
+            }
+
+            self.last_focused = focused;
         }
 
         // Store this as an atomic value so the input thread can check it without locking the gui
@@ -600,7 +720,7 @@ impl Gui {
         })
         .show(ctx, |ui| {
             egui::Frame::NONE
-            .fill(BACKGROUND_COLOR)
+            .fill(self.config.ui_panel_fill)
             .inner_margin(egui::Margin::same((10.0 * scale) as i8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -692,8 +812,6 @@ impl Gui {
                         ui.horizontal(|ui| {
                             ui.label(t!("menu.fps_label"));
                             let res = ui.add(egui::Slider::new(&mut self.menu_fps_value, 30..=240));
-                            #[cfg(target_os = "android")]
-                            handle_android_keyboard(&res, &mut self.menu_fps_value);
                             if res.lost_focus() || res.drag_stopped() {
                                 hachimi.target_fps.store(self.menu_fps_value, atomic::Ordering::Relaxed);
                                 Thread::main_thread().schedule(|| {
@@ -904,34 +1022,36 @@ impl Gui {
         let canvas_iter = unsafe { canvas_array.as_slice().iter() };
         let an_root_iter = unsafe { an_root_array.as_slice().iter() };
 
-        if unsafe { DISABLED_GAME_UIS.is_empty() } {
+        let mut disabled_uis = DISABLED_GAME_UIS.lock().unwrap();
+
+        if disabled_uis.is_empty() {
             for canvas in canvas_iter {
                 if Behaviour::get_enabled(*canvas) {
                     Behaviour::set_enabled(*canvas, false);
-                    unsafe { DISABLED_GAME_UIS.insert(*canvas); }
+                    disabled_uis.insert(SendPtr(*canvas));
                 }
             }
             for an_root in an_root_iter {
                 let top_object = AnRoot::get__topObject(*an_root);
                 if GameObject::get_activeSelf(top_object) {
                     GameObject::SetActive(top_object, false);
-                    unsafe { DISABLED_GAME_UIS.insert(top_object); }
+                    disabled_uis.insert(SendPtr(top_object));
                 }
             }
         }
         else {
             for canvas in canvas_iter {
-                if unsafe { DISABLED_GAME_UIS.contains(canvas) } {
+                if disabled_uis.contains(&SendPtr(*canvas)) {
                     Behaviour::set_enabled(*canvas, true);
                 }
             }
             for an_root in an_root_iter {
                 let top_object = AnRoot::get__topObject(*an_root);
-                if unsafe { DISABLED_GAME_UIS.contains(&top_object) } {
+                if disabled_uis.contains(&SendPtr(top_object)) {
                     GameObject::SetActive(top_object, true);
                 }
             }
-            unsafe { DISABLED_GAME_UIS.clear(); }
+            disabled_uis.clear();
         }
     }
 
@@ -982,7 +1102,7 @@ impl Gui {
     ) -> bool {
         let mut changed = false;
         let scale = get_scale(ui.ctx());
-        let fixed_width = 135.0 * scale;
+        let fixed_width = 145.0 * scale;
         let row_height = 24.0 * scale;
         let padding = ui.spacing().button_padding;
 
@@ -1119,7 +1239,7 @@ impl Gui {
         })
         .show(ctx, |ui| {
             egui::Frame::NONE
-            .fill(BACKGROUND_COLOR)
+            .fill(self.config.ui_panel_fill)
             .inner_margin(egui::Margin::same((4.0 * scale) as i8))
             .corner_radius(4.0 * scale)
             .show(ui, |ui| {
@@ -1249,6 +1369,7 @@ fn random_id() -> egui::Id {
 
 struct Notification {
     content: String,
+    config: hachimi::Config,
     tween: TweenInOutWithDelay,
     id: egui::Id
 }
@@ -1257,6 +1378,7 @@ impl Notification {
     fn new(content: String) -> Notification {
         Notification {
             content,
+            config: (**Hachimi::instance().config.load()).clone(),
             tween: TweenInOutWithDelay::new(0.2, 3.0, Easing::OutQuad),
             id: random_id()
         }
@@ -1280,7 +1402,7 @@ impl Notification {
         )
         .show(ctx, |ui| {
             egui::Frame::NONE
-            .fill(BACKGROUND_COLOR)
+            .fill(self.config.ui_panel_fill)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.set_width(Self::WIDTH * scale);
@@ -1325,129 +1447,6 @@ fn simple_window_layout(ui: &mut egui::Ui, id: egui::Id, add_contents: impl FnOn
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), add_buttons);
     });
-}
-
-#[derive(Clone)]
-struct StyleState {
-    color: Color32,
-    size: f32
-    // had to remove sadly due to unnecessary bloat of font files
-    // bold: bool,
-    // italic: bool
-}
-
-fn parse_unity_text(ui: &egui::Ui, text: &str, wrap_width: f32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = wrap_width;
-    // job.halign = egui::Align::Center;
-
-    // default
-    let mut state_stack = vec![StyleState {
-        color: ui.style().visuals.text_color(),
-        size: 12.0
-        // bold: false,
-        // italic: false
-    }];
-
-    let mut current_pos = 0;
-    while current_pos < text.len() {
-        if let Some(tag_start) = text[current_pos..].find("<") {
-            let tag_start = current_pos + tag_start;
-
-            if tag_start > current_pos {
-                append_text(&mut job, &text[current_pos..tag_start], state_stack.last().unwrap());
-            }
-
-            if let Some(tag_end) = text[tag_start..].find(">") {
-                let tag_end = tag_start + tag_end;
-                let full_tag = &text[tag_start + 1..tag_end];
-                
-                if full_tag.starts_with("/") {
-                    if state_stack.len() > 1 { state_stack.pop(); }
-                } else {
-                    let mut new_state = state_stack.last().unwrap().clone();
-                    let parts: Vec<&str> = full_tag.split("=").collect();
-                    let tag_name = parts[0].trim();
-
-                    match tag_name {
-                        // "b" => new_state.bold = true,
-                        // "i" => new_state.italic = true,
-                        "size" => if parts.len() > 1 {
-                            if let Ok(s) = parts[1].trim_matches('"').parse::<f32>() {
-                                new_state.size = s;
-                            }
-                        },
-                        "color" => if parts.len() > 1 {
-                            let color_val = parts[1].trim_matches('"');
-                            new_state.color = parse_color(color_val).unwrap_or(new_state.color);
-                        },
-                        _ => {} // ignore <material> and <quad> 
-                    }
-                    state_stack.push(new_state);
-                }
-                current_pos = tag_end + 1;
-            } else {
-                append_text(&mut job, &text[tag_start..tag_start + 1], state_stack.last().unwrap());
-                current_pos = tag_start + 1;
-            }
-        } else {
-            append_text(&mut job, &text[current_pos..], state_stack.last().unwrap());
-            break;
-        }
-    }
-    job
-}
-
-fn append_text(job: &mut egui::text::LayoutJob, text: &str, state: &StyleState) {
-    /* let family = if state.bold && state.italic {
-        egui::FontFamily::Name("BoldItalicStack".into())
-    } else if state.bold {
-        egui::FontFamily::Name("BoldStack".into())
-    } else if state.italic {
-        egui::FontFamily::Name("ItalicStack".into())
-    } else {
-        egui::FontFamily::Proportional
-    };*/
-    let family = egui::FontFamily::Proportional;
-
-    job.append(
-        text,
-        0.0,
-        egui::text::TextFormat {
-            font_id: egui::FontId::new(state.size, family),
-            color: state.color,
-            ..Default::default()
-        }
-    );
-}
-
-fn parse_color(val: &str) -> Option<Color32> {
-    if val.starts_with('#') {
-        let hex = val.trim_start_matches('#');
-        match hex.len() {
-            6 => { // RRGGBB
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                Some(Color32::from_rgb(r, g, b))
-            }
-            8 => { // RRGGBBAA
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-                Some(Color32::from_rgba_premultiplied(r, g, b, a))
-            }
-            _ => None
-        }
-    } else {
-        get_unity_colors().get(val).cloned()
-    }
-}
-
-fn rich_text_label(ui: &mut egui::Ui, text: &str) {
-    let job = parse_unity_text(ui, text, ui.available_width());
-    ui.add(egui::Label::new(job));
 }
 
 fn centered_and_wrapped_text(ui: &mut egui::Ui, text: &str) {
@@ -1682,96 +1681,6 @@ impl Window for SimpleOkDialog {
     }
 }
 
-pub struct SkillInfoDialog {
-    skill_id: i32,
-    name: String,
-    desc: String,
-    id: egui::Id
-}
-
-impl SkillInfoDialog {
-    pub fn new(skill_id: &i32, title: &str, content: &str) -> SkillInfoDialog {
-        SkillInfoDialog {
-            skill_id: skill_id.to_owned(),
-            name: title.to_owned(),
-            desc: content.to_owned(),
-            id: random_id()
-        }
-    }
-}
-
-impl Window for SkillInfoDialog {
-    fn run(&mut self, ctx: &egui::Context) -> bool {
-        let scale = get_scale(ctx);
-
-        let mut open = true;
-        let mut open2 = true;
-
-        let light_frame = egui::Frame::window(&ctx.style())
-            .fill(egui::Color32::from_gray(241))
-            .corner_radius(10.0 * scale)
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(210)))
-            .shadow(egui::Shadow::NONE);
-
-        let window_res = new_window(ctx, self.id, "")
-        .max_width(310.0 * scale)
-        .max_height(240.0 * scale)
-        .frame(light_frame)
-        .title_bar(false)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.style_mut().visuals = egui::Visuals::light();
-
-            ui.vertical(|ui| {
-                egui::Frame::NONE
-                .inner_margin(10.0 * scale)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()                    
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            rich_text_label(ui, &format!("<b><size=16>{}</bold></b>", self.name));
-                            rich_text_label(ui, &format!("#<b>{}</b>", self.skill_id.to_string()));
-                        });
-
-                        // ui.separator();                        
-                        egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(237, 228, 229))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(200)))
-                        .corner_radius(4.0 * scale)
-                        .inner_margin(5.0 * scale)
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            rich_text_label(ui, &self.desc);
-                        });
-                    });
-                });
-
-                // ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    ui.add_space(6.0 * scale);
-                    if ui.button(t!("ok")).clicked() {
-                        open2 = false;
-                    }
-                });
-                ui.add_space(5.0 * scale);
-            });
-        });
-
-        if let Some(inner) = window_res {
-            if ctx.input(|i| i.pointer.any_click()) {
-                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                    if !inner.response.rect.contains(pos) {
-                        open2 = false; 
-                    }
-                }
-            }
-        }
-
-        open &= open2;
-        open
-    }
-}
-
 struct ConfigEditor {
     last_ptr_config: usize,
     config: hachimi::Config,
@@ -1828,15 +1737,14 @@ impl ConfigEditor {
 
         if let Some(num) = value.as_mut() {
             ui.label("");
-            let _res = ui.add(egui::Slider::new(num, range));
-            #[cfg(target_os = "android")]
-            handle_android_keyboard(&_res, num);
+            ui.add(egui::Slider::new(num, range));
             ui.end_row();
         }
     }
 
     fn run_options_grid(config: &mut hachimi::Config, ui: &mut egui::Ui, tab: ConfigEditorTab) {
         let scale = get_scale(ui.ctx());
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
 
         match tab {
             ConfigEditorTab::General => {
@@ -1870,9 +1778,19 @@ impl ConfigEditor {
                 ui.end_row();
 
                 ui.label(t!("config_editor.gui_scale"));
-                let _res = ui.add(egui::Slider::new(&mut config.gui_scale, 0.25..=2.0).step_by(0.05));
-                #[cfg(target_os = "android")]
-                handle_android_keyboard(&_res, &mut config.gui_scale);
+                ui.add(egui::Slider::new(&mut config.gui_scale, 0.25..=2.0).step_by(0.05));
+                ui.end_row();
+
+                ui.label(t!("theme_editor.title"));
+                ui.horizontal(|ui| {
+                    if ui.button(t!("open")).clicked() {
+                        thread::spawn(|| {
+                            Gui::instance().unwrap()
+                            .lock().unwrap()
+                            .show_window(Box::new(ThemeEditorWindow::new()));
+                        });
+                    }
+                });
                 ui.end_row();
 
                 #[cfg(target_os = "windows")]
@@ -1910,6 +1828,10 @@ impl ConfigEditor {
 
                 ui.label(t!("config_editor.skip_first_time_setup"));
                 ui.checkbox(&mut config.skip_first_time_setup, "");
+                ui.end_row();
+
+                ui.label(t!("config_editor.lazy_translation_updates"));
+                ui.checkbox(&mut config.lazy_translation_updates, "");
                 ui.end_row();
 
                 ui.label(t!("config_editor.disable_auto_update_check"));
@@ -1965,27 +1887,19 @@ impl ConfigEditor {
                 Self::option_slider(ui, &t!("config_editor.target_fps"), &mut config.target_fps, 30..=240);
 
                 ui.label(t!("config_editor.virtual_resolution_multiplier"));
-                let _res = ui.add(egui::Slider::new(&mut config.virtual_res_mult, 1.0..=4.0).step_by(0.1));
-                #[cfg(target_os = "android")]
-                handle_android_keyboard(&_res, &mut config.virtual_res_mult);
+                ui.add(egui::Slider::new(&mut config.virtual_res_mult, 1.0..=4.0).step_by(0.1));
                 ui.end_row();
 
                 ui.label(t!("config_editor.ui_scale"));
-                let _res = ui.add(egui::Slider::new(&mut config.ui_scale, 0.1..=10.0).step_by(0.05));
-                #[cfg(target_os = "android")]
-                handle_android_keyboard(&_res, &mut config.ui_scale);
+                ui.add(egui::Slider::new(&mut config.ui_scale, 0.1..=10.0).step_by(0.05));
                 ui.end_row();
 
                 ui.label(t!("config_editor.ui_animation_scale"));
-                let _res = ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
-                #[cfg(target_os = "android")]
-                handle_android_keyboard(&_res, &mut config.ui_animation_scale);
+                ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
                 ui.end_row();
 
                 ui.label(t!("config_editor.render_scale"));
-                let _res = ui.add(egui::Slider::new(&mut config.render_scale, 0.1..=10.0).step_by(0.1));
-                #[cfg(target_os = "android")]
-                handle_android_keyboard(&_res, &mut config.render_scale);
+                ui.add(egui::Slider::new(&mut config.render_scale, 0.1..=10.0).step_by(0.1));
                 ui.end_row();
 
                 ui.label(t!("config_editor.msaa"));
@@ -2078,15 +1992,11 @@ impl ConfigEditor {
                 ui.end_row();
 
                 ui.label(t!("config_editor.story_choice_auto_select_delay"));
-                let _res = ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.1..=10.0).step_by(0.05));
-                #[cfg(target_os = "android")]
-                handle_android_keyboard(&_res, &mut config.story_choice_auto_select_delay);
+                ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.1..=10.0).step_by(0.05));
                 ui.end_row();
 
                 ui.label(t!("config_editor.story_text_speed_multiplier"));
-                let _res = ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=10.0).step_by(0.1));
-                #[cfg(target_os = "android")]
-                handle_android_keyboard(&_res, &mut config.story_tcps_multiplier);
+                ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=10.0).step_by(0.1));
                 ui.end_row();
 
                 ui.label(t!("config_editor.force_allow_dynamic_camera"));
@@ -2475,14 +2385,12 @@ struct LiveVocalsSwapWindow {
 impl LiveVocalsSwapWindow {
     fn new() -> LiveVocalsSwapWindow {
         let hachimi = Hachimi::instance();
-        let chara_data = hachimi.chara_data.load_full();
         let mut chara_choices: Vec<(i32, String)> = Vec::new();
         chara_choices.push((0, t!("default").into_owned()));
 
-        if let Some(data) = chara_data.as_ref() {
-            for &id in &data.chara_ids {
-                chara_choices.push((id, data.get_name(id)));
-            }
+        let data = hachimi.chara_data.load();
+        for &id in &data.chara_ids {
+            chara_choices.push((id, data.get_name(id)));
         }
         chara_choices.sort_by_key(|choice| choice.0);
 
@@ -2546,6 +2454,137 @@ impl Window for LiveVocalsSwapWindow {
 
         if save_clicked {
             save_and_reload_config(self.config.clone());
+        }
+
+        open &= open2;
+        open
+    }
+}
+
+struct ThemeEditorWindow {
+    id: egui::Id,
+    config: hachimi::Config,
+    old_config: hachimi::Config
+}
+
+impl ThemeEditorWindow {
+    fn new() -> ThemeEditorWindow {
+        let current_cfg = (**Hachimi::instance().config.load()).clone();
+        ThemeEditorWindow {
+            id: random_id(),
+            config: current_cfg.clone(),
+            old_config: current_cfg
+        }
+    }
+}
+
+fn theme_color_row(ui: &mut egui::Ui, label: &str, color: &mut egui::Color32) -> bool {
+    let mut changed = false;
+
+    ui.columns(2, |cols| {
+        cols[0].with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.label(label);
+        });
+
+        cols[1].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.color_edit_button_srgba(color).changed() {
+                changed = true;
+            }
+        });
+    });
+    ui.end_row();
+
+    changed
+}
+
+impl Window for ThemeEditorWindow {
+    fn run(&mut self, ctx: &egui::Context) -> bool {
+        let scale = get_scale(ctx);
+        let mut open = true;
+        let mut open2 = true;
+        let mut theme_changed = false;
+        let mut cancel_clicked = false;
+        let mut save_clicked = false;
+        let mut reset_clicked = false;
+
+        new_window(ctx, self.id, t!("theme_editor.title"))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            simple_window_layout(ui, self.id,
+                |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
+                    egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(8, 0))
+                    .show(ui, |ui| {
+                        egui::Grid::new(self.id.with("theme_editor_grid"))
+                        .striped(true)
+                        .num_columns(2)
+                        .spacing([40.0 * scale, 4.0 * scale])
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                theme_changed |= theme_color_row(ui, &t!("theme_editor.ui_accent_color"), &mut self.config.ui_accent_color);
+                                theme_changed |= theme_color_row(ui, &t!("theme_editor.ui_window_fill"), &mut self.config.ui_window_fill);
+                                theme_changed |= theme_color_row(ui, &t!("theme_editor.ui_panel_fill"), &mut self.config.ui_panel_fill);
+                                theme_changed |= theme_color_row(ui, &t!("theme_editor.ui_extreme_bg_color"), &mut self.config.ui_extreme_bg_color);
+                                theme_changed |= theme_color_row(ui, &t!("theme_editor.ui_text_color"), &mut self.config.ui_text_color);
+
+                                ui.horizontal(|ui| {
+                                    ui.label(t!("theme_editor.ui_window_rounding"));
+                                    if ui.add(egui::Slider::new(&mut self.config.ui_window_rounding, 0.0..=20.0)).changed() {
+                                        theme_changed = true;
+                                    }
+                                });
+                            });
+                        });
+                    });
+                },
+                |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                        if ui.button(t!("config_editor.restore_defaults")).clicked() {
+                            reset_clicked = true;
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if ui.button(t!("cancel")).clicked() {
+                                cancel_clicked = true;
+                                open2 = false;
+                            }
+                            if ui.button(t!("save")).clicked() {
+                                save_clicked = true;
+                                open2 = false;
+                            }
+                        });
+                    });
+                }
+            );
+        });
+
+        if theme_changed {
+            enqueue_theme_preview(self.config.clone());
+        }
+
+        if cancel_clicked {
+            enqueue_theme_preview(self.old_config.clone());
+            open2 = false;
+        }
+
+        if save_clicked {
+            enqueue_theme_preview(self.config.clone());
+            save_and_reload_config(self.config.clone());
+        }
+
+        if reset_clicked {
+            let mut config = self.config.clone();
+            config.ui_accent_color = hachimi::Config::default_ui_accent();
+            config.ui_window_fill = hachimi::Config::default_window_fill();
+            config.ui_panel_fill = hachimi::Config::default_panel_fill();
+            config.ui_extreme_bg_color = hachimi::Config::default_extreme_bg();
+            config.ui_text_color = hachimi::Config::default_text_color();
+            config.ui_window_rounding = hachimi::Config::default_window_rounding();
+
+            self.config = config.clone();
+            enqueue_theme_preview(self.config.clone());
         }
 
         open &= open2;
@@ -2628,6 +2667,8 @@ impl Window for LicenseWindow {
         .open(&mut open)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
                 ui.heading(t!("hachimi"));
                 ui.collapsing(t!("license.gpl_v3_only_notice"), |ui| {
                     ui.add(egui::TextEdit::multiline(&mut include_str!("../../LICENSE"))
@@ -2641,9 +2682,8 @@ impl Window for LicenseWindow {
                 ui.heading("Open Font Licenses (OFL)");
                 ui.label(t!("license.ofl_fonts_header"));
                 ui.group(|ui| {
+                    ui.label(t!("license.font_inter"));
                     ui.label(t!("license.font_font_awesome"));
-                    ui.label(t!("license.font_noto_sans"));
-                    ui.label(t!("license.font_noto_sans_jp"));
                 });
 
                 ui.add_space(4.0);

@@ -22,7 +22,7 @@ impl_addr_wrapper_fn!(SoftwareReset, SOFTWARERESET_ADDR, (), this: *mut Il2CppOb
 pub fn on_game_initialized() {
     Hachimi::instance().init_character_data();
     // GAME_INITIALIZED.store(true, Ordering::Relaxed);
-    // Hachimi::instance().init_skill_data();
+    Hachimi::instance().init_skill_info();
     #[cfg(target_os = "windows")]
     super::UIManager::apply_ui_scale();
 }

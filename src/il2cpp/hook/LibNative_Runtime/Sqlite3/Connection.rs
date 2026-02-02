@@ -1,7 +1,6 @@
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use fnv::FnvHashMap;
-use once_cell::sync::Lazy;
 use sqlparser::{
     ast::BinaryOperator,
     dialect::SQLiteDialect,
@@ -9,10 +8,27 @@ use sqlparser::{
     parser::Parser
 };
 
-use crate::il2cpp::{ext::Il2CppStringExt, sql::{self, ExprExt, SelectExt, SelectItemExt}, symbols::get_method_addr, types::*};
+use crate::il2cpp::{
+    api::{il2cpp_object_new, il2cpp_runtime_object_init},
+    ext::Il2CppStringExt,
+    sql::{self, ExprExt, SelectExt, SelectItemExt},
+    symbols::get_method_addr,
+    types::*
+};
 
-pub static SELECT_QUERIES: Lazy<Mutex<FnvHashMap<usize, Box<dyn sql::SelectQueryState + Send + Sync>>>> =
-    Lazy::new(|| Mutex::new(FnvHashMap::default()));
+static mut CLASS: *mut Il2CppClass = std::ptr::null_mut();
+pub fn class() -> *mut Il2CppClass {
+    unsafe { CLASS }
+}
+
+pub fn new() -> *mut Il2CppObject {
+    let object = il2cpp_object_new(class());
+    il2cpp_runtime_object_init(object);
+    object
+}
+
+pub static SELECT_QUERIES: LazyLock<Mutex<FnvHashMap<usize, Box<dyn sql::SelectQueryState + Send + Sync>>>> =
+    LazyLock::new(|| Mutex::new(FnvHashMap::default()));
 
 #[inline(never)]
 fn parse_query(query: *mut Il2CppObject, sql: *const Il2CppString) {
@@ -82,7 +98,7 @@ fn parse_query(query: *mut Il2CppObject, sql: *const Il2CppString) {
 }
 
 type QueryFn = extern "C" fn(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject;
-extern "C" fn Query(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject {
+pub extern "C" fn Query(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject {
     trace!("Query");
     let query = get_orig_fn!(Query, QueryFn)(this, sql);
     parse_query(query, sql);
@@ -97,6 +113,14 @@ extern "C" fn PreparedQuery(this: *mut Il2CppObject, sql: *const Il2CppString) -
     query
 }
 
+static mut OPEN_ADDR: usize = 0;
+impl_addr_wrapper_fn!(Open, OPEN_ADDR, bool,
+    this: *mut Il2CppObject, fileName: *mut Il2CppString, vfsName: *mut Il2CppString, key: *mut Il2CppArray, cipherType: i32
+);
+
+static mut CLOSEDB_ADDR: usize = 0;
+impl_addr_wrapper_fn!(CloseDB, CLOSEDB_ADDR, (), this: *mut Il2CppObject);
+
 pub fn init(LibNative_Runtime: *const Il2CppImage) {
     get_class_or_return!(LibNative_Runtime, "LibNative.Sqlite3", Connection);
 
@@ -105,4 +129,10 @@ pub fn init(LibNative_Runtime: *const Il2CppImage) {
 
     new_hook!(Query_addr, Query);
     new_hook!(PreparedQuery_addr, PreparedQuery);
+
+    unsafe {
+        CLASS = Connection;
+        OPEN_ADDR = get_method_addr(Connection, c"Open", 4);
+        CLOSEDB_ADDR = get_method_addr(Connection, c"CloseDB", 0);
+    }
 }

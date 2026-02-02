@@ -1,11 +1,10 @@
-use std::{fs, path::{Path, PathBuf}, process, sync::{atomic::{self, AtomicBool, AtomicI32}, Arc, Mutex}};
+use std::{fs, path::{Path, PathBuf}, process, sync::{atomic::{self, AtomicBool, AtomicI32}, Arc, Mutex, OnceLock}};
 use arc_swap::ArcSwap;
 use fnv::{FnvHashMap, FnvHashSet};
-use once_cell::sync::OnceCell;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use textwrap::wrap_algorithms::Penalties;
 
-use crate::{core::{plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il2cpp::{self, hook::umamusume::{CySpringController::SpringUpdateMode, GameSystem}, sql::CharacterData}};
+use crate::{core::{plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il2cpp::{self, hook::umamusume::{CySpringController::SpringUpdateMode, GameSystem}, sql::{CharacterData, SkillInfo}}};
 
 use super::{game::{Game, Region}, ipc, plurals, template, template_filters, tl_repo, utils, Error, Interceptor};
 
@@ -29,7 +28,9 @@ pub struct Hachimi {
     pub tl_updater: Arc<tl_repo::Updater>,
 
     // Character data
-    pub chara_data: ArcSwap<Option<CharacterData>>,
+    pub chara_data: ArcSwap<CharacterData>,
+    // Untranslated skill info
+    pub skill_info: ArcSwap<SkillInfo>,
 
     // Shared properties
     pub game: Game,
@@ -51,7 +52,7 @@ pub struct Hachimi {
     pub updater: Arc<updater::Updater>
 }
 
-static INSTANCE: OnceCell<Arc<Hachimi>> = OnceCell::new();
+static INSTANCE: OnceLock<Arc<Hachimi>> = OnceLock::new();
 
 impl Hachimi {
     pub fn init() -> bool {
@@ -116,6 +117,7 @@ impl Hachimi {
 
             // Same with these
             chara_data: ArcSwap::default(),
+            skill_info: ArcSwap::default(),
 
             game,
             template_parser: template::Parser::new(&template_filters::LIST),
@@ -146,7 +148,7 @@ impl Hachimi {
                 Ok(config) => Ok(config),
                 Err(e) => {
                     eprintln!("Failed to parse config: {}", e);
-                    CONFIG_LOAD_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
+                    CONFIG_LOAD_ERROR.store(true, std::sync::atomic::Ordering::Release);
                     Ok(Config::default())
                 }
             }
@@ -200,16 +202,18 @@ impl Hachimi {
     }
 
     pub fn init_character_data(&self) {
-        if self.chara_data.load().is_none() {
-            match CharacterData::load_from_db() {
-                Ok(data) => {
-                    self.chara_data.store(Arc::new(Some(data)));
-                    info!("Character database loaded successfully.");
-                }
-                Err(e) => {
-                    error!("Failed to load character database: {}", e);
-                }
-            }
+        if self.chara_data.load().chara_ids.is_empty() {
+            let data = CharacterData::load_from_db();
+            self.chara_data.store(Arc::new(data));
+            info!("Character database loaded successfully.");
+        }
+    }
+
+    pub fn init_skill_info(&self) {
+        if self.skill_info.load().skill_names.is_empty() {
+            let data = SkillInfo::load_from_db();
+            self.skill_info.store(Arc::new(data));
+            info!("Skill info loaded successfully.");
         }
     }
 
@@ -267,15 +271,8 @@ impl Hachimi {
 
     pub fn run_auto_update_check(&self) {
         if !self.config.load().disable_auto_update_check {
-            /*
-            #[cfg(not(target_os = "windows"))]
-            if !self.config.load().translator_mode {
-                self.tl_updater.clone().check_for_updates(false);
-            }*/
-
             // Check for hachimi updates first, then translations
             // Don't auto check for tl updates if it's not up to date
-            // #[cfg(target_os = "windows")]
             self.updater.clone().check_for_updates(|new_update| {
                 let hachimi = Hachimi::instance();
                 if !new_update && !hachimi.config.load().translator_mode {
@@ -313,6 +310,8 @@ pub struct Config {
     pub translation_repo_index: Option<String>,
     #[serde(default)]
     pub skip_first_time_setup: bool,
+    #[serde(default)]
+    pub lazy_translation_updates: bool,
     #[serde(default)]
     pub disable_auto_update_check: bool,
     #[serde(default)]
@@ -368,6 +367,20 @@ pub struct Config {
     #[serde(default)]
     pub disabled_hooks: FnvHashSet<String>,
 
+    // theme settings
+    #[serde(default = "Config::default_ui_accent")]
+    pub ui_accent_color: egui::Color32,
+    #[serde(default = "Config::default_window_fill")]
+    pub ui_window_fill: egui::Color32,
+    #[serde(default = "Config::default_panel_fill")]
+    pub ui_panel_fill: egui::Color32,
+    #[serde(default = "Config::default_extreme_bg")]
+    pub ui_extreme_bg_color: egui::Color32,
+    #[serde(default = "Config::default_text_color")]
+    pub ui_text_color: egui::Color32,
+    #[serde(default = "Config::default_window_rounding")]
+    pub ui_window_rounding: f32,
+
     #[cfg(target_os = "windows")]
     #[serde(flatten)]
     pub windows: hachimi_impl::Config,
@@ -388,6 +401,12 @@ impl Config {
     fn default_meta_index_url() -> String { "https://gitlab.com/umatl/hachimi-meta/-/raw/main/meta.json".to_owned() }
     fn default_ui_animation_scale() -> f32 { 1.0 }
     fn default_live_vocals_swap() -> [i32; 6] { [0; 6] }
+    pub fn default_ui_accent() -> egui::Color32 { egui::Color32::from_rgb(100, 150, 240) }
+    pub fn default_window_fill() -> egui::Color32 { egui::Color32::from_rgba_premultiplied(27, 27, 27, 220) }
+    pub fn default_panel_fill() -> egui::Color32 { egui::Color32::from_rgba_premultiplied(27, 27, 27, 220) }
+    pub fn default_extreme_bg() -> egui::Color32 { egui::Color32::from_rgb(15, 15, 15) }
+    pub fn default_text_color() -> egui::Color32 { egui::Color32::from_gray(170) }
+    pub fn default_window_rounding() -> f32 { 10.0 }
 }
 
 impl Default for Config {

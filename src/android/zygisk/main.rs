@@ -1,7 +1,6 @@
-use std::os::raw::c_long;
+use std::{cell::OnceCell, os::raw::c_long};
 
 use jni::{objects::JString, JNIEnv};
-use once_cell::unsync::OnceCell;
 
 use crate::{android::{game_impl, hook, plugin_loader, zygisk::{internal::{api_table, module_abi}, AppSpecializeArgs, ServerSpecializeArgs}}, core::{game::Region, Hachimi}};
 

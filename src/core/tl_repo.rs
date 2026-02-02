@@ -9,7 +9,7 @@ use thread_priority::{ThreadBuilderExt, ThreadPriority};
 
 use crate::core::game::Region;
 use super::{gui::SimpleYesNoDialog, hachimi::LocalizedData, http::{self, AsyncRequest}, utils, Error, Gui, Hachimi};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 #[derive(Deserialize)]
 pub struct RepoInfo {
@@ -129,7 +129,7 @@ pub struct Updater {
 
 const LOCALIZED_DATA_DIR: &str = "localized_data";
 const CHUNK_SIZE: usize = 8192; // 8KiB
-static NUM_THREADS: Lazy<usize> = Lazy::new(|| {
+static NUM_THREADS: LazyLock<usize> = LazyLock::new(|| {
     let parallelism = thread::available_parallelism().unwrap().get();
     max(1, parallelism / 2)
 });
@@ -161,7 +161,10 @@ impl Updater {
     pub fn check_for_updates(self: Arc<Self>, pedantic: bool) {
         std::thread::spawn(move || {
             if let Err(e) = self.check_for_updates_internal(pedantic) {
-                error!("{}", e);
+                if let Some(mutex) = Gui::instance() {
+                    mutex.lock().unwrap().show_notification(&format!("{}", e));
+                }
+                info!("{}", e);
             }
         });
     }
@@ -256,20 +259,18 @@ impl Updater {
                 // skip excluded file unless pedantic update or the file doesn't exist in the system
                 false
             } else if let Some(hash) = repo_cache.files.get(&file.path) {
-                // get path or force download if path is invalid
-                if let Some(path) = path {
+                // lazy auto update, cached hash and repo hash matches. ignored during pedantic
+                if !pedantic && config.lazy_translation_updates && hash == &file.hash {
+                    false
+                } else if let Some(path) = path { // get path or force download if path is invalid
                     // file doesn't exist -> download
                     if !exists {
                         true
                     } else {
-                        // fast size check to catch interrupted downloads
-                        let metadata = fs::metadata(&path).ok();
-                        let size_mismatch = metadata.map(|m| m.len() as usize != file.size).unwrap_or(true);
-        
-                        if size_mismatch {
-                            true // size mismatch -> redownload
-                        } else if hash != &file.hash {
+                        if hash != &file.hash {
                             true // index hash changed -> update
+                        } else if fs::metadata(&path).map(|m| m.len() as usize != file.size).unwrap_or(true) {
+                            true // size mismatch -> redownload
                         } else if pedantic {
                             // full blake3 integrity check if user requested pedantic update
                             !file.verify_integrity(&path)

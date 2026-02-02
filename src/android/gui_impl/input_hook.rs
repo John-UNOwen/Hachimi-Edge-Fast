@@ -1,7 +1,7 @@
 use crate::android::utils::get_activity;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Instant, Duration};
 
 use egui::Vec2;
@@ -11,7 +11,7 @@ use jni::{
     JNIEnv,
 };
 
-use crate::{core::{Error, Gui, Hachimi}, il2cpp::symbols::Thread};
+use crate::{android::utils, core::{Error, Gui, Hachimi}, il2cpp::symbols::Thread};
 
 use super::keymap;
 
@@ -34,8 +34,8 @@ const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(300);
 
 static VOLUME_UP_PRESSED: AtomicBool = AtomicBool::new(false);
 static VOLUME_DOWN_PRESSED: AtomicBool = AtomicBool::new(false);
-static VOLUME_UP_LAST_TAP: once_cell::sync::Lazy<Arc<Mutex<Option<Instant>>>> = 
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+static VOLUME_UP_LAST_TAP: LazyLock<Arc<Mutex<Option<Instant>>>> = 
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 static SCROLL_AXIS_SCALE: f32 = 10.0;
 
@@ -179,6 +179,12 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
                 if Hachimi::instance().config.load().hide_ingame_ui_hotkey && pressed
                     && key_code == Hachimi::instance().config.load().android.hide_ingame_ui_hotkey_bind {
                     Thread::main_thread().schedule(Gui::toggle_game_ui);
+                }
+                if pressed && key_code == keymap::KEYCODE_BACK {
+                    utils::BACK_BUTTON_PRESSED.store(pressed, Ordering::Release);
+                    if utils::IS_IME_VISIBLE.load(Ordering::Acquire) {
+                        return JNI_TRUE; 
+                    }
                 }
                 if Gui::is_consuming_input_atomic() {
                     let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {

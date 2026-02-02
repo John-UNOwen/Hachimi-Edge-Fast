@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
-use std::{os::raw::{c_uint, c_void}, sync::Mutex};
+use std::{os::raw::{c_uint, c_void}, sync::{OnceLock, Mutex}};
 
-use once_cell::sync::OnceCell;
 use windows::{
     core::{w, Interface, HRESULT},
     Win32::{
@@ -153,8 +152,23 @@ extern "C" fn IDXGISwapChain_ResizeBuffers(
     ))
 }
 
-static PAINTER: OnceCell<Mutex<D3D11Painter>> = OnceCell::new();
+static PAINTER: OnceLock<Mutex<D3D11Painter>> = OnceLock::new();
 fn init_painter(p_swap_chain: *mut c_void) -> Result<&'static Mutex<D3D11Painter>, Error> {
+    // TODO: use get_or_try_init again once it's in stable
+    if let Some(painter) = PAINTER.get() {
+        return Ok(painter);
+    }
+
+    let painter_mutex = {
+        let borrowed_swap_chain = unsafe {
+            std::mem::ManuallyDrop::new(IDXGISwapChain::from_raw(p_swap_chain))
+        };
+        let swap_chain = (&*borrowed_swap_chain).clone();
+        let painter = D3D11Painter::new(swap_chain)?; // The '?' works here!
+        Mutex::new(painter)
+    };
+
+    /*
     PAINTER.get_or_try_init(|| {
         let borrowed_swap_chain = unsafe {
             std::mem::ManuallyDrop::new(IDXGISwapChain::from_raw(p_swap_chain))
@@ -164,7 +178,9 @@ fn init_painter(p_swap_chain: *mut c_void) -> Result<&'static Mutex<D3D11Painter
 
         let painter = D3D11Painter::new(swap_chain)?;
         Ok(Mutex::new(painter))
-    })
+    }) */
+
+    Ok(PAINTER.get_or_init(|| painter_mutex))
 }
 
 unsafe extern "system" fn dummy_wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

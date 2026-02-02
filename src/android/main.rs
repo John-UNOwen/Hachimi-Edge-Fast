@@ -1,6 +1,5 @@
-use std::{ffi::CStr, os::raw::c_void};
+use std::{ffi::CStr, os::raw::c_void, sync::OnceLock};
 use jni::{sys::jint, JavaVM};
-use once_cell::sync::OnceCell;
 
 use crate::core::Hachimi;
 
@@ -12,7 +11,7 @@ type JniOnLoadFn = extern "C" fn(vm: JavaVM, reserved: *mut c_void) -> jint;
 const LIBRARY_NAME: &CStr = c"libmain_orig.so";
 const JNI_ONLOAD_NAME: &CStr = c"JNI_OnLoad";
 
-static JAVA_VM: OnceCell<JavaVM> = OnceCell::new();
+static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
 
 pub(crate) fn java_vm() -> Option<&'static JavaVM> {
     JAVA_VM.get()

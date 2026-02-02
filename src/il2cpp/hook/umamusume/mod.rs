@@ -59,6 +59,7 @@ pub mod DialogObject;
 pub mod ImageCommon;
 pub mod TimeUtil;
 pub mod CameraData;
+pub mod DialogManager;
 
 #[cfg(target_os = "windows")]
 pub mod SceneManager;
@@ -129,6 +130,7 @@ pub fn init() {
     DialogObject::init(image);
     ImageCommon::init(image);
     TimeUtil::init(image);
+    DialogManager::init(image);
 
     #[cfg(target_os = "windows")]
     {

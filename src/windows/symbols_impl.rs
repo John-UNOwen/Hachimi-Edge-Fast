@@ -1,6 +1,5 @@
-use std::{ffi::{CStr, CString}, os::raw::c_void};
+use std::{ffi::{CStr, CString}, os::raw::c_void, sync::LazyLock};
 use fnv::FnvHashMap;
-use once_cell::sync::Lazy;
 use pelite::{pe::Pe, pe64::PeFile, FileMap};
 use windows::Win32::Foundation::HMODULE;
 
@@ -272,7 +271,7 @@ impl From<pelite::Error> for Error {
     }
 }
 
-static SYMBOL_MAP: Lazy<FnvHashMap<&'static str, CString>> = Lazy::new(|| {
+static SYMBOL_MAP: LazyLock<FnvHashMap<&'static str, CString>> = LazyLock::new(|| {
     match generate_symbol_map() {
         Ok(v) => v,
         Err(e) => {

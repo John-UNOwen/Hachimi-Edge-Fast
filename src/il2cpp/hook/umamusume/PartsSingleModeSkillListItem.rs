@@ -1,13 +1,12 @@
 use crate::{
-    core::{gui::SkillInfoDialog, Gui, Hachimi, game::Region, utils::mul_int},
+    core::{Hachimi, game::Region, utils::{mul_int, str_visual_len}},
     il2cpp::{ext::{Il2CppStringExt, StringExt}, hook::{UnityEngine_CoreModule::{Component, Object, UnityAction}, UnityEngine_UI::{EventSystem, Text}}, sql::{self, TextDataQuery}, symbols::{create_delegate, get_field_from_name, get_field_object_value, get_method_addr}, types::*}
 };
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use fnv::FnvHashMap;
-use super::{ButtonCommon, MasterDataUtil};
+use super::{ButtonCommon, DialogCommon, DialogManager, MasterDataUtil};
 
-static SKILL_TEXT_CACHE: Lazy<Mutex<FnvHashMap<i32, (String, String)>>> = Lazy::new(|| Mutex::default());
+static SKILL_TEXT_CACHE: LazyLock<Mutex<FnvHashMap<i32, (String, String)>>> = LazyLock::new(|| Mutex::default());
 
 // SkillListItem
 static mut NAMETEXT_FIELD: *mut FieldInfo = 0 as _;
@@ -109,16 +108,15 @@ extern "C" fn UpdateItemOther(this: *mut Il2CppObject, skill_info: *mut Il2CppOb
     });
 }
 
-fn get_skill_text(skill_id: i32, this: *mut Il2CppObject) -> (String, String) {
-    // let name = get__nameText(this);
-    let desc = get__descText(this);
-
+fn get_skill_text(skill_id: i32) -> (String, String) {    
     let to_s = |opt_ptr: Option<*mut Il2CppString>| unsafe {
         opt_ptr.and_then(|p| p.as_ref()).map(|s| s.as_utf16str().to_string())
     };
 
     let current_name = to_s(TextDataQuery::get_skill_name(skill_id)).unwrap_or_else(|| to_s(Some(MasterDataUtil::GetSkillName(skill_id))).unwrap());
-    let current_desc = to_s(TextDataQuery::get_skill_desc(skill_id)).unwrap_or_else(|| to_s(Some(Text::get_text(desc))).unwrap());
+    let current_desc = to_s(TextDataQuery::get_skill_desc(skill_id)).unwrap_or_else(|| to_s(
+        Some(Hachimi::instance().skill_info.load().get_desc(skill_id).to_il2cpp_string())
+    ).unwrap());
 
     let mut cache = SKILL_TEXT_CACHE.lock().unwrap();
 
@@ -142,8 +140,7 @@ extern "C" fn SetupOnClickSkillButton(this: *mut Il2CppObject, info: *mut Il2Cpp
     let button = get__bgButton(this);
     let button_obj = Component::get_gameObject(button);
     Object::set_name(button_obj, format!("HachimiSkill_{}", skill_id).to_il2cpp_string());
-    get_skill_text(skill_id, this);
-    // info!("SKILL_TEXT_CACHE len: {}", SKILL_TEXT_CACHE.lock().unwrap().len());
+    get_skill_text(skill_id);
 
     let delegate = create_delegate(unsafe { UnityAction::UNITYACTION_CLASS }, 0, || {
         let current_ev = EventSystem::get_current();
@@ -156,13 +153,14 @@ extern "C" fn SetupOnClickSkillButton(this: *mut Il2CppObject, info: *mut Il2Cpp
             if let Ok(id) = id_str.parse::<i32>() {
                 if let Some(data) = SKILL_TEXT_CACHE.lock().unwrap().get(&id) {
                     let (name, desc) = data;
-                    if let Some(mutex) = Gui::instance() {
-                        mutex.lock().unwrap().show_window(Box::new(SkillInfoDialog::new(
-                            &id,
-                            &name,
-                            &desc
-                        )));
-                    }
+                    let typ = if str_visual_len(desc.as_str()) <= 250 {
+                        DialogCommon::FormType::SMALL_ONE_BUTTON
+                    } else if str_visual_len(desc.as_str()) <= 490 {
+                        DialogCommon::FormType::MIDDLE_ONE_BUTTON
+                    } else {
+                        DialogCommon::FormType::BIG_ONE_BUTTON
+                    };
+                    DialogManager::single_button_message(name, &desc.replace("\\n", "\n"), typ);
                 }
             }
         }

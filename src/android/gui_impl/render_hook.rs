@@ -4,8 +4,8 @@ use std::num::NonZeroU32;
 use std::os::raw::c_char;
 use std::os::raw::{c_uint, c_void};
 use std::sync::Arc;
+use std::cell::OnceCell;
 use glow::HasContext;
-use once_cell::unsync::OnceCell;
 
 use crate::core::{Error, Gui, Hachimi};
 

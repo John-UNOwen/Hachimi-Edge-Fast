@@ -4,9 +4,16 @@ use serde::Serialize;
 use textwrap::{core::Word, wrap_algorithms, WordSeparator::UnicodeBreakProperties};
 use unicode_width::UnicodeWidthChar;
 
-use crate::{core::Gui, il2cpp::{ext::{Il2CppStringExt, StringExt}, types::Il2CppString}};
+use crate::{core::Gui, il2cpp::{ext::{Il2CppStringExt, StringExt}, types::{Il2CppObject, Il2CppString}}};
 
 use super::{Error, Hachimi};
+
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct SendPtr(pub *mut Il2CppObject);
+
+unsafe impl Send for SendPtr {}
+unsafe impl Sync for SendPtr {}
 
 pub fn char_to_utf16_index(text: &str, char_idx: usize) -> i32 {
     text.chars()
@@ -27,6 +34,32 @@ pub fn utf16_to_char_index(text: &str, utf16_idx: usize) -> usize {
         char_pos += 1;
     }
     char_pos
+}
+
+pub fn str_visual_len(text: &str) -> usize {
+    let mut count = 0;
+    let mut is_in_tag = false;
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '<' => is_in_tag = true,
+            '>' => is_in_tag = false,
+            '\\' => {
+                if let Some(&'n') = chars.peek() {
+                    chars.next();
+                } else if !is_in_tag {
+                    count += 1;
+                }
+            }
+            _ => {
+                if !is_in_tag {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
 }
 
 pub fn concat_unix_path(left: &str, right: &str) -> String {
@@ -544,17 +577,20 @@ pub fn get_file_modified_time<P: AsRef<Path>>(path: P) -> Option<SystemTime> {
     metadata.modified().ok()
 }
 
-pub fn get_masterdb_path() -> String {
+pub fn get_data_path() -> String {
     #[cfg(target_os = "android")]
     {
-        format!("/data/data/{}/files/master/master.mdb", Hachimi::instance().game.package_name)
+        format!("/data/data/{}/files", Hachimi::instance().game.package_name)
     }
 
     #[cfg(target_os = "windows")]
     {
-        let base = unsafe { (*crate::il2cpp::hook::UnityEngine_CoreModule::Application::get_persistentDataPath()).as_utf16str() }.to_string();
-        format!("{}/master/master.mdb", base)
+        unsafe { (*crate::il2cpp::hook::UnityEngine_CoreModule::Application::get_persistentDataPath()).as_utf16str() }.to_string()
     }
+}
+
+pub fn get_masterdb_path() -> String {
+    format!("{}/master/master.mdb", get_data_path())
 }
 
 // Intentionally dumb png loader implementation that only loads RGBA8 images
