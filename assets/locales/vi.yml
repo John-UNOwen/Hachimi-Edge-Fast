@@ -96,7 +96,7 @@ license:
 
 tl_updater:
   title: "Đang cập nhật..."
-  warning: "Bản dịch sẽ không hoạt động\ntrong lúc đang cập nhật"
+  warning: "Bản dịch sẽ không hoạt động trong lúc đang cập nhật"
 
 config_editor:
   title: "Chỉnh sửa cài đặt"
@@ -111,17 +111,18 @@ config_editor:
     Nếu như bạn không có ý định này, hãy đóng hộp thoại và TẮT tùy chọn.
   meta_index_url: "URL Meta bản dịch"
   debug_mode: "Chế độ gỡ lỗi"
-  enable_file_logging: "Bật ghi nhật\nký tệp"
+  enable_file_logging: "Bật ghi nhật ký tệp"
   translator_mode: "Chế độ dịch"
-  skip_first_time_setup: "Bỏ qua thiết lập\nlần đầu"
-  disable_auto_update_check: "Tắt kiểm tra cập\nnhật tự động"
+  skip_first_time_setup: "Bỏ qua thiết lập lần đầu"
+  lazy_translation_updates: "Cập nhật bản dịch tinh gọn"
+  disable_auto_update_check: "Tắt kiểm tra cập nhật tự động"
   disable_translations: "Tắt bản dịch"
   enable_ipc: "Bật IPC"
   ipc_listen_all: "IPC listen all"
-  auto_translate_stories: "Tự động dịch\ntruyện"
-  auto_translate_ui: "Tự động dịch UI\n(KHÔNG ỔN ĐỊNH)"
+  auto_translate_stories: "Tự động dịch truyện"
+  auto_translate_ui: "Tự động dịch UI (KHÔNG ỔN ĐỊNH)"
   target_fps: "Đặt FPS"
-  virtual_resolution_multiplier: "Số nhân độ\nphân giải ảo"
+  virtual_resolution_multiplier: "Số nhân độ phân giải ảo"
   ui_scale: "Tỷ lệ UI"
   gui_scale: "Tỷ lệ lớp phủ"
   graphics_quality: "Chất lượng đồ họa"
@@ -130,18 +131,18 @@ config_editor:
   full_screen_mode: "Chế độ toàn màn hình"
   full_screen_mode_exclusive: "Exclusive"
   full_screen_mode_borderless: "Borderless"
-  block_minimize_in_full_screen: "Chặn thu nhỏ trong\nchế độ toàn màn hình"
+  block_minimize_in_full_screen: "Chặn thu nhỏ trong chế độ toàn màn hình"
   resolution_scaling: "Tỷ lệ độ phân giải"
   resolution_scaling_default: "Mặc định (1080p)"
   resolution_scaling_ssize: "Tỷ lệ theo kích thước màn hình"
   resolution_scaling_wsize: "Tỷ lệ theo kích thước cửa sổ"
   window_always_on_top: "Cửa sổ luôn ở trên cùng"
-  story_choice_auto_select_delay: "Độ trễ tự động chọn\nlựa chọn truyện"
-  story_text_speed_multiplier: "Hệ số tốc độ văn bản\ntruyện"
-  force_allow_dynamic_camera: "Buộc cho phép\ndynamic camera"
-  live_theater_allow_same_chara: "Cho phép cùng\nnhân vật trong live"
+  story_choice_auto_select_delay: "Độ trễ tự động chọn lựa chọn truyện"
+  story_text_speed_multiplier: "Hệ số tốc độ văn bản truyện"
+  force_allow_dynamic_camera: "Buộc cho phép dynamic camera"
+  live_theater_allow_same_chara: "Cho phép cùng nhân vật trong live"
   physics_update_mode: "Chế độ vật lý"
-  hide_ingame_ui_hotkey: "Phím tắt ẩn giao\ndiện trong game"
+  hide_ingame_ui_hotkey: "Phím tắt ẩn giao diện trong game"
   hide_ingame_ui_hotkey_info: >-
     Tùy chọn này cho phép phím tắt để bật/tắt giao diện người dùng (UI) trong trò chơi.
     Đối với Android, đó là nhấn hai lần phím Tăng âm lượng (Volume Up) trong vòng 0,3 giây.
@@ -152,9 +153,18 @@ config_editor:
   aniso_level: "Lọc dị hướng"
   live_vocals_swap: "Thay đổi giọng hát trực tiếp"
   live_vocals_swap_character_n: "Nhân vật %{index}"
-  skill_info_dialog: "Hiện thông tin\nkỹ năng trên GUI"
-  homescreen_bgseason: "Mùa nền\nMàn hình chính"
+  skill_info_dialog: "Hộp thoại thông tin kỹ năng tùy chỉnh"
+  homescreen_bgseason: "Mùa nền Màn hình chính"
   shadow_resolution: "Độ phân giải bóng đổ"
+
+theme_editor:
+  title: "Trình chỉnh sửa Giao diện"
+  ui_accent_color: "Màu nhấn"
+  ui_window_fill: "Màu nền cửa sổ"
+  ui_panel_fill: "Màu nền bảng điều khiển"
+  ui_extreme_bg_color: "Nền ô nhập liệu"
+  ui_text_color: "Màu văn bản"
+  ui_window_rounding: "Bo góc"
 
 tl_update_dialog:
   title: "Bản cập nhật mới"

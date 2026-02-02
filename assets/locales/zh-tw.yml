@@ -117,6 +117,7 @@ config_editor:
   enable_file_logging: "啟用檔案記錄"
   translator_mode: "翻譯者模式"
   skip_first_time_setup: "跳過設定精靈"
+  lazy_translation_updates: "寬鬆翻譯更新檢查"
   disable_auto_update_check: "禁用自動更新檢查"
   disable_translations: "禁用翻譯"
   enable_ipc: "啟用 IPC"
@@ -157,9 +158,18 @@ config_editor:
   aniso_level: "各向異性過濾"
   live_vocals_swap: "Live演唱人聲切換"
   live_vocals_swap_character_n: "角色 %{index}"
-  skill_info_dialog: "在GUI中顯示技能資訊"
+  skill_info_dialog: "自訂技能資訊視窗"
   homescreen_bgseason: "主介面背景季節"
   shadow_resolution: "陰影解析度"
+
+theme_editor:
+  title: "界面主題編輯器"
+  ui_accent_color: "重點色"
+  ui_window_fill: "視窗背景顏色"
+  ui_panel_fill: "面板背景顏色"
+  ui_extreme_bg_color: "輸入框背景"
+  ui_text_color: "文字顏色"
+  ui_window_rounding: "圓角程度"
 
 tl_update_dialog:
   title: "有可用的更新"

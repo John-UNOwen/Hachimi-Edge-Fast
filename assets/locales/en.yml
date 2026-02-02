@@ -105,17 +105,16 @@ about:
 license:
   title: "License"
   gpl_v3_only_notice: "GPL-3.0-only License Text"
+  ofl_fonts_header: "This software bundles the following fonts under the SIL Open Font License 1.1:"
+  font_inter: "Inter: Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter)"
+  font_font_awesome: "Font Awesome Version 4.7.0: Copyright Dave Gandy (https://fontawesome.com) 2016. All rights reserved."
+  ofl_notice: "SIL OFL 1.1 License Text"
   font_alibaba_header: "Alibaba PuHuiTi 3.0"
   font_alibaba_body: "Copyright (c) 2020-2023 Alibaba (China) Co., Ltd. All rights reserved."
-  ofl_fonts_header: "This software bundles the following fonts under the SIL Open Font License 1.1:"
-  font_noto_sans_jp: "Noto Sans JP:\nCopyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'"
-  font_noto_sans: "Noto Sans:\nCopyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)"
-  font_font_awesome: "Font Awesome Version 4.7.0:\nCopyright Dave Gandy (https://fontawesome.com) 2016. All rights reserved."
-  ofl_notice: "SIL OFL 1.1 License Text"
 
 tl_updater:
   title: "Updating..."
-  warning: "Translations will not work\nwhile update is in progress"
+  warning: "Translations will not work while update is in progress"
 
 config_editor:
   title: "Config Editor"
@@ -134,20 +133,21 @@ config_editor:
   enable_file_logging: "Enable file logging"
   translator_mode: "Translator mode"
   skip_first_time_setup: "Skip first time setup"
-  disable_auto_update_check: "Disable auto update\ncheck"
+  lazy_translation_updates: "Lazy translation updates"
+  disable_auto_update_check: "Disable auto update check"
   disable_translations: "Disable translations"
   enable_ipc: "Enable IPC"
   ipc_listen_all: "IPC listen all"
-  auto_translate_stories: "Auto translate\nstories"
+  auto_translate_stories: "Auto translate stories"
   auto_tl_warning: >-
     Enabling this option requires a compatible translation provider to be
     installed on your computer or a cloud service using the same framework as
     py3translationServer. Without a provider installed, no additional translation
     will happen and gameplay may be affected. Please leave this option disabled
     if you do not have a translation framework installed.
-  auto_translate_ui: "Auto translate UI\n(MIGHT BREAK UIs)"
+  auto_translate_ui: "Auto translate UI (MIGHT BREAK UIs)"
   target_fps: "Target FPS"
-  virtual_resolution_multiplier: "Virtual resolution\nmultiplier"
+  virtual_resolution_multiplier: "Virtual resolution multiplier"
   ui_scale: "UI scale"
   gui_scale: "Overlay scale"
   ui_animation_scale: "UI animation scale"
@@ -157,19 +157,19 @@ config_editor:
   full_screen_mode: "Full screen mode"
   full_screen_mode_exclusive: "Exclusive"
   full_screen_mode_borderless: "Borderless"
-  block_minimize_in_full_screen: "Block minimize in\nfull screen"
+  block_minimize_in_full_screen: "Block minimize in full screen"
   resolution_scaling: "Resolution scaling"
   resolution_scaling_default: "Default (1080p)"
   resolution_scaling_ssize: "Scale to screen size"
   resolution_scaling_wsize: "Scale to window size"
   window_always_on_top: "Window always on top"
-  story_choice_auto_select_delay: "Story choice auto\nselect delay"
-  story_text_speed_multiplier: "Story text speed\nmultiplier"
-  force_allow_dynamic_camera: "Force allow\ndynamic camera"
-  live_theater_allow_same_chara: "Live theater\nallow same chara"
-  physics_update_mode: "Physics update\nmode"
-  disable_skill_name_translation: "Disable skill name\ntranslation"
-  hide_ingame_ui_hotkey: "Hide ingame UI\nhotkey"
+  story_choice_auto_select_delay: "Story choice auto select delay"
+  story_text_speed_multiplier: "Story text speed multiplier"
+  force_allow_dynamic_camera: "Force allow dynamic camera"
+  live_theater_allow_same_chara: "Live theater allow same chara"
+  physics_update_mode: "Physics update mode"
+  disable_skill_name_translation: "Disable skill name translation"
+  hide_ingame_ui_hotkey: "Hide ingame UI hotkey"
   hide_ingame_ui_hotkey_info: >-
     This option allows a shortcut key to toggle the ingame UI.
     For Android, it's double tap the Volume Up key within 0.3 seconds.
@@ -182,9 +182,18 @@ config_editor:
   aniso_level: "Anisotropic Filtering"
   live_vocals_swap: "Live Vocals Swap"
   live_vocals_swap_character_n: "Character %{index}"
-  skill_info_dialog: "Show skill info in GUI"
-  homescreen_bgseason: "Homescreen Background\nSeason"
+  skill_info_dialog: "Custom skill info dialog"
+  homescreen_bgseason: "Homescreen Background Season"
   shadow_resolution: "Shadow Resolution"
+
+theme_editor:
+  title: "GUI Theme Editor"
+  ui_accent_color: "Accent Color"
+  ui_window_fill: "Window Background Color"
+  ui_panel_fill: "Panel Background Color"
+  ui_extreme_bg_color: "Input Background"
+  ui_text_color: "Text Color"
+  ui_window_rounding: "Rounded Corners"
 
 tl_update_dialog:
   title: "New update available"
