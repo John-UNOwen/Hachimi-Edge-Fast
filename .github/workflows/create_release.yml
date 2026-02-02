@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build Hachimi for Android
         run: |
-          rustup target add armv7-linux-androideabi aarch64-linux-android
+          rustup target add aarch64-linux-android
           RELEASE=1 ./tools/android/build.sh
 
       - name: Upload Android binaries
