@@ -17,18 +17,15 @@ jobs:
       - name: Setup and Patch Dependencies
         run: |
           pushd ..
-
           git clone --revision 44cdd653e2317d300fb8a6c9c36b03f23991e803 https://github.com/emilk/egui.git
           cd egui
-
           sed -i 's/ui.set_min_width(ui.available_width());/\/\/ ui.set_min_width(ui.available_width());/' crates/egui/src/containers/combo_box.rs
-
           popd
-
-          git update-index --assume-unchanged Cargo.toml
 
           echo 'egui = { path = "../egui/crates/egui" }' >> Cargo.toml
           echo 'egui_extras = { path = "../egui/crates/egui_extras" }' >> Cargo.toml
+          git add .
+          git commit -m "."
 
       - name: Grant execute permission to build script
         run: chmod +x tools/android/build.sh
@@ -78,14 +75,14 @@ jobs:
 
           popd
 
-          git update-index --assume-unchanged Cargo.toml
-
           $patches = @(
             "egui-directx11 = { path = '../egui-directx11' }",
             "egui = { path = '../egui/crates/egui' }",
             "egui_extras = { path = '../egui/crates/egui_extras' }"
           )
           Add-Content -Path "Cargo.toml" -Value $patches
+          git add .
+          git commit -m "."
 
       - uses: dtolnay/rust-toolchain@stable
       - name: Build Hachimi for Windows
