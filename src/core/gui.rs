@@ -15,7 +15,7 @@ use rust_i18n::t;
 use chrono::{Utc, Datelike};
 
 use crate::il2cpp::{
-    ext::{StringExt, Il2CppStringExt},
+    ext::StringExt,
     hook::{
         umamusume::{CameraData::ShadowResolution, CySpringController::SpringUpdateMode, GameSystem, GraphicSettings::{GraphicsQuality, MsaaQuality}, Localize, TimeUtil::BgSeason},
         UnityEngine_CoreModule::{Application, Texture::AnisoLevel}
@@ -25,6 +25,7 @@ use crate::il2cpp::{
 
 #[cfg(target_os = "android")]
 use crate::il2cpp::{
+    ext::Il2CppStringExt,
     hook::{umamusume::WebViewManager, UnityEngine_CoreModule::{TouchScreenKeyboard, TouchScreenKeyboardType}},
     symbols::GCHandle,
     types::{Il2CppObject, Il2CppString, RangeInt}
@@ -37,7 +38,7 @@ use super::{
     hachimi::{self, Language, REPO_PATH, WEBSITE_URL},
     http::AsyncRequest,
     tl_repo::{self, RepoInfo},
-    utils::{self, SendPtr},
+    utils::{self, get_localized_string, SendPtr},
     Hachimi
 };
 
@@ -2026,12 +2027,12 @@ impl ConfigEditor {
                 ui.label(t!("config_editor.homescreen_bgseason"));
                 Gui::run_combo(ui, "homescreen_bgseason", &mut config.homescreen_bgseason, &[
                     (BgSeason::None, &t!("default")),
-                    // Season IDs from TextId enum
-                    (BgSeason::Spring, unsafe { (*Localize::Get(1067)).as_utf16str() }.to_string().as_str()),
-                    (BgSeason::Summer, unsafe { (*Localize::Get(1068)).as_utf16str() }.to_string().as_str()),
-                    (BgSeason::Fall, unsafe { (*Localize::Get(1069)).as_utf16str() }.to_string().as_str()),
-                    (BgSeason::Winter, unsafe { (*Localize::Get(1070)).as_utf16str() }.to_string().as_str()),
-                    (BgSeason::CherryBlossom, unsafe { (*Localize::Get(1071)).as_utf16str() }.to_string().as_str())
+                    // Season text from TextId enum
+                    (BgSeason::Spring, &get_localized_string("Common0108").as_str()),
+                    (BgSeason::Summer, &get_localized_string("Common0109").as_str()),
+                    (BgSeason::Fall, &get_localized_string("Common0110").as_str()),
+                    (BgSeason::Winter, &get_localized_string("Common0111").as_str()),
+                    (BgSeason::CherryBlossom, &get_localized_string("Common0112").as_str())
                 ]);
                 ui.end_row();
 
