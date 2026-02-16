@@ -481,6 +481,12 @@ impl Hachimi {
                         last_interval = interval;
                     }
 
+                    // don't re-check while user hasn't acted on the current update
+                    if self.tl_updater.has_pending_update() {
+                        next_check = Instant::now() + interval;
+                        continue;
+                    }
+
                     if Instant::now() >= next_check {
                         let silent = config.tl_update_mode == TlUpdateMode::Silent;
                         info!("Running translation updater check (Silent: {})...", silent);
