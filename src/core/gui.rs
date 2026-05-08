@@ -75,7 +75,6 @@ pub struct Gui {
     last_fps_update: Instant,
     tmp_frame_count: u32,
     fps_text: String,
-    #[cfg(target_os = "android")]
     last_focused: Option<egui::Id>,
     #[cfg(target_os = "android")]
     ime_cooldown: Option<Instant>,
@@ -477,7 +476,6 @@ impl Gui {
             last_fps_update: now,
             tmp_frame_count: 0,
             fps_text: "FPS: 0".to_string(),
-            #[cfg(target_os = "android")]
             last_focused: None,
             #[cfg(target_os = "android")]
             ime_cooldown: None,
@@ -637,6 +635,26 @@ impl Gui {
             self.show_notification(&t!("notification.config_error"));
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            use crate::il2cpp::hook::UnityEngine_InputLegacyModule::Input::set_imeCompositionMode;
+
+            let focused = self.context.memory(|m| m.focused());
+            let wants_kb = self.context.wants_keyboard_input();
+
+            if focused != self.last_focused {
+                if wants_kb {
+                    Thread::main_thread().schedule(|| {
+                        set_imeCompositionMode(1);
+                    });
+                } else if self.last_focused.is_some() {
+                    Thread::main_thread().schedule(|| {
+                        set_imeCompositionMode(0);
+                    });
+                }
+            }
+            self.last_focused = focused;
+        }
         #[cfg(target_os = "android")]
         {
             use crate::android::utils::{set_keyboard_visible, check_keyboard_status, BACK_BUTTON_PRESSED, IS_IME_VISIBLE};
