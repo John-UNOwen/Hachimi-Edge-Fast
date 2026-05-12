@@ -641,10 +641,12 @@ pub fn get_data_path() -> String {
             .join("umamusume_Data")
             .join("Persistent");
 
-        let dir_ok = |path: &Path| {
-            path.exists() && std::fs::read_dir(path)
-                .map(|mut d| d.next().is_some())
-                .unwrap_or(false)
+        let dir_ok = |path: &std::path::Path| {
+            path.exists()
+                && std::fs::read_dir(path)
+                    .map(|mut d| d.next().is_some())
+                    .unwrap_or(false)
+                && path.join("master").join("master.mdb").exists()
         };
 
         if game.region == Region::Japan && game.is_steam_release && dir_ok(&jp_steam_data_path) {
