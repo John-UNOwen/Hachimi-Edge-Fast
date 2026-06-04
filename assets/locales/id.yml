@@ -168,7 +168,7 @@ config_editor:
   hide_ingame_ui_hotkey_bind: "Sembunyikan tombol dalam UI in-game"
   hide_ingame_ui_hotkey_info: >-
     Opsi ini memungkinkan tombol pintas untuk mengaktifkan/menonaktifkan UI di dalam game.
-    Untuk Android, Anda perlu mengetuk dua kali tombol Volume Atas, atau mengetuk tiga kali di bagian kanan atas layar.
+    Untuk Android, Anda dapat mengetuk tiga kali di bagian kanan atas layar.
     Untuk PC/Android dengan keyboard, tombolnya adalah Insert dan dapat dikonfigurasi di GUI atau config.
   discord_rpc: "RPC Discord"
   menu_open_key: "Buka menu hotkey"

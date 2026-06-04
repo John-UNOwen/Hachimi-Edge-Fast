@@ -185,8 +185,8 @@ config_editor:
   hide_ingame_ui_hotkey: "Hide ingame UI hotkey"
   hide_ingame_ui_hotkey_info: >-
     This option allows a shortcut key to toggle the ingame UI.
-    For Android, you need to double tap the Volume Up key, or triple tap the top right of the screen.
-    For PC/Android with keyboard, it's the Insert key and can be configured in the gui or config.
+    For Android, you can triple tap the top right of the screen.
+    For PC/Android with keyboard, it's the Insert key by default and can be configured in the gui or config.
   hide_ingame_ui_hotkey_bind: "Hide ingame UI keybind"
   discord_rpc: "Discord RPC"
   menu_open_key: "Open menu hotkey"

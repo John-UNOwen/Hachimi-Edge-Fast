@@ -171,7 +171,7 @@ config_editor:
   hide_ingame_ui_hotkey_bind: "Atalho para esconder a UI do jogo"
   hide_ingame_ui_hotkey_info: >-
     Esta opção permite que um atalho seja utilizado para alternar a visualização da UI do jogo.
-    No Android, você pode pressionar rapidamente duas vezes o botão de volume para cima, ou tocar três vezes rapidamente no canto superior direito da tela.
+    No Android, você pode tocar três vezes rapidamente no canto superior direito da tela.
     No PC/Android com um teclado conectado, você pode pressionar a tecla Insert ou definir outra tecla nas configurações.
   discord_rpc: "Discord RPC"
   menu_open_key: "Atalho para abrir o menu"
