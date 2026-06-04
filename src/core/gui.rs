@@ -1929,7 +1929,8 @@ struct ConfigEditor {
     last_ptr_config: usize,
     config: hachimi::Config,
     id: egui::Id,
-    current_tab: ConfigEditorTab
+    current_tab: ConfigEditorTab,
+    search_term: String
 }
 
 #[derive(Eq, PartialEq, Clone, Copy)]
@@ -1949,6 +1950,10 @@ impl ConfigEditorTab {
     }
 }
 
+fn should_show_option(search: &str, label: &str) -> bool {
+    search.is_empty() || label.to_lowercase().contains(&search.to_lowercase())
+}
+
 impl ConfigEditor {
     pub fn new() -> ConfigEditor {
         let handle = Hachimi::instance().config.load();
@@ -1956,7 +1961,8 @@ impl ConfigEditor {
             last_ptr_config: Arc::as_ptr(&handle) as usize,
             config: (**Hachimi::instance().config.load()).clone(),
             id: random_id(),
-            current_tab: ConfigEditorTab::General
+            current_tab: ConfigEditorTab::General,
+            search_term: String::new()
         }
     }
 
@@ -1986,19 +1992,23 @@ impl ConfigEditor {
         }
     }
 
-    fn run_options_grid(config: &mut hachimi::Config, ui: &mut egui::Ui, tab: ConfigEditorTab) {
+    fn run_options_grid(config: &mut hachimi::Config, ui: &mut egui::Ui, tab: ConfigEditorTab, search: &str) {
         let scale = get_scale(ui.ctx());
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        let show_all = !search.is_empty();
 
-        match tab {
-            ConfigEditorTab::General => {
+        // General tab
+        if show_all || tab == ConfigEditorTab::General {
+            if should_show_option(search, &t!("config_editor.language")) {
                 ui.label(t!("config_editor.language"));
                 let lang_changed = Gui::run_combo(ui, "language", &mut config.language, Language::CHOICES);
                 if lang_changed {
                     config.language.set_locale();
                 }
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.disable_overlay")) {
                 ui.label(t!("config_editor.disable_overlay"));
                 if ui.checkbox(&mut config.disable_gui, "").clicked() {
                     if config.disable_gui {
@@ -2015,11 +2025,15 @@ impl ConfigEditor {
                     }
                 }
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.ipv4_only")) {
                 ui.label(t!("config_editor.ipv4_only"));
                 ui.checkbox(&mut config.ipv4_only, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.meta_index_url")) {
                 ui.label(t!("config_editor.meta_index_url"));
                 let res = ui.add(egui::TextEdit::singleline(&mut config.meta_index_url).lock_focus(true));
                 #[cfg(target_os = "android")]
@@ -2038,18 +2052,24 @@ impl ConfigEditor {
                     ));
                 }
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.gui_scale")) {
                 ui.label(t!("config_editor.gui_scale"));
                 ui.add(egui::Slider::new(&mut config.gui_scale, 0.25..=2.0).step_by(0.05));
                 ui.end_row();
-                
-                #[cfg(target_os = "windows")]
-                {
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                if should_show_option(search, &t!("config_editor.gui_landscape_ratio")) {
                     ui.label(t!("config_editor.gui_landscape_ratio"));
                     ui.add(egui::Slider::new(&mut config.windows.gui_landscape_ratio, 0.25..=1.0).step_by(0.05).fixed_decimals(2));
                     ui.end_row();
                 }
+            }
 
+            if should_show_option(search, &t!("theme_editor.title")) {
                 ui.label(t!("theme_editor.title"));
                 ui.horizontal(|ui| {
                     if ui.button(t!("open")).clicked() {
@@ -2061,14 +2081,18 @@ impl ConfigEditor {
                     }
                 });
                 ui.end_row();
+            }
 
-                #[cfg(target_os = "windows")]
-                {
+            #[cfg(target_os = "windows")]
+            {
+                if should_show_option(search, &t!("config_editor.discord_rpc")) {
                     ui.label(t!("config_editor.discord_rpc"));
                     ui.checkbox(&mut config.windows.discord_rpc, "");
                     ui.end_row();
                 }
+            }
 
+            if should_show_option(search, &t!("config_editor.menu_open_key")) {
                 ui.label(t!("config_editor.menu_open_key"));
                 ui.horizontal(|ui| {
                     #[cfg(target_os = "windows")]
@@ -2097,47 +2121,69 @@ impl ConfigEditor {
                     }
                 });
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.debug_mode")) {
                 ui.label(t!("config_editor.debug_mode"));
                 ui.checkbox(&mut config.debug_mode, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.enable_file_logging")) {
                 ui.label(t!("config_editor.enable_file_logging"));
                 ui.checkbox(&mut config.enable_file_logging, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.apply_atlas_workaround")) {
                 ui.label(t!("config_editor.apply_atlas_workaround"));
                 ui.checkbox(&mut config.apply_atlas_workaround, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.translator_mode")) {
                 ui.label(t!("config_editor.translator_mode"));
                 ui.checkbox(&mut config.translator_mode, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.skip_first_time_setup")) {
                 ui.label(t!("config_editor.skip_first_time_setup"));
                 ui.checkbox(&mut config.skip_first_time_setup, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.lazy_translation_updates")) {
                 ui.label(t!("config_editor.lazy_translation_updates"));
                 ui.checkbox(&mut config.lazy_translation_updates, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.disable_auto_update_check")) {
                 ui.label(t!("config_editor.disable_auto_update_check"));
                 ui.checkbox(&mut config.disable_auto_update_check, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.disable_translations")) {
                 ui.label(t!("config_editor.disable_translations"));
                 ui.checkbox(&mut config.disable_translations, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.enable_ipc")) {
                 ui.label(t!("config_editor.enable_ipc"));
                 ui.checkbox(&mut config.enable_ipc, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.ipc_listen_all")) {
                 ui.label(t!("config_editor.ipc_listen_all"));
                 ui.checkbox(&mut config.ipc_listen_all, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.auto_translate_stories")) {
                 ui.label(t!("config_editor.auto_translate_stories"));
                 if ui.checkbox(&mut config.auto_translate_stories, "").clicked() {
                     if config.auto_translate_stories {
@@ -2154,7 +2200,9 @@ impl ConfigEditor {
                     }
                 }
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.auto_translate_ui")) {
                 ui.label(t!("config_editor.auto_translate_ui"));
                 if ui.checkbox(&mut config.auto_translate_localize, "").clicked() {
                     if config.auto_translate_localize {
@@ -2171,27 +2219,41 @@ impl ConfigEditor {
                     }
                 }
                 ui.end_row();
-            },
+            }
+        }
+        // General tab end
 
-            ConfigEditorTab::Graphics => {
+        // Graphics tab
+        if show_all || tab == ConfigEditorTab::Graphics {
+            if should_show_option(search, &t!("config_editor.target_fps")) {
                 Self::option_slider(ui, &t!("config_editor.target_fps"), &mut config.target_fps, 30..=1000);
+            }
 
+            if should_show_option(search, &t!("config_editor.virtual_resolution_multiplier")) {
                 ui.label(t!("config_editor.virtual_resolution_multiplier"));
                 ui.add(egui::Slider::new(&mut config.virtual_res_mult, 1.0..=4.0).step_by(0.1));
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.ui_scale")) {
                 ui.label(t!("config_editor.ui_scale"));
                 ui.add(egui::Slider::new(&mut config.ui_scale, 0.1..=10.0).step_by(0.05));
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.ui_animation_scale")) {
                 ui.label(t!("config_editor.ui_animation_scale"));
                 ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.render_scale")) {
                 ui.label(t!("config_editor.render_scale"));
                 ui.add(egui::Slider::new(&mut config.render_scale, 0.1..=10.0).step_by(0.1));
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.msaa")) {
                 ui.label(t!("config_editor.msaa"));
                 Gui::run_combo(ui, "msaa", &mut config.msaa, &[
                     (MsaaQuality:: Disabled, &t!("default")),
@@ -2200,7 +2262,9 @@ impl ConfigEditor {
                     (MsaaQuality::_8x, "8x")
                 ]);
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.aniso_level")) {
                 ui.label(t!("config_editor.aniso_level"));
                 Gui::run_combo(ui, "aniso_level", &mut config.aniso_level, &[
                     (AnisoLevel::Default, &t!("default")),
@@ -2210,7 +2274,9 @@ impl ConfigEditor {
                     (AnisoLevel::_16x, "16x")
                 ]);
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.shadow_resolution")) {
                 ui.label(t!("config_editor.shadow_resolution"));
                 Gui::run_combo(ui, "shadow_resolution", &mut config.shadow_resolution, &[
                     (ShadowResolution::Default, &t!("default")),
@@ -2221,7 +2287,9 @@ impl ConfigEditor {
                     (ShadowResolution::_4096, "4K")
                 ]);
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.graphics_quality")) {
                 ui.label(t!("config_editor.graphics_quality"));
                 Gui::run_combo(ui, "graphics_quality", &mut config.graphics_quality, &[
                     (GraphicsQuality::Default, &t!("default")),
@@ -2232,30 +2300,40 @@ impl ConfigEditor {
                     (GraphicsQuality::Max, "Max")
                 ]);
                 ui.end_row();
+            }
 
-                #[cfg(target_os = "windows")]
-                {
-                    use crate::windows::hachimi_impl::{FullScreenMode, ResolutionScaling};
+            #[cfg(target_os = "windows")]
+            {
+                use crate::windows::hachimi_impl::{FullScreenMode, ResolutionScaling};
 
+                if should_show_option(search, &t!("config_editor.vsync")) {
                     ui.label(t!("config_editor.vsync"));
                     Gui::run_vsync_combo(ui, &mut config.windows.vsync_count);
                     ui.end_row();
+                }
 
+                if should_show_option(search, &t!("config_editor.auto_full_screen")) {
                     ui.label(t!("config_editor.auto_full_screen"));
                     ui.checkbox(&mut config.windows.auto_full_screen, "");
                     ui.end_row();
+                }
 
+                if should_show_option(search, &t!("config_editor.full_screen_mode")) {
                     ui.label(t!("config_editor.full_screen_mode"));
                     Gui::run_combo(ui, "full_screen_mode", &mut config.windows.full_screen_mode, &[
                         (FullScreenMode::ExclusiveFullScreen, &t!("config_editor.full_screen_mode_exclusive")),
                         (FullScreenMode::FullScreenWindow, &t!("config_editor.full_screen_mode_borderless"))
                     ]);
                     ui.end_row();
+                }
 
+                if should_show_option(search, &t!("config_editor.block_minimize_in_full_screen")) {
                     ui.label(t!("config_editor.block_minimize_in_full_screen"));
                     ui.checkbox(&mut config.windows.block_minimize_in_full_screen, "");
                     ui.end_row();
+                }
 
+                if should_show_option(search, &t!("config_editor.resolution_scaling")) {
                     ui.label(t!("config_editor.resolution_scaling"));
                     Gui::run_combo(ui, "resolution_scaling", &mut config.windows.resolution_scaling, &[
                         (ResolutionScaling::Default, &t!("config_editor.resolution_scaling_default")),
@@ -2263,14 +2341,20 @@ impl ConfigEditor {
                         (ResolutionScaling::ScaleToWindowSize, &t!("config_editor.resolution_scaling_wsize"))
                     ]);
                     ui.end_row();
+                }
 
+                if should_show_option(search, &t!("config_editor.window_always_on_top")) {
                     ui.label(t!("config_editor.window_always_on_top"));
                     ui.checkbox(&mut config.windows.window_always_on_top, "");
                     ui.end_row();
                 }
-            },
+            }
+        }
+        // Graphics tab end
 
-            ConfigEditorTab::Gameplay => {
+        // Gameplay tab
+        if show_all || tab == ConfigEditorTab::Gameplay {
+            if should_show_option(search, &t!("config_editor.physics_update_mode")) {
                 ui.label(t!("config_editor.physics_update_mode"));
                 Gui::run_combo(ui, "physics_update_mode", &mut config.physics_update_mode, &[
                     (None, &t!("default")),
@@ -2280,23 +2364,33 @@ impl ConfigEditor {
                     (SpringUpdateMode::SkipFramePostAlways.into(), "SkipFramePostAlways")
                 ]);
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.story_choice_auto_select_delay")) {
                 ui.label(t!("config_editor.story_choice_auto_select_delay"));
                 ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.1..=10.0).step_by(0.05));
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.story_text_speed_multiplier")) {
                 ui.label(t!("config_editor.story_text_speed_multiplier"));
                 ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=10.0).step_by(0.1));
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.force_allow_dynamic_camera")) {
                 ui.label(t!("config_editor.force_allow_dynamic_camera"));
                 ui.checkbox(&mut config.force_allow_dynamic_camera, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.live_theater_allow_same_chara")) {
                 ui.label(t!("config_editor.live_theater_allow_same_chara"));
                 ui.checkbox(&mut config.live_theater_allow_same_chara, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.live_vocals_swap")) {
                 ui.label(t!("config_editor.live_vocals_swap"));
                 ui.horizontal(|ui| {
                     if ui.button(t!("open")).clicked() {
@@ -2308,11 +2402,15 @@ impl ConfigEditor {
                     }
                 });
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.skill_info_dialog")) {
                 ui.label(t!("config_editor.skill_info_dialog"));
                 ui.checkbox(&mut config.skill_info_dialog, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.homescreen_bgseason")) {
                 ui.label(t!("config_editor.homescreen_bgseason"));
                 // Season text from TextId enum
                 let default_label = t!("default");
@@ -2334,11 +2432,15 @@ impl ConfigEditor {
                 }
                 Gui::run_combo(ui, "homescreen_bgseason", &mut config.homescreen_bgseason, &seasons);
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.disable_skill_name_translation")) {
                 ui.label(t!("config_editor.disable_skill_name_translation"));
                 ui.checkbox(&mut config.disable_skill_name_translation, "");
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.hide_ingame_ui_hotkey")) {
                 ui.label(t!("config_editor.hide_ingame_ui_hotkey"));
                 if ui.checkbox(&mut config.hide_ingame_ui_hotkey, "").clicked() {
                     if config.hide_ingame_ui_hotkey {
@@ -2355,7 +2457,9 @@ impl ConfigEditor {
                     }
                 }
                 ui.end_row();
+            }
 
+            if should_show_option(search, &t!("config_editor.hide_ingame_ui_hotkey_bind")) {
                 ui.label(t!("config_editor.hide_ingame_ui_hotkey_bind"));
                 ui.horizontal(|ui| {
                     #[cfg(target_os = "windows")]
@@ -2386,6 +2490,7 @@ impl ConfigEditor {
                 ui.end_row();
             }
         }
+        // Gameplay tab end
 
         // Column widths workaround
         ui.horizontal(|ui| ui.add_space(100.0 * scale));
@@ -2420,25 +2525,42 @@ impl Window for ConfigEditor {
         .show(ctx, |ui| {
             simple_window_layout(ui, self.id,
                 |ui| {
-                    egui::ScrollArea::horizontal()
-                    .id_salt("tabs_scroll")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let style = ui.style_mut();
-                            style.spacing.button_padding = egui::vec2(8.0, 5.0);
-                            style.spacing.item_spacing = egui::Vec2::ZERO;
-                            let widgets = &mut style.visuals.widgets;
-                            widgets.inactive.corner_radius = egui::CornerRadius::ZERO;
-                            widgets.hovered.corner_radius = egui::CornerRadius::ZERO;
-                            widgets.active.corner_radius = egui::CornerRadius::ZERO;
+                    ui.horizontal(|ui| {
+                        // search bar
+                        let search_res = ui.add_sized(
+                            [ui.available_width() - 30.0 * scale, 24.0 * scale],
+                            egui::TextEdit::singleline(&mut self.search_term).hint_text(t!("search_filter"))
+                        );
+                        #[cfg(target_os = "android")]
+                        handle_android_keyboard(&search_res, &mut self.search_term);
 
-                            for (tab, label) in ConfigEditorTab::display_list() {
-                                if ui.selectable_label(self.current_tab == tab, label.as_ref()).clicked() {
-                                    self.current_tab = tab;
-                                }
-                            }
-                        });
+                        if ui.button("\u{f00d}").clicked() {
+                            self.search_term.clear();
+                        }
                     });
+                    ui.add_space(4.0);
+
+                    if self.search_term.is_empty() {
+                        egui::ScrollArea::horizontal()
+                        .id_salt("tabs_scroll")
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let style = ui.style_mut();
+                                style.spacing.button_padding = egui::vec2(8.0, 5.0);
+                                style.spacing.item_spacing = egui::Vec2::ZERO;
+                                let widgets = &mut style.visuals.widgets;
+                                widgets.inactive.corner_radius = egui::CornerRadius::ZERO;
+                                widgets.hovered.corner_radius = egui::CornerRadius::ZERO;
+                                widgets.active.corner_radius = egui::CornerRadius::ZERO;
+    
+                                for (tab, label) in ConfigEditorTab::display_list() {
+                                    if ui.selectable_label(self.current_tab == tab, label.as_ref()).clicked() {
+                                        self.current_tab = tab;
+                                    }
+                                }
+                            });
+                        });
+                    }
 
                     ui.add_space(4.0);
 
@@ -2453,7 +2575,7 @@ impl Window for ConfigEditor {
                             .num_columns(2)
                             .spacing([40.0 * scale, 4.0 * scale])
                             .show(ui, |ui| {
-                                Self::run_options_grid(&mut config, ui, self.current_tab);
+                                Self::run_options_grid(&mut config, ui, self.current_tab, &self.search_term);
                             });
                         });
                         #[cfg(target_os = "android")]
@@ -4213,6 +4335,10 @@ impl Window for AboutWindow {
 
                 if ui.button(t!("about.view_source_code")).clicked() {
                     Application::OpenURL(format!("https://github.com/{}", REPO_PATH).to_il2cpp_string());
+                }
+
+                if ui.button(t!("about.view_contributors")).clicked() {
+                    Application::OpenURL(format!("https://github.com/{}/graphs/contributors?all=1", REPO_PATH).to_il2cpp_string());
                 }
             });
         });

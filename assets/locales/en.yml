@@ -106,9 +106,10 @@ first_time_setup:
 about:
   title: "About"
   copyright: "© 2024-%{year} LeadRDRK, kairusds and contributors"
-  view_license: "View license"
-  open_website: "Open website"
-  view_source_code: "View source code"
+  view_license: "View License"
+  open_website: "Open Website"
+  view_source_code: "View Source Code"
+  view_contributors: "View Contributors"
 
 license:
   title: "License"
