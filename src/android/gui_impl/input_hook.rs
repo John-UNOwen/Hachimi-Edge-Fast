@@ -9,7 +9,7 @@ use jni::{
 
 use crate::{
     android::utils::{BACK_BUTTON_PRESSED, IS_IME_VISIBLE, get_activity, get_screen_dimensions},
-    core::{Error, Gui, Hachimi},
+    core::{gui, Error, Gui, Hachimi},
     il2cpp::symbols::Thread
 };
 
@@ -151,6 +151,14 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
             }
 
             _ => {
+                if gui::is_keybind_capture_active() {
+                    if pressed && repeat_count == 0 {
+                        let display = keymap::keycode_display_label(key_code);
+                        gui::report_keybind_capture(key_code, display);
+                        return JNI_TRUE;
+                    }
+                }
+
                 if pressed && key_code == Hachimi::instance().config.load().android.menu_open_key {
                     let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
                         return get_orig_fn!(nativeInjectEvent, NativeInjectEventFn)(env, obj, input_event, extra_param);

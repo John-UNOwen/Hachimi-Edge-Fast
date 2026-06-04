@@ -168,6 +168,11 @@ theme_editor:
   ui_text_color: "Kulay ng Text"
   ui_window_rounding: "Mga Rounded Corner"
 
+set_keybind:
+  title: "I-set ang Keybind"
+  press_any_key: "Pindutin ang key..."
+  bound_key: "Naka-bind na key: %{key}"
+
 tl_update_dialog:
   title: "May bagong update"
   content: "May bagong update sa translations (%{size}). Gusto mo ba ito i-download?"
