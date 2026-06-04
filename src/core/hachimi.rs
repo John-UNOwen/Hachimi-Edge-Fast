@@ -876,10 +876,13 @@ pub struct LocalizedDataConfig {
     pub story_line_count_offset: Option<i32>,
     pub text_frame_line_spacing_multiplier: Option<f32>,
     pub text_frame_font_size_multiplier: Option<f32>,
+    pub choice_btn_line_spacing_multiplier: Option<f32>,
     #[serde(default)]
     pub skill_formatting: SkillFormatting,
     #[serde(default)]
     pub text_common_allow_overflow: bool,
+    #[serde(default)]
+    pub text_common_best_fit: bool,
     #[serde(default)]
     pub now_loading_comic_title_ellipsis: bool,
 
