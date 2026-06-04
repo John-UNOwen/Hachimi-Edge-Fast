@@ -126,9 +126,12 @@ static PLUGIN_MENU_ITEMS: Lazy<Mutex<Vec<PluginMenuItem>>> = Lazy::new(|| Mutex:
 static PLUGIN_MENU_SECTIONS: Lazy<Mutex<Vec<PluginMenuSection>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static PLUGIN_MENU_ICONS: Lazy<Mutex<HashMap<String, PluginMenuIcon>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static PLUGIN_NOTIFICATIONS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static PLUGIN_WINDOWS_TO_SHOW: Lazy<Mutex<Vec<PluginWindow>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static PLUGIN_WINDOWS_TO_CLOSE: Lazy<Mutex<Vec<i32>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 pub type PluginMenuCallback = extern "C" fn(userdata: *mut c_void);
 pub type PluginMenuSectionCallback = extern "C" fn(ui: *mut c_void, userdata: *mut c_void);
+pub type PluginWindowCallback = extern "C" fn(ui: *mut c_void, userdata: *mut c_void);
 
 #[derive(Clone)]
 struct PluginMenuItem {
@@ -150,6 +153,18 @@ struct PluginMenuSection {
     callback: PluginMenuSectionCallback,
     userdata: usize
 }
+
+#[derive(Clone)]
+struct PluginWindow {
+    id: i32,
+    title: String,
+    contents_callback: Option<PluginWindowCallback>,
+    bottom_callback: Option<PluginWindowCallback>,
+    userdata: usize,
+}
+
+unsafe impl Send for PluginWindow {}
+unsafe impl Sync for PluginWindow {}
 
 pub fn register_plugin_menu_item(label: String, callback: Option<PluginMenuCallback>, userdata: *mut c_void) {
     PLUGIN_MENU_ITEMS.lock().unwrap().push(PluginMenuItem {
@@ -217,6 +232,74 @@ fn get_plugin_menu_icon(label: &str) -> Option<PluginMenuIcon> {
 fn drain_plugin_notifications() -> Vec<String> {
     let mut notifications = PLUGIN_NOTIFICATIONS.lock().unwrap();
     std::mem::take(&mut *notifications)
+}
+
+impl Window for PluginWindow {
+    fn run(&mut self, ctx: &egui::Context) -> bool {
+        let mut open = true;
+        let id = egui::Id::new("plugin_window").with(self.id);
+
+        new_window(ctx, id, &self.title)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
+                simple_window_layout(ui, id,
+                    |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if let Some(callback) = self.contents_callback {
+                                let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                                    callback(ui as *mut _ as *mut c_void, self.userdata as *mut c_void);
+                                })).inspect_err(|_| error!("plugin window contents callback panicked"));
+                            }
+                        });
+                    },
+                    |ui| {
+                        if let Some(callback) = self.bottom_callback {
+                            let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                                callback(ui as *mut _ as *mut c_void, self.userdata as *mut c_void);
+                            })).inspect_err(|_| error!("plugin window bottom callback panicked"));
+                        }
+                    }
+                );
+            });
+
+        open
+    }
+
+    fn plugin_window_id(&self) -> Option<i32> { Some(self.id) }
+}
+
+pub fn show_plugin_window(
+    id: i32,
+    title: String,
+    contents_callback: Option<PluginWindowCallback>,
+    bottom_callback: Option<PluginWindowCallback>,
+    userdata: usize,
+) {
+    let window = PluginWindow {
+        id,
+        title,
+        contents_callback,
+        bottom_callback,
+        userdata,
+    };
+    
+    PLUGIN_WINDOWS_TO_SHOW.lock().unwrap().push(window);
+}
+
+pub fn close_plugin_window(id: i32) {
+    PLUGIN_WINDOWS_TO_CLOSE.lock().unwrap().push(id);
+}
+
+fn drain_plugin_windows_to_show() -> Vec<PluginWindow> {
+    let mut windows = PLUGIN_WINDOWS_TO_SHOW.lock().unwrap();
+    std::mem::take(&mut *windows)
+}
+
+fn take_plugin_windows_to_close() -> Vec<i32> {
+    let mut ids = PLUGIN_WINDOWS_TO_CLOSE.lock().unwrap();
+    std::mem::take(&mut *ids)
 }
 
 #[cfg(target_os = "windows")]
@@ -649,6 +732,26 @@ impl Gui {
         }
     }
 
+    fn process_plugin_windows(&mut self) {
+        let new_windows = drain_plugin_windows_to_show();
+        let new_ids: Vec<i32> = new_windows.iter().map(|w| w.id).collect();
+        let close_ids = take_plugin_windows_to_close();
+
+        if !new_ids.is_empty() || !close_ids.is_empty() {
+            self.windows.retain_mut(|w| {
+                if let Some(id) = w.plugin_window_id() {
+                    !new_ids.contains(&id) && !close_ids.contains(&id)
+                } else {
+                    true
+                }
+            });
+        }
+
+        for window in new_windows {
+            self.show_window(Box::new(window));
+        }
+    }
+
     pub fn run(&mut self) -> egui::FullOutput {
         if let Ok(mut lock) = PENDING_THEME.lock() {
             if let Some(config) = lock.take() {
@@ -694,6 +797,7 @@ impl Gui {
         if self.menu_visible { self.run_menu(); }
         if self.update_progress_visible { self.run_update_progress(); }
 
+        self.process_plugin_windows();
         self.run_windows();
         self.run_notifications();
 
@@ -1566,6 +1670,7 @@ impl Notification {
 
 pub trait Window {
     fn run(&mut self, ctx: &egui::Context) -> bool;
+    fn plugin_window_id(&self) -> Option<i32> { None }
 }
 
 // Shared window creation function
@@ -2680,7 +2785,7 @@ impl Window for FirstTimeSetupWindow {
                 _ => true
             };
 
-            page_open = paginated_window_layout(ui, self.id, &mut self.current_page, 3, allow_next, |ui, i| {
+            page_open = paginated_window_layout(ui, self.id, &mut self.current_page, 4, allow_next, |ui, i| {
                 match i {
                     0 => {
                         ui.heading(t!("first_time_setup.welcome_heading"));
@@ -2742,6 +2847,65 @@ impl Window for FirstTimeSetupWindow {
                         );
                     }
                     2 => {
+                        ui.heading(t!("first_time_setup.common_settings_heading"));
+                        ui.separator();
+                        ui.label(t!("first_time_setup.common_settings_content"));
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(t!("config_editor.target_fps"));
+                            let mut enabled = self.config.target_fps.is_some();
+                            if ui.checkbox(&mut enabled, t!("enable")).changed() {
+                                if enabled {
+                                    self.config.target_fps = Some(60);
+                                } else {
+                                    self.config.target_fps = None;
+                                }
+                            }
+                        });
+                        if let Some(ref mut fps) = self.config.target_fps {
+                            ui.horizontal(|ui| {
+                                ui.label("");
+                                let _ = ui.add(egui::Slider::new(fps, 30..=1000));
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(t!("config_editor.disable_skill_name_translation"));
+                            let _ = ui.checkbox(&mut self.config.disable_skill_name_translation, "");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(t!("config_editor.menu_open_key"));
+                            #[cfg(target_os = "windows")]
+                            ui.label(crate::windows::utils::vk_to_display_label(self.config.windows.menu_open_key));
+                            #[cfg(target_os = "android")]
+                            ui.label(crate::android::gui_impl::keymap::keycode_display_label(self.config.android.menu_open_key));
+
+                            if ui.button(t!("bind_key")).clicked() {
+                                let config_clone = self.config.clone();
+                                std::thread::spawn(move || {
+                                    let Some(gui_mutex) = Gui::instance() else { return };
+                                    let mut gui = gui_mutex.lock().unwrap();
+                                    gui.show_window(Box::new(SetKeybindWindow::new(move |result| {
+                                        let Some(raw) = result else { return };
+
+                                        let mut new_config = config_clone.clone();
+
+                                        #[cfg(target_os = "windows")]
+                                        { new_config.windows.menu_open_key = raw; }
+                                        #[cfg(target_os = "android")]
+                                        { new_config.android.menu_open_key = raw; }
+
+                                        save_and_reload_config(new_config);
+                                    })));
+                                });
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(t!("config_editor.ui_animation_scale"));
+                            let _ = ui.add(egui::Slider::new(&mut self.config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
+                        });
+                    }
+                    3 => {
                         ui.heading(t!("first_time_setup.complete_heading"));
                         ui.separator();
                         ui.label(t!("first_time_setup.complete_content"));

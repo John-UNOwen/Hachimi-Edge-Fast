@@ -1,11 +1,11 @@
-use std::ffi::{c_char, c_void, CStr};
+use std::{ffi::{c_char, c_void, CStr}, sync::atomic::AtomicI32};
 
 use once_cell::sync::OnceCell;
 use egui::Align;
 
 use crate::{core::{Hachimi, Interceptor, gui}, il2cpp::{self, types::{FieldInfo, Il2CppArray, Il2CppClass, Il2CppImage, Il2CppMethodPointer, Il2CppObject, Il2CppThread, Il2CppTypeEnum, MethodInfo, il2cpp_array_size_t}}};
 
-const VERSION: i32 = 2;
+const VERSION: i32 = 3;
 
 static PLUGIN_VTABLE: OnceCell<Vtable> = OnceCell::new();
 
@@ -13,6 +13,9 @@ pub type HachimiInitFn = extern "C" fn(vtable: *const Vtable, version: i32) -> I
 pub type GuiMenuCallback = extern "C" fn(userdata: *mut c_void);
 pub type GuiMenuSectionCallback = extern "C" fn(ui: *mut c_void, userdata: *mut c_void);
 pub type GuiUiCallback = extern "C" fn(ui: *mut c_void, userdata: *mut c_void);
+pub type GuiWindowCallback = extern "C" fn(ui: *mut c_void, userdata: *mut c_void);
+
+static NEXT_PLUGIN_WINDOW_ID: AtomicI32 = AtomicI32::new(0);
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -483,6 +486,33 @@ unsafe extern "C" fn gui_register_menu_section_with_icon(
     )
 }
 
+unsafe extern "C" fn gui_new_window_id() -> i32 {
+    NEXT_PLUGIN_WINDOW_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+unsafe extern "C" fn gui_show_window(
+    id: i32,
+    title: *const c_char,
+    contents_callback: Option<GuiWindowCallback>,
+    bottom_callback: Option<GuiWindowCallback>,
+    userdata: *mut c_void
+) -> bool {
+    if title.is_null() { return false; }
+    let Ok(title_str) = CStr::from_ptr(title).to_str() else { return false; };
+
+    gui::show_plugin_window(
+        id,
+        title_str.to_owned(),
+        contents_callback,
+        bottom_callback,
+        userdata as usize,
+    );
+    true
+}
+
+unsafe extern "C" fn gui_close_window(id: i32) {
+    gui::close_plugin_window(id);
+}
 
 #[cfg(target_os = "android")]
 unsafe extern "C" fn android_dex_load(dex_ptr: *const u8, dex_len: usize, class_name: *const c_char) -> u64 {
@@ -659,6 +689,16 @@ pub struct Vtable {
         callback: Option<GuiMenuSectionCallback>,
         userdata: *mut c_void
     ) -> bool,
+    // Window management (version >= 3)
+    pub gui_new_window_id: unsafe extern "C" fn() -> i32,
+    pub gui_show_window: unsafe extern "C" fn(
+        id: i32,
+        title: *const c_char,
+        contents_callback: Option<GuiWindowCallback>,
+        bottom_callback: Option<GuiWindowCallback>,
+        userdata: *mut c_void
+    ) -> bool,
+    pub gui_close_window: unsafe extern "C" fn(id: i32),
 
     // Generic DEX/JNI helpers (version >= 2)
     pub android_dex_load: unsafe extern "C" fn(dex_ptr: *const u8, dex_len: usize, class_name: *const c_char) -> u64,
@@ -717,6 +757,9 @@ impl Vtable {
         gui_ui_colored_label,
         gui_register_menu_item_icon,
         gui_register_menu_section_with_icon,
+        gui_new_window_id,
+        gui_show_window,
+        gui_close_window,
         android_dex_load,
         android_dex_unload,
         android_dex_call_static_noargs,
