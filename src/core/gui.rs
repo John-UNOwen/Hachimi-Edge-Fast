@@ -2626,6 +2626,7 @@ impl Window for ConfigEditor {
         let mut reset_clicked = false;
 
         new_window(ctx, self.id, t!("config_editor.title"))
+        .max_height(270.0 * scale)
         .open(&mut open)
         .show(ctx, |ui| {
             simple_window_layout(ui, self.id,
