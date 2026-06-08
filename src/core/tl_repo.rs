@@ -397,35 +397,70 @@ impl Updater {
         };
 
         let mut new_etag: Option<String> = None;
-        if let Ok(head_res) = ureq::agent().head(index_url).call() {
-            if let Some(etag_val) = head_res.headers().get("ETag") {
-                if let Ok(etag_str) = etag_val.to_str() {
-                    let etag_string = etag_str.to_string();
 
-                    if let Some(skipped) = &*self.skipped_etag.lock().unwrap() {
-                        if !pedantic && skipped == &etag_string {
-                            debug!("Server ETag matches the skipped ETag. Ignoring update.");
-                            return Ok(());
-                        }
-                    }
+        // conditional GET: send If-None-Match with the current best ETag.
+        // server replies 304 if nothing changed, 200 + body if it has.
+        let etag_for_request = if !pedantic {
+            repo_cache.index_etag.clone()
+                .or_else(|| self.skipped_etag.lock().unwrap().clone())
+        } else {
+            None
+        };
 
-                    if let Some(cached_etag) = &repo_cache.index_etag {
-                        if !pedantic && cached_etag == &etag_string {
-                            debug!("Server ETag matches cached ETag. No translation updates available.");
-                            if !silent {
-                                if let Some(mutex) = Gui::instance() {
-                                    mutex.lock().unwrap().show_notification(&t!("notification.no_tl_updates"));
-                                }
-                            }
-                            return Ok(());
-                        }
-                    }
-                    new_etag = Some(etag_string);
-                }
-            }
+        let mut request = ureq::agent().get(index_url);
+        if let Some(etag) = &etag_for_request {
+            request = request.header("If-None-Match", etag);
         }
 
-        let index: RepoIndex = http::get_json(index_url)?;
+        let index: RepoIndex = match request.call() {
+            Ok(res) => {
+                if let Some(etag_val) = res.headers().get("ETag") {
+                    if let Ok(etag_str) = etag_val.to_str() {
+                        let etag_string = etag_str.to_string();
+
+                        // user previously dismissed this exact version
+                        if !pedantic {
+                            if let Some(skipped) = &*self.skipped_etag.lock().unwrap() {
+                                if skipped == &etag_string {
+                                    debug!("Server ETag matches the skipped ETag. Ignoring update.");
+                                    return Ok(());
+                                }
+                            }
+                        }
+
+                        // fallback for servers that ignore If-None-Match
+                        if !pedantic {
+                            if let Some(cached) = &repo_cache.index_etag {
+                                if cached == &etag_string {
+                                    debug!("Server ETag matches cached ETag (server may not support conditional requests). No translation updates available.");
+                                    if !silent {
+                                        if let Some(mutex) = Gui::instance() {
+                                            mutex.lock().unwrap().show_notification(&t!("notification.no_tl_updates"));
+                                        }
+                                    }
+                                    return Ok(());
+                                }
+                            }
+                        }
+
+                        new_etag = Some(etag_string);
+                    }
+                }
+                serde_json::from_reader(res.into_body().into_reader())?
+            }
+            Err(ureq::Error::StatusCode(code)) if code == ureq::http::StatusCode::NOT_MODIFIED => {
+                debug!("Server returned 304 Not Modified. No translation updates available.");
+                if !silent {
+                    if let Some(mutex) = Gui::instance() {
+                        mutex.lock().unwrap().show_notification(&t!("notification.no_tl_updates"));
+                    }
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
 
         let excludes_path = hachimi.get_data_path(REPO_EXCLUDES_FILENAME);
         let excludes: HashSet<String> = if excludes_path.exists() {
@@ -544,7 +579,12 @@ impl Updater {
             })));
 
             if silent {
-                Hachimi::instance().tl_updater.clone().run();
+                // don't auto-apply while another update is already in progress
+                if self.progress.load().is_some() {
+                    info!("Silent update skipped, another update is already in progress.");
+                } else {
+                    Hachimi::instance().tl_updater.clone().run();
+                }
             } else if let Some(mutex) = Gui::instance() {
                 // Determine the dialog message based on download strategy
                 let dialog_message = if will_use_zip && update_size > 0 {
@@ -717,6 +757,8 @@ impl Updater {
         let repo_id = hachimi.config.load().selected_tl_repo_id.expect("TL repo ID not set after update");
         let cache_path = Self::get_repo_cache_path(repo_id);
         utils::write_json_file(&repo_cache, &cache_path)?;
+
+        *self.skipped_etag.lock().unwrap() = None;
 
         if let Some(mutex) = Gui::instance() {
             let mut gui = mutex.lock().unwrap();

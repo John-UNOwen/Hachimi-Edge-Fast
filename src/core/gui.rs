@@ -1986,7 +1986,7 @@ impl SimpleOkDialog {
         SimpleOkDialog {
             title: title.to_owned(),
             content: content.to_owned(),
-            scrollable: scrollable.to_owned(),
+            scrollable,
             callback: Some(Box::new(callback)),
             id: random_id()
         }

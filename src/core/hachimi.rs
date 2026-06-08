@@ -1,4 +1,4 @@
-use std::{fs, path::{Path, PathBuf}, process, sync::{atomic::{self, AtomicBool, AtomicI32}, Arc, Mutex}};
+use std::{fs, path::{Path, PathBuf}, process, sync::{atomic::{self, AtomicBool, AtomicI32}, Arc, Mutex}, time::{Duration, Instant}};
 use arc_swap::ArcSwap;
 use fnv::{FnvHashMap, FnvHashSet};
 use once_cell::sync::OnceCell;
@@ -28,7 +28,7 @@ pub struct Hachimi {
     // Localized data
     pub localized_data: ArcSwap<LocalizedData>,
     pub tl_updater: Arc<tl_repo::Updater>,
-    pub tl_update_thread_running: AtomicBool,
+    pub tl_update_cmd: Mutex<Option<crossbeam_channel::Sender<()>>>,
 
     // Character data
     pub chara_data: ArcSwap<CharacterData>,
@@ -124,7 +124,7 @@ impl Hachimi {
             // Don't load localized data initially since it might fail, logging the error is not possible here
             localized_data: ArcSwap::default(),
             tl_updater: Arc::default(),
-            tl_update_thread_running: AtomicBool::new(false),
+            tl_update_cmd: Mutex::new(None),
 
             // Same with these
             chara_data: ArcSwap::default(),
@@ -438,35 +438,64 @@ impl Hachimi {
     }
 
     pub fn start_translation_updater_thread(self: Arc<Self>) {
+        let mut cmd_lock = self.tl_update_cmd.lock().unwrap();
+
+        // drop the old sender to signal the existing thread to exit.
+        // Its recv_timeout will return Disconnected within 1 second.
+        *cmd_lock = None;
+
         let config = self.config.load();
-        if config.tl_update_mode == TlUpdateMode::Disabled || config.tl_update_interval_sec == 0 || config.translator_mode {
+        if config.tl_update_mode == TlUpdateMode::Disabled
+            || config.tl_update_interval_sec == 0
+            || config.translator_mode
+        {
             return;
         }
 
-        if self.tl_update_thread_running.swap(true, atomic::Ordering::Relaxed) {
-            return;
-        }
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+        *cmd_lock = Some(tx);
+        drop(cmd_lock);
+
+        let interval = Duration::from_secs(config.tl_update_interval_sec);
 
         std::thread::Builder::new()
             .name("translation_updater_thread".into())
             .spawn(move || {
-                let mut elapsed: u64 = 0;
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
+                let mut next_check = Instant::now() + interval;
+                let mut last_interval = interval;
 
+                loop {
                     let config = self.config.load();
-                    if config.tl_update_mode == TlUpdateMode::Disabled || config.tl_update_interval_sec == 0 || config.translator_mode {
-                        self.tl_update_thread_running.store(false, atomic::Ordering::Relaxed);
+                    if config.tl_update_mode == TlUpdateMode::Disabled
+                        || config.tl_update_interval_sec == 0
+                        || config.translator_mode
+                    {
                         break;
                     }
 
-                    elapsed += 5;
+                    let interval = Duration::from_secs(config.tl_update_interval_sec);
 
-                    if elapsed >= config.tl_update_interval_sec {
-                        elapsed = 0;
+                    // realign timer if interval changed
+                    if interval != last_interval {
+                        next_check = Instant::now() + interval;
+                        last_interval = interval;
+                    }
+
+                    if Instant::now() >= next_check {
                         let silent = config.tl_update_mode == TlUpdateMode::Silent;
                         info!("Running translation updater check (Silent: {})...", silent);
                         self.tl_updater.clone().check_for_updates(false, silent);
+                        next_check = Instant::now() + interval;
+                    }
+
+                    // interruptible sleep. wakes at least once/sec,
+                    // exits immediately when sender is dropped (restart/stop).
+                    let remaining = next_check.saturating_duration_since(Instant::now());
+                    let sleep = remaining.min(Duration::from_secs(1));
+
+                    match rx.recv_timeout(sleep) {
+                        Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                     }
                 }
             })
