@@ -1774,6 +1774,7 @@ fn paginated_window_layout(
 fn tl_repo_list_ui(
     ui: &mut egui::Ui,
     request: &Arc<AsyncRequest<Vec<RepoInfo>>>,
+    on_retry: impl FnOnce(),
     current_tl_repo: &mut Option<String>,
     has_auto_selected: &mut bool,
     current_lang_str: &str,
@@ -1821,7 +1822,7 @@ fn tl_repo_list_ui(
                 ui.vertical_centered(|ui| {
                     ui.label(text_job);
                     if ui.button(btn_text).clicked() {
-                        request.clone().call();
+                        on_retry();
                     }
                 });
             });
@@ -2163,6 +2164,9 @@ impl ConfigEditor {
                     ));
                 }
                 ui.end_row();
+                if res.lost_focus() && config.meta_index_url.trim().is_empty() {
+                    config.meta_index_url = hachimi::Config::default().meta_index_url;
+                }
             }
 
             if should_show_option(search, &t!("config_editor.gui_scale")) {
@@ -2850,6 +2854,9 @@ impl Window for FirstTimeSetupWindow {
                             }
 
                             if res.lost_focus() {
+                                if self.meta_index_url.trim().is_empty() {
+                                    self.meta_index_url = hachimi::Config::default().meta_index_url;
+                                }
                                 if self.meta_index_url != self.config.meta_index_url {
                                     self.config.meta_index_url = self.meta_index_url.clone();
                                     save_and_reload_config(self.config.clone());
@@ -2866,15 +2873,22 @@ impl Window for FirstTimeSetupWindow {
                         ui.label(t!("first_time_setup.select_translation_repo"));
                         ui.add_space(4.0);
 
+                        let mut retry_clicked = false;
+
                         tl_repo_list_ui(
                             ui,
                             &self.index_request,
+                            || retry_clicked = true,
                             &mut self.current_tl_repo,
                             &mut self.has_auto_selected,
                             self.config.language.locale_str(),
                             true,
                             false
                         );
+
+                        if retry_clicked {
+                            self.index_request = Arc::new(tl_repo::new_meta_index_request());
+                        }
                     }
                     2 => {
                         ui.heading(t!("first_time_setup.common_settings_heading"));
@@ -4030,15 +4044,22 @@ impl Window for AddTranslationRepoWindow {
             ui.heading(t!("add_translation_repo.select_translation_repo"));
             ui.add_space(4.0);
 
+            let mut retry_clicked = false;
+
             tl_repo_list_ui(
                 ui,
                 &self.index_request,
+                || retry_clicked = true,
                 &mut self.current_tl_repo,
                 &mut self.has_auto_selected,
                 self.config.language.locale_str(),
                 false,
                 true
             );
+
+            if retry_clicked {
+                self.index_request = Arc::new(tl_repo::new_meta_index_request());
+            }
 
             ui.separator();
 
