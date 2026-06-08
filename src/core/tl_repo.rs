@@ -492,7 +492,7 @@ impl Updater {
         let mut update_size: usize = 0;
         let mut total_size: usize = 0;
 
-        let total_files = index.files.len().max(1);
+        let total_files = index.files.len();
         if let Some(mutex) = Gui::instance() {
             mutex.lock().unwrap().update_progress_visible = true;
         }
@@ -500,9 +500,7 @@ impl Updater {
         if is_new_repo {
             // skip all filesystem checks, the directory will be wiped anyway
             for (i, file) in index.files.iter().enumerate() {
-                if i % 50 == 0 {
-                    self.progress.store(Arc::new(Some(UpdateProgress::new(i, total_files))));
-                }
+                store_progress(&self.progress, &self.last_progress_ms, i, total_files);
 
                 if file.path.contains("..") || Path::new(&file.path).has_root() {
                     warn!("File path '{}' sanitized", file.path);
@@ -517,9 +515,7 @@ impl Updater {
             }
         } else {
             for (i, file) in index.files.iter().enumerate() {
-                if i % 50 == 0 {
-                    self.progress.store(Arc::new(Some(UpdateProgress::new(i, total_files))));
-                }
+                store_progress(&self.progress, &self.last_progress_ms, i, total_files);
 
                 if file.path.contains("..") || Path::new(&file.path).has_root() {
                     warn!("File path '{}' sanitized", file.path);
