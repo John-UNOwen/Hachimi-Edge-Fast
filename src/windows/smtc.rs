@@ -684,3 +684,11 @@ fn handle_button_pressed(args: &SystemMediaTransportControlsButtonPressedEventAr
         });
     }
 }
+
+pub fn unregister() {
+    let mut smtc_guard = SMTC_INSTANCE.lock().unwrap();
+    if let Some(smtc) = smtc_guard.take() {
+        let _ = smtc.SetIsEnabled(false);
+        info!("SMTC unregistered");
+    }
+}

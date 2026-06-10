@@ -529,8 +529,8 @@ impl Hachimi {
         *cmd_lock = None;
 
         let config = self.config.load();
-        if config.tl_update_mode == TlUpdateMode::Disabled
-            || config.tl_update_interval_sec == 0
+        if config.tl_auto_updater_mode == TLAutoUpdaterMode::Disabled
+            || config.tl_auto_updater_interval_sec == 0
             || config.translator_mode
         {
             return;
@@ -540,7 +540,7 @@ impl Hachimi {
         *cmd_lock = Some(tx);
         drop(cmd_lock);
 
-        let interval = Duration::from_secs(config.tl_update_interval_sec);
+        let interval = Duration::from_secs(config.tl_auto_updater_interval_sec);
 
         std::thread::Builder::new()
             .name("translation_updater_thread".into())
@@ -550,14 +550,14 @@ impl Hachimi {
 
                 loop {
                     let config = self.config.load();
-                    if config.tl_update_mode == TlUpdateMode::Disabled
-                        || config.tl_update_interval_sec == 0
+                    if config.tl_auto_updater_mode == TLAutoUpdaterMode::Disabled
+                        || config.tl_auto_updater_interval_sec == 0
                         || config.translator_mode
                     {
                         break;
                     }
 
-                    let interval = Duration::from_secs(config.tl_update_interval_sec);
+                    let interval = Duration::from_secs(config.tl_auto_updater_interval_sec);
 
                     // realign timer if interval changed
                     if interval != last_interval {
@@ -572,7 +572,7 @@ impl Hachimi {
                     }
 
                     if Instant::now() >= next_check {
-                        let silent = config.tl_update_mode == TlUpdateMode::Silent;
+                        let silent = config.tl_auto_updater_mode == TLAutoUpdaterMode::Silent;
                         info!("Running translation updater check (Silent: {})...", silent);
                         self.tl_updater.clone().check_for_updates(false, silent);
                         next_check = Instant::now() + interval;
@@ -600,12 +600,13 @@ fn default_serde_instance<'a, T: Deserialize<'a>>() -> Option<T> {
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-pub enum TlUpdateMode {
+pub enum TLAutoUpdaterMode {
     Disabled,
     Periodic,
     Silent
 }
-impl Default for TlUpdateMode {
+
+impl Default for TLAutoUpdaterMode {
     fn default() -> Self { Self::Disabled }
 }
 
@@ -688,12 +689,14 @@ pub struct Config {
     #[serde(default)]
     pub lazy_translation_updates: bool,
     #[serde(default)]
+    pub etag_translation_updates: bool,
+    #[serde(default)]
     pub disable_auto_update_check: bool,
 
     #[serde(default)]
-    pub tl_update_mode: TlUpdateMode,
-    #[serde(default = "Config::default_tl_update_interval_sec")]
-    pub tl_update_interval_sec: u64,
+    pub tl_auto_updater_mode: TLAutoUpdaterMode,
+    #[serde(default = "Config::default_tl_auto_updater_interval_sec")]
+    pub tl_auto_updater_interval_sec: u64,
 
     #[serde(default)]
     pub disable_translations: bool,
@@ -766,8 +769,6 @@ pub struct Config {
     #[serde(default)]
     pub replace_to_builtin_font: bool,
     #[serde(default)]
-    pub custom_title_name: Option<String>,
-    #[serde(default)]
     pub disabled_hooks: FnvHashSet<String>,
 
     // theme settings
@@ -812,7 +813,7 @@ impl Config {
     pub fn default_extreme_bg() -> egui::Color32 { egui::Color32::from_rgb(15, 15, 15) }
     pub fn default_text_color() -> egui::Color32 { egui::Color32::from_gray(170) }
     pub fn default_window_rounding() -> f32 { 10.0 }
-    fn default_tl_update_interval_sec() -> u64 { 3600 }
+    fn default_tl_auto_updater_interval_sec() -> u64 { 3600 }
 }
 
 impl Default for Config {

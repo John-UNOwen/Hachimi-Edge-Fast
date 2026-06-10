@@ -9,7 +9,6 @@ use std::{
     path::Path,
     sync::{
         atomic::{self, AtomicBool},
-        mpsc,
         Arc,
         Mutex
     }
@@ -125,19 +124,20 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
         let num_chunks = (actual_length + chunk_size_per_thread - 1) / chunk_size_per_thread;
 
         let fatal_error = Arc::new(Mutex::new(None::<Error>));
+        let needs_fallback = Arc::new(AtomicBool::new(false));
         let stop_signal = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = mpsc::channel::<(u64, u64)>();
-        let receiver = Arc::new(Mutex::new(receiver));
+        let (sender, receiver) = crossbeam_channel::unbounded::<(u64, u64)>();
         let mut handles = Vec::with_capacity(num_threads);
 
         for _ in 0..num_threads {
             let agent_clone = agent.clone();
             let url_clone = url.to_string();
             let path_clone = file_path.to_path_buf();
-            let receiver_clone = Arc::clone(&receiver);
+            let receiver_clone = receiver.clone();
             let progress_callback_clone = Arc::clone(&progress_callback);
             let fatal_error_clone = Arc::clone(&fatal_error);
             let stop_signal_clone = Arc::clone(&stop_signal);
+            let needs_fallback_clone = Arc::clone(&needs_fallback);
 
             let handle = thread::Builder::new()
                 .name("downloader_chunk".into())
@@ -148,7 +148,7 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
                         Err(e) => { *fatal_error_clone.lock().unwrap() = Some(e.into()); return; }
                     };
                     let mut buffer = vec![0u8; chunk_size];
-                    while let Ok((start, end)) = receiver_clone.lock().unwrap().recv() {
+                    while let Ok((start, end)) = receiver_clone.recv() {
                         if stop_signal_clone.load(atomic::Ordering::Relaxed) { break; }
 
                         let expected_bytes = end - start + 1;
@@ -156,8 +156,16 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
                         let result = (|| -> Result<(), Error> {
                             let res = agent_clone.get(&url_clone).header("Range", &range_header).call()?;
 
+                            if res.status() == 200 {
+                                needs_fallback_clone.store(true, atomic::Ordering::Relaxed);
+                                stop_signal_clone.store(true, atomic::Ordering::Relaxed);
+                                return Ok(());
+                            }
+
                             if res.status() != 206 {
-                                return Err(Error::RuntimeError(format!("Parallel chunk failed: Expected 206 Partial Content, got {}", res.status())));
+                                return Err(Error::RuntimeError(format!(
+                                    "Parallel chunk failed: Expected 206 Partial Content, got {}", res.status()
+                                )));
                             }
 
                             let mut binding = res.into_body();
@@ -203,35 +211,42 @@ pub fn download_file_parallel(url: &str, file_path: &Path, num_threads: usize,
             handle.join().unwrap();
         }
 
-        if let Some(e) = fatal_error.lock().unwrap().take() { return Err(e); }
-        let downloaded_file = fs::File::options().write(true).open(file_path)?;
-        downloaded_file.sync_data()?;
-    } else {
-        debug!("Using single-threaded download for: {}", url);
-        let res = agent.get(url).call()?;
+        if needs_fallback.load(atomic::Ordering::Relaxed) {
+            debug!("Server returned 200 instead of 206, falling back to single-threaded download for: {}", url);
+            let _ = fs::remove_file(file_path);
+        } else if let Some(e) = fatal_error.lock().unwrap().take() {
+            return Err(e);
+        } else {
+            let downloaded_file = fs::File::options().write(true).open(file_path)?;
+            downloaded_file.sync_data()?;
+            return Ok(());
+        }
+    }
 
-        let fallback_length = res.headers()
-            .get("Content-Length")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok());
+    debug!("Using single-threaded download for: {}", url);
+    let res = agent.get(url).call()?;
 
-        let mut file = fs::File::create(file_path)?;
-        let mut buffer = vec![0u8; chunk_size];
-        let mut total_downloaded = 0u64;
+    let fallback_length = res.headers()
+        .get("Content-Length")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
 
-        download_file_buffered(res, &mut file, &mut buffer, |bytes_slice| {
-            total_downloaded += bytes_slice.len() as u64;
-            progress_callback(bytes_slice.len());
-        })?;
-        file.sync_data()?;
+    let mut file = fs::File::create(file_path)?;
+    let mut buffer = vec![0u8; chunk_size];
+    let mut total_downloaded = 0u64;
 
-        if let Some(expected) = fallback_length {
-            if total_downloaded != expected {
-                return Err(Error::RuntimeError(format!(
-                    "Download incomplete: expected {} bytes, got {} bytes",
-                    expected, total_downloaded
-                )));
-            }
+    download_file_buffered(res, &mut file, &mut buffer, |bytes_slice| {
+        total_downloaded += bytes_slice.len() as u64;
+        progress_callback(bytes_slice.len());
+    })?;
+    file.sync_data()?;
+
+    if let Some(expected) = fallback_length {
+        if total_downloaded != expected {
+            return Err(Error::RuntimeError(format!(
+                "Download incomplete: expected {} bytes, got {} bytes",
+                expected, total_downloaded
+            )));
         }
     }
     Ok(())

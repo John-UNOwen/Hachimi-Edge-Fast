@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, io::{Read, Write, Cursor}, path::{Path, PathBuf}, sync::{atomic::{self, AtomicUsize, AtomicBool, AtomicU64}, Arc, Mutex}, thread, cmp::max};
+use std::{collections::HashSet, fs, io::{Read, Write, Cursor}, path::{Path, PathBuf}, sync::{atomic::{self, AtomicUsize, AtomicBool, AtomicU64}, Arc, Mutex}, thread, cmp::{min, max}};
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::unbounded;
@@ -235,17 +235,17 @@ pub const REPO_EXCLUDES_FILENAME: &str = "excludes.txt";
 #[derive(Default)]
 pub struct Updater {
     update_check_mutex: Mutex<()>,
+    run_mutex: Mutex<()>,
     new_update: ArcSwap<Option<UpdateInfo>>,
     progress: ArcSwap<Option<UpdateProgress>>,
     last_progress_ms: AtomicU64,
     skipped_etag: Mutex<Option<String>>
 }
 
-// const LOCALIZED_DATA_DIR: &str = "localized_data";
 const CHUNK_SIZE: usize = 8192; // 8KiB
 static NUM_THREADS: Lazy<usize> = Lazy::new(|| {
     let parallelism = thread::available_parallelism().unwrap().get();
-    max(1, parallelism / 2)
+    max(1, min(parallelism / 2, 4))
 });
 
 const INCREMENTAL_UPDATE_LIMIT_GITHUB: usize = 55;
@@ -290,6 +290,62 @@ fn store_progress(
     }
 }
 
+/// RAII guard that ensures a temporary ZIP file is cleaned up, even if the function returns early via `?` or panics
+struct ZipCleanupGuard<'a>(&'a Path);
+impl Drop for ZipCleanupGuard<'_> {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            if let Err(e) = fs::remove_file(self.0) {
+                error!("Failed to clean up temporary ZIP file '{}': {}", self.0.display(), e);
+            }
+        }
+    }
+}
+
+fn check_available_disk_space(_path: &Path, required_bytes: u64) -> Result<(), Error> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        let wide: Vec<u16> = _path.as_os_str().encode_wide().chain(std::iter::once(0u16)).collect();
+        let mut free_bytes: u64 = 0;
+
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                lpDirectoryName: *const u16,
+                lpFreeBytesAvailableToCaller: *mut u64,
+                lpTotalNumberOfBytes: *mut u64,
+                lpTotalNumberOfFreeBytes: *mut u64,
+            ) -> i32;
+        }
+
+        // SAFETY: GetDiskFreeSpaceExW is a stable Windows API since Windows 2000
+        let result = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_bytes,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        if result != 0 && free_bytes < required_bytes {
+            return Err(Error::OutOfDiskSpace);
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        if let Some(free_bytes) = crate::android::utils::get_available_disk_space() {
+            if free_bytes < required_bytes {
+                return Err(Error::OutOfDiskSpace);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 impl Updater {
     pub fn skip_update(&self, etag: Option<String>) {
         *self.skipped_etag.lock().unwrap() = etag;
@@ -301,6 +357,10 @@ impl Updater {
 
     pub fn clear_pending_update(&self) {
         self.new_update.store(Arc::new(None));
+    }
+
+    pub fn is_updating(&self) -> bool {
+        self.progress.load().is_some()
     }
 
     pub fn check_for_updates(self: Arc<Self>, pedantic: bool, silent: bool) {
@@ -412,7 +472,7 @@ impl Updater {
 
         // conditional GET: send If-None-Match with the current best ETag.
         // server replies 304 if nothing changed, 200 + body if it has.
-        let etag_for_request = if !pedantic {
+        let etag_for_request = if !pedantic && config.etag_translation_updates {
             repo_cache.index_etag.clone()
                 .or_else(|| self.skipped_etag.lock().unwrap().clone())
         } else {
@@ -431,7 +491,7 @@ impl Updater {
                         let etag_string = etag_str.to_string();
 
                         // user previously dismissed this exact version
-                        if !pedantic {
+                        if !pedantic && config.etag_translation_updates {
                             if let Some(skipped) = &*self.skipped_etag.lock().unwrap() {
                                 if skipped == &etag_string {
                                     debug!("Server ETag matches the skipped ETag. Ignoring update.");
@@ -441,10 +501,10 @@ impl Updater {
                         }
 
                         // fallback for servers that ignore If-None-Match
-                        if !pedantic {
+                        if !pedantic && config.etag_translation_updates {
                             if let Some(cached) = &repo_cache.index_etag {
                                 if cached == &etag_string {
-                                    debug!("Server ETag matches cached ETag (server may not support conditional requests). No translation updates available.");
+                                    info!("Server ETag matches cached ETag (server may not support conditional requests). No translation updates available.");
                                     if !silent {
                                         if let Some(mutex) = Gui::instance() {
                                             mutex.lock().unwrap().show_notification(&t!("notification.no_tl_updates"));
@@ -461,7 +521,7 @@ impl Updater {
                 serde_json::from_reader(res.into_body().into_reader())?
             }
             Err(ureq::Error::StatusCode(code)) if code == ureq::http::StatusCode::NOT_MODIFIED => {
-                debug!("Server returned 304 Not Modified. No translation updates available.");
+                info!("Server returned 304 Not Modified. No translation updates available.");
                 if !silent {
                     if let Some(mutex) = Gui::instance() {
                         mutex.lock().unwrap().show_notification(&t!("notification.no_tl_updates"));
@@ -728,6 +788,10 @@ impl Updater {
     }
 
     fn run_internal(self: Arc<Self>) -> Result<(), Error> {
+        let Ok(_run_guard) = self.run_mutex.try_lock() else {
+            info!("Update already in progress, skipping.");
+            return Ok(());
+        };
         let Some(mut update_info) = (**self.new_update.load()).clone() else {
             return Ok(());
         };
@@ -744,6 +808,8 @@ impl Updater {
         hachimi.localized_data.store(Arc::new(LocalizedData::default()));
 
         let localized_data_dir = hachimi.get_active_tl_dir().expect("Active TL repo directory not set.");
+        let disk_check_path = localized_data_dir.parent().unwrap_or(Path::new("."));
+        check_available_disk_space(disk_check_path, update_info.size as u64)?;
 
         if update_info.is_new_repo {
             Self::create_dir(&localized_data_dir, true)?;
@@ -908,6 +974,7 @@ impl Updater {
         cached_files: Arc<Mutex<FnvHashMap<String, String>>>
     ) -> Result<usize, Error> {
         let zip_path = localized_data_dir.join(".tmp.zip");
+        let _zip_cleanup = ZipCleanupGuard(&zip_path);
         // idk compiler going monkey mode unless i add this
         #[allow(unused_assignments)]
         let mut error_count = 0;
@@ -959,7 +1026,14 @@ impl Updater {
             );
 
             let zip_file = fs::File::open(&zip_path)?;
+            let file_len = zip_file.metadata()?.len();
+            if file_len == 0 {
+                return Err(Error::RuntimeError("Downloaded ZIP file is empty".to_string()));
+            }
             let mmap = Arc::new(unsafe { memmap2::Mmap::map(&zip_file)? });
+            if mmap.is_empty() {
+                return Err(Error::RuntimeError("Failed to memory-map the downloaded ZIP file".to_string()));
+            }
 
             let zip_len = zip::ZipArchive::new(Cursor::new(&mmap[..]))?.len();
 

@@ -91,6 +91,8 @@ pub fn set_menu_width(width: f32) {
     }
 }
 
+static REMOVING_TLREPO: atomic::AtomicBool = atomic::AtomicBool::new(false);
+static REMOVED_TLREPO_ID: atomic::AtomicU32 = atomic::AtomicU32::new(u32::MAX);
 
 type BoxedWindow = Box<dyn Window + Send + Sync>;
 pub struct Gui {
@@ -128,8 +130,6 @@ pub struct Gui {
     notifications: Vec<Notification>,
     next_notification_id: u32,
     windows: Vec<BoxedWindow>,
-
-    pub is_live_scene: bool,
 }
 
 const PIXELS_PER_POINT_RATIO: f32 = 3.0/1080.0;
@@ -651,8 +651,6 @@ impl Gui {
             notifications: Vec::new(),
             next_notification_id: 0,
             windows,
-
-            is_live_scene: false,
         };
 
         unsafe {
@@ -1201,9 +1199,11 @@ impl Gui {
                                     ui.label(t!("config_editor.enable_smtc"));
                                 });
                                 if ui.checkbox(&mut self.config.windows.enable_smtc, "").changed() {
-                                    #[cfg(target_os = "windows")]
+                                    use crate::windows::smtc;
                                     if self.config.windows.enable_smtc {
-                                        crate::windows::smtc::init(crate::windows::wnd_hook::get_target_hwnd());
+                                        smtc::init(crate::windows::wnd_hook::get_target_hwnd());
+                                    } else {
+                                        smtc::unregister();
                                     }
                                 }
                             });
@@ -2471,31 +2471,37 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            if should_show_option(search, &t!("config_editor.etag_translation_updates")) {
+                ui.label(t!("config_editor.etag_translation_updates"));
+                ui.checkbox(&mut config.etag_translation_updates, "");
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.disable_auto_update_check")) {
                 ui.label(t!("config_editor.disable_auto_update_check"));
                 ui.checkbox(&mut config.disable_auto_update_check, "");
                 ui.end_row();
             }
 
-            if should_show_option(search, &t!("config_editor.tl_update_mode")) {
-                ui.label(t!("config_editor.tl_update_mode"));
-                Gui::run_combo(ui, "tl_update_mode", &mut config.tl_update_mode, &[
-                    (hachimi::TlUpdateMode::Disabled, &t!("disabled")),
-                    (hachimi::TlUpdateMode::Periodic, &t!("config_editor.tl_update_periodic")),
-                    (hachimi::TlUpdateMode::Silent, &t!("config_editor.tl_update_silent"))
+            if should_show_option(search, &t!("config_editor.tl_auto_updater_mode")) {
+                ui.label(t!("config_editor.tl_auto_updater_mode"));
+                Gui::run_combo(ui, "tl_auto_updater_mode", &mut config.tl_auto_updater_mode, &[
+                    (hachimi::TLAutoUpdaterMode::Disabled, &t!("disabled")),
+                    (hachimi::TLAutoUpdaterMode::Periodic, &t!("config_editor.tl_auto_updater_periodic")),
+                    (hachimi::TLAutoUpdaterMode::Silent, &t!("config_editor.tl_auto_updater_silent"))
                 ]);
                 ui.end_row();
             }
 
-            if config.tl_update_mode != hachimi::TlUpdateMode::Disabled {
-                if should_show_option(search, &t!("config_editor.tl_update_interval")) {
-                    ui.label(t!("config_editor.tl_update_interval"));
-                    let mut minutes = (config.tl_update_interval_sec / 60) as i32;
+            if config.tl_auto_updater_mode != hachimi::TLAutoUpdaterMode::Disabled {
+                if should_show_option(search, &t!("config_editor.tl_auto_updater_interval")) {
+                    ui.label(t!("config_editor.tl_auto_updater_interval"));
+                    let mut minutes = (config.tl_auto_updater_interval_sec / 60) as i32;
                     ui.horizontal(|ui| {
                         ui.add(egui::DragValue::new(&mut minutes).speed(1.0).range(1..=10080));
                         ui.label(t!("minutes"));
                     });
-                    config.tl_update_interval_sec = (minutes as u64) * 60;
+                    config.tl_auto_updater_interval_sec = (minutes as u64) * 60;
                     ui.end_row();
                 }
             }
@@ -2516,6 +2522,37 @@ impl ConfigEditor {
                 ui.label(t!("config_editor.ipc_listen_all"));
                 ui.checkbox(&mut config.ipc_listen_all, "");
                 ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.hide_now_loading")) {
+                ui.label(t!("config_editor.hide_now_loading"));
+                ui.checkbox(&mut config.hide_now_loading, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.replace_to_builtin_font")) {
+                ui.label(t!("config_editor.replace_to_builtin_font"));
+                ui.checkbox(&mut config.replace_to_builtin_font, "");
+                ui.end_row();
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                if should_show_option(search, &t!("config_editor.ui_loading_show_orientation_guide")) {
+                    ui.label(t!("config_editor.ui_loading_show_orientation_guide"));
+                    ui.checkbox(&mut config.windows.ui_loading_show_orientation_guide, "");
+                    ui.end_row();
+                }
+                
+                if should_show_option(search, &t!("config_editor.custom_title_name")) {
+                    ui.label(t!("config_editor.custom_title_name"));
+                    let mut title_val = config.windows.custom_title_name.take().unwrap_or_default();
+                    let res = ui.add(egui::TextEdit::singleline(&mut title_val).hint_text(t!("default")));
+                    ui.end_row();
+                    if res.lost_focus() && title_val.trim().is_empty() {
+                        config.windows.custom_title_name = if title_val.is_empty() { None } else { Some(title_val) };
+                    }
+                }
             }
 
             if should_show_option(search, &t!("config_editor.auto_translate_stories")) {
@@ -2814,83 +2851,111 @@ impl ConfigEditor {
                 }
                 ui.end_row();
 
-                ui.label(t!("config_editor.live_slider_always_show"));
-                ui.checkbox(&mut config.live_slider_always_show, "");
-                ui.end_row();
-
-                ui.label(t!("config_editor.live_playback_loop"));
-                ui.checkbox(&mut config.live_playback_loop, "");
-                ui.end_row();
-
-                ui.label(t!("config_editor.champions_live_show_text"));
-                ui.checkbox(&mut config.champions_live_show_text, "");
-                ui.end_row();
-
-                if config.champions_live_show_text {
-                    ui.label(t!("config_editor.champions_live_resource_id"));
-                    let mut choices: Vec<(i32, &str)> = Vec::new();
-                    for (i, name) in self.champions_resources.iter().enumerate() {
-                        choices.push(((i + 1) as i32, name.as_str()));
-                    }
-                    Gui::run_combo(ui, "champions_live_resource_id", &mut config.champions_live_resource_id, &choices);
-                    ui.end_row();
-                    ui.label(t!("config_editor.champions_live_year"));
-                    ui.add(egui::DragValue::new(&mut config.champions_live_year).range(2021..=2030));
+                if should_show_option(search, &t!("config_editor.live_slider_always_show")) {
+                    ui.label(t!("config_editor.live_slider_always_show"));
+                    ui.checkbox(&mut config.live_slider_always_show, "");
                     ui.end_row();
                 }
 
-                ui.label(t!("config_editor.captions"));
-                ui.checkbox(&mut config.caption.caption_enable, "");
-                ui.end_row();
+                if should_show_option(search, &t!("config_editor.live_playback_loop")) {
+                    ui.label(t!("config_editor.live_playback_loop"));
+                    ui.checkbox(&mut config.live_playback_loop, "");
+                    ui.end_row();
+                }
+
+                if should_show_option(search, &t!("config_editor.champions_live_show_text")) {
+                    ui.label(t!("config_editor.champions_live_show_text"));
+                    ui.checkbox(&mut config.champions_live_show_text, "");
+                    ui.end_row();
+                }
+
+                if config.champions_live_show_text {
+                    if should_show_option(search, &t!("config_editor.champions_live_resource_id")) {
+                        ui.label(t!("config_editor.champions_live_resource_id"));
+                        let mut choices: Vec<(i32, &str)> = Vec::new();
+                        for (i, name) in self.champions_resources.iter().enumerate() {
+                            choices.push(((i + 1) as i32, name.as_str()));
+                        }
+                        Gui::run_combo(ui, "champions_live_resource_id", &mut config.champions_live_resource_id, &choices);
+                        ui.end_row();
+                        ui.label(t!("config_editor.champions_live_year"));
+                        ui.add(egui::DragValue::new(&mut config.champions_live_year).range(2021..=2030));
+                        ui.end_row();
+                    }
+                }
+
+                if should_show_option(search, &t!("config_editor.captions")) {
+                    ui.label(t!("config_editor.captions"));
+                    ui.checkbox(&mut config.caption.caption_enable, "");
+                    ui.end_row();
+                }
 
                 if config.caption.caption_enable {
-                    ui.label(t!("config_editor.caption_lines_char_count"));
-                    ui.add(egui::Slider::new(&mut config.caption.caption_lines_char_count, 10..=100));
-                    ui.end_row();
+                    if should_show_option(search, &t!("config_editor.caption_lines_char_count")) {
+                        ui.label(t!("config_editor.caption_lines_char_count"));
+                        ui.add(egui::Slider::new(&mut config.caption.caption_lines_char_count, 10..=100));
+                        ui.end_row();
+                    }
 
-                    ui.label(t!("config_editor.caption_font_size"));
-                    ui.add(egui::Slider::new(&mut config.caption.caption_font_size, 10..=128));
-                    ui.end_row();
+                    if should_show_option(search, &t!("config_editor.caption_font_size")) {
+                        ui.label(t!("config_editor.caption_font_size"));
+                        ui.add(egui::Slider::new(&mut config.caption.caption_font_size, 10..=128));
+                        ui.end_row();
+                    }
 
-                    ui.label(t!("config_editor.caption_pos_x"));
-                    ui.add(egui::Slider::new(&mut config.caption.caption_pos_x, -10.0..=10.0));
-                    ui.end_row();
+                    if should_show_option(search, &t!("config_editor.caption_pos_x")) {
+                        ui.label(t!("config_editor.caption_pos_x"));
+                        ui.add(egui::Slider::new(&mut config.caption.caption_pos_x, -10.0..=10.0));
+                        ui.end_row();
+                    }
 
-                    ui.label(t!("config_editor.caption_pos_y"));
-                    ui.add(egui::Slider::new(&mut config.caption.caption_pos_y, -10.0..=10.0));
-                    ui.end_row();
+                    if should_show_option(search, &t!("config_editor.caption_pos_y")) {
+                        ui.label(t!("config_editor.caption_pos_y"));
+                        ui.add(egui::Slider::new(&mut config.caption.caption_pos_y, -10.0..=10.0));
+                        ui.end_row();
+                    }
 
-                    ui.label(t!("config_editor.caption_bg_alpha"));
-                    ui.add(egui::Slider::new(&mut config.caption.caption_bg_alpha, 0.0..=1.0));
-                    ui.end_row();
+                    if should_show_option(search, &t!("config_editor.caption_bg_alpha")) {
+                        ui.label(t!("config_editor.caption_bg_alpha"));
+                        ui.add(egui::Slider::new(&mut config.caption.caption_bg_alpha, 0.0..=1.0));
+                        ui.end_row();
+                    }
 
-                    ui.label(t!("config_editor.caption_color"));
-                    egui::ComboBox::new(ui.id().with("caption_color"), "")
-                        .selected_text(&config.caption.caption_color)
-                        .show_ui(ui, |ui| {
-                            for option in &self.font_color_options {
-                                ui.selectable_value(&mut config.caption.caption_color, option.clone(), option);
-                            }
-                        });
-                    ui.end_row();
-                    ui.label(t!("config_editor.caption_outline_size"));
-                    egui::ComboBox::new(ui.id().with("caption_outline_size"), "")
-                        .selected_text(&config.caption.caption_outline_size)
-                        .show_ui(ui, |ui| {
-                            for option in &self.outline_size_options {
-                                ui.selectable_value(&mut config.caption.caption_outline_size, option.clone(), option);
-                            }
-                        });
-                    ui.end_row();
-                    ui.label(t!("config_editor.caption_outline_color"));
-                    egui::ComboBox::new(ui.id().with("caption_outline_color"), "")
-                        .selected_text(&config.caption.caption_outline_color)
-                        .show_ui(ui, |ui| {
-                            for option in &self.outline_color_options {
-                                ui.selectable_value(&mut config.caption.caption_outline_color, option.clone(), option);
-                            }
-                        });
-                    ui.end_row();
+                    if should_show_option(search, &t!("config_editor.caption_color")) {
+                        ui.label(t!("config_editor.caption_color"));
+                        egui::ComboBox::new(ui.id().with("caption_color"), "")
+                            .selected_text(&config.caption.caption_color)
+                            .show_ui(ui, |ui| {
+                                for option in &self.font_color_options {
+                                    ui.selectable_value(&mut config.caption.caption_color, option.clone(), option);
+                                }
+                            });
+                        ui.end_row();
+                    }
+
+                    if should_show_option(search, &t!("config_editor.caption_outline_size")) {
+                        ui.label(t!("config_editor.caption_outline_size"));
+                        egui::ComboBox::new(ui.id().with("caption_outline_size"), "")
+                            .selected_text(&config.caption.caption_outline_size)
+                            .show_ui(ui, |ui| {
+                                for option in &self.outline_size_options {
+                                    ui.selectable_value(&mut config.caption.caption_outline_size, option.clone(), option);
+                                }
+                            });
+                        ui.end_row();
+                    }
+
+                    if should_show_option(search, &t!("config_editor.caption_outline_color")) {
+                        ui.label(t!("config_editor.caption_outline_color"));
+                        egui::ComboBox::new(ui.id().with("caption_outline_color"), "")
+                            .selected_text(&config.caption.caption_outline_color)
+                            .show_ui(ui, |ui| {
+                                for option in &self.outline_color_options {
+                                    ui.selectable_value(&mut config.caption.caption_outline_color, option.clone(), option);
+                                }
+                            });
+                        ui.end_row();
+                    }
                 }
             }
 
@@ -2957,19 +3022,24 @@ impl Window for ConfigEditor {
         let mut save_clicked = false;
 
         new_window(ctx, self.id, t!("config_editor.title"))
-        .max_height(270.0 * scale)
+        .max_height(270.0 * scale + {
+            #[cfg(target_os = "android")]
+            { ime_scroll_padding(ctx) }
+            #[cfg(target_os = "windows")]
+            { 0.0 }
+        })
         .open(&mut open)
         .show(ctx, |ui| {
             simple_window_layout(ui, self.id,
                 |ui| {
                     ui.horizontal(|ui| {
                         // search bar
-                        let search_res = ui.add_sized(
+                        let _search_res = ui.add_sized(
                             [ui.available_width() - 30.0 * scale, 24.0 * scale],
                             egui::TextEdit::singleline(&mut self.search_term).hint_text(t!("search_filter"))
                         );
                         #[cfg(target_os = "android")]
-                        handle_android_keyboard(&search_res, &mut self.search_term);
+                        handle_android_keyboard(&_search_res, &mut self.search_term);
 
                         if ui.button("\u{f00d}").clicked() {
                             self.search_term.clear();
@@ -3047,6 +3117,23 @@ impl Window for ConfigEditor {
         self.config = config;
 
         if save_clicked {
+            #[cfg(target_os = "windows")]
+            {
+                use windows::{core::HSTRING, Win32::UI::WindowsAndMessaging::SetWindowTextW};
+                let hwnd = crate::windows::wnd_hook::get_target_hwnd();
+                if let Some(ref title) = self.config.windows.custom_title_name {
+                    let _ = unsafe { SetWindowTextW(hwnd, &HSTRING::from(title.as_str())) };
+                } else {
+                    let default_title = if Hachimi::instance().game.region == Region::Japan
+                        && Hachimi::instance().game.is_steam_release
+                    {
+                        HSTRING::from("UmamusumePrettyDerby_Jpn")
+                    } else {
+                        HSTRING::from("umamusume")
+                    };
+                    let _ = unsafe { SetWindowTextW(hwnd, &default_title) };
+                }
+            }
             save_and_reload_config(self.config.clone());
         }
 
@@ -4021,6 +4108,7 @@ struct ChangeTranslationRepoWindow {
     id: egui::Id,
     confirm_remove: Option<(u32, String)>,
     repo_cache: HashMap<u32, (Option<LocalRepoInfo>, Option<String>)>,
+    was_updating: bool,
 }
 
 impl ChangeTranslationRepoWindow {
@@ -4055,7 +4143,8 @@ impl ChangeTranslationRepoWindow {
         ChangeTranslationRepoWindow {
             id: random_id(),
             confirm_remove: None,
-            repo_cache
+            repo_cache,
+            was_updating: false,
         }
     }
 }
@@ -4070,6 +4159,27 @@ impl Window for ChangeTranslationRepoWindow {
         let manager = hachimi.tl_repo_manager.lock().unwrap().clone();
         let current_repo_id = hachimi.config.load().selected_tl_repo_id;
         let has_repos = !manager.repos.is_empty();
+
+        let completed_id = REMOVED_TLREPO_ID.load(atomic::Ordering::Relaxed);
+        if completed_id != u32::MAX {
+            self.repo_cache.remove(&completed_id);
+            self.confirm_remove = None;
+            REMOVED_TLREPO_ID.store(u32::MAX, atomic::Ordering::Relaxed);
+        }
+
+        let is_updating = hachimi.tl_updater.is_updating();
+        if self.was_updating && !is_updating {
+            for repo in &manager.repos {
+                self.refresh_repo_cache_entry(repo.id);
+            }
+        }
+        self.was_updating = is_updating;
+
+        for repo in &manager.repos {
+            if !self.repo_cache.contains_key(&repo.id) {
+                self.refresh_repo_cache_entry(repo.id);
+            }
+        }
 
         new_window(ctx, self.id, t!("change_translation_repo.title"))
         .open(&mut open)
@@ -4181,8 +4291,13 @@ impl Window for ChangeTranslationRepoWindow {
                                                 self.confirm_remove = None;
                                             }
                                             if ui.button(t!("yes")).clicked() {
-                                                Self::remove_repo(remove_id);
-                                                self.confirm_remove = None;
+                                                if !REMOVING_TLREPO.load(atomic::Ordering::Relaxed) {
+                                                    REMOVING_TLREPO.store(true, atomic::Ordering::Relaxed);
+                                                    Self::remove_repo_async(remove_id);
+                                                    self.confirm_remove = None;
+                                                } else {
+                                                    request_notification(NotificationRequest::Custom(t!("change_translation_repo.remove_in_progress").to_string()));
+                                                }
                                             }
                                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
@@ -4268,6 +4383,28 @@ impl Window for ChangeTranslationRepoWindow {
 }
 
 impl ChangeTranslationRepoWindow {
+    fn refresh_repo_cache_entry(&mut self, repo_id: u32) {
+        let info = match LocalRepoInfo::load(repo_id) {
+            Ok(data) => data,
+            Err(e) => {
+                let err = e.to_string();
+                thread::spawn(move || {
+                    Gui::instance().unwrap()
+                        .lock().unwrap()
+                        .show_notification(&err);
+                });
+                None
+            }
+        };
+        let icon_path = Hachimi::instance().get_repo_dir(repo_id).join("icon.png");
+        let icon_uri = if icon_path.exists() {
+            Some(format!("file://{}", icon_path.display()))
+        } else {
+            None
+        };
+        self.repo_cache.insert(repo_id, (info, icon_uri));
+    }
+
     fn switch_to_repo(repo_id: u32, index: &str) {
         let hachimi = Hachimi::instance();
         let config = hachimi.config.load();
@@ -4279,36 +4416,51 @@ impl ChangeTranslationRepoWindow {
         hachimi.tl_updater.clone().check_for_updates(false, false);
     }
 
-    fn remove_repo(repo_id: u32) {
-        let hachimi = Hachimi::instance();
-        let repos_path = hachimi.get_data_path(".tl_repos");
-        let repo_dir = hachimi.get_repo_dir(repo_id);
+    fn remove_repo_async(repo_id: u32) {
+        std::thread::spawn(move || {
+            let notif_guard = if let Some(mutex) = Gui::instance() {
+                let id = mutex.lock().unwrap().show_persistent_notification(
+                    &t!("change_translation_repo.removing")
+                );
+                Some(NotificationGuard(id))
+            } else {
+                None
+            };
 
-        if repo_dir.is_dir() {
-            let _ = std::fs::remove_dir_all(&repo_dir);
-        }
-
-        let cache_path = hachimi.get_data_path(format!(".tl_repo_cache_{}", repo_id));
-        if cache_path.exists() {
-            let _ = std::fs::remove_file(&cache_path);
-        }
-
-        {
-            let mut manager = hachimi.tl_repo_manager.lock().unwrap();
-            manager.repos.retain(|r| r.id != repo_id);
-            if let Err(e) = manager.save(&repos_path) {
-                warn!("Failed to save .tl_repos after removal: {e}");
+            let hachimi = Hachimi::instance();
+            let repo_dir = hachimi.get_repo_dir(repo_id);
+            if repo_dir.is_dir() {
+                let _ = std::fs::remove_dir_all(&repo_dir);
             }
-        }
 
-        let config = hachimi.config.load();
-        if config.selected_tl_repo_id == Some(repo_id) {
-            let mut new_config = (**config).clone();
-            new_config.selected_tl_repo_id = None;
-            new_config.translation_repo_index = None;
-            drop(config);
-            save_and_reload_config(new_config);
-        }
+            let cache_path = hachimi.get_data_path(format!(".tl_repo_cache_{}", repo_id));
+            if cache_path.exists() {
+                let _ = std::fs::remove_file(&cache_path);
+            }
+
+            let repos_path = hachimi.get_data_path(".tl_repos");
+            {
+                let mut manager = hachimi.tl_repo_manager.lock().unwrap();
+                manager.repos.retain(|r| r.id != repo_id);
+                if let Err(e) = manager.save(&repos_path) {
+                    warn!("Failed to save .tl_repos after removal: {e}");
+                }
+            }
+
+            let config = hachimi.config.load();
+            if config.selected_tl_repo_id == Some(repo_id) {
+                let mut new_config = (**config).clone();
+                new_config.selected_tl_repo_id = None;
+                new_config.translation_repo_index = None;
+                drop(config);
+                save_and_reload_config(new_config);
+            }
+
+            drop(notif_guard);
+    
+            REMOVED_TLREPO_ID.store(repo_id, atomic::Ordering::Relaxed);
+            REMOVING_TLREPO.store(false, atomic::Ordering::Relaxed);
+        });
     }
 }
 
@@ -4458,7 +4610,10 @@ impl TranslationRepoInfoWindow {
 
                         if let Ok(res) = agent.get(&url).call() {
                             if let Ok(text) = res.into_body().read_to_string() {
-                                let names: Vec<&str> = text.lines()
+                                let sanitized: String = text.chars()
+                                    .filter(|c| !c.is_control() || *c == '\n' || *c == '\t' || *c == '\r')
+                                    .collect();
+                                let names: Vec<&str> = sanitized.lines()
                                     .map(|l| l.trim())
                                     .filter(|l| !l.is_empty())
                                     .collect();
@@ -4496,13 +4651,7 @@ impl Window for TranslationRepoInfoWindow {
             }
         }
 
-        let title = if let Some(ref info) = self.info {
-            format!("{} {}", info.name, t!("translation_repo_info.details_suffix"))
-        } else {
-            t!("translation_repo_info.details_title").into_owned()
-        };
-
-        new_window(ctx, self.id, &title)
+        new_window(ctx, self.id, t!("translation_repo_info.details_title"))
         .max_width(350.0 * scale)
         .max_height(440.0 * scale)
         .open(&mut open)

@@ -1,12 +1,13 @@
 use std::{os::raw::c_uint, ptr, sync::{atomic::{self, AtomicIsize}}};
 
-use windows::{core::w, Win32::{
+use windows::{core::{w, HSTRING}, Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     System::Threading::GetCurrentThreadId,
     UI::{
         Input::Ime::ISC_SHOWUICOMPOSITIONWINDOW,
         WindowsAndMessaging::{
             CallNextHookEx, DefWindowProcW, FindWindowW, GetWindowLongPtrW, SetWindowsHookExW, UnhookWindowsHookEx,
+            SetWindowTextW,
             GWLP_WNDPROC, HCBT_MINMAX, HHOOK, SW_RESTORE, WH_CBT, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WNDPROC,
             WM_IME_SETCONTEXT, WM_IME_NOTIFY, WM_ACTIVATE, WA_INACTIVE
         },
@@ -187,10 +188,8 @@ pub fn init() {
         }
         TARGET_HWND.store(hwnd.0 as isize, atomic::Ordering::Relaxed);
 
-        let title = hachimi.config.load().custom_title_name.clone();
+        let title = hachimi.config.load().windows.custom_title_name.clone();
         if let Some(t) = title {
-            use windows::Win32::UI::WindowsAndMessaging::SetWindowTextW;
-            use windows::core::HSTRING;
             let _ = SetWindowTextW(hwnd, &HSTRING::from(t));
         }
 

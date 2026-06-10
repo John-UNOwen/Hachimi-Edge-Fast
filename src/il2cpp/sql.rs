@@ -1,4 +1,4 @@
-use std::{ptr, sync::{atomic::{self, AtomicPtr, AtomicBool, Ordering}, Mutex, RwLock}};
+use std::{ptr, sync::{atomic::{AtomicBool, Ordering}, Mutex, RwLock}};
 use fnv::{FnvHashMap, FnvHashSet};
 use sqlparser::ast;
 use once_cell::sync::Lazy;
