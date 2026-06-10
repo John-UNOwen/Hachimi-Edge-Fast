@@ -1568,7 +1568,7 @@ impl Gui {
     }
 
     // egui's code originally (https://github.com/emilk/egui/blob/main/crates/egui/src/containers/combo_box.rs)
-    fn down_triangle_icon(painter: &egui::Painter, rect: egui::Rect, visuals: &egui::style::WidgetVisuals) {
+    pub fn down_triangle_icon(painter: &egui::Painter, rect: egui::Rect, visuals: &egui::style::WidgetVisuals) {
         let rect = egui::Rect::from_center_size(
             rect.center(),
             egui::vec2(rect.width() * 0.7, rect.height() * 0.45)

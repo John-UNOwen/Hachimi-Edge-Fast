@@ -50,6 +50,9 @@ pub struct Hachimi {
     pub interceptor: Interceptor,
     pub hooking_finished: AtomicBool,
     pub plugins: Mutex<Vec<Plugin>>,
+    pub plugin_init_callbacks: Mutex<Vec<(usize, usize)>>,
+    #[cfg(target_os = "windows")]
+    pub present_callbacks: Mutex<Vec<(usize, usize)>>,
 
     // Translation repo manager
     pub tl_repo_manager: Mutex<tl_repo::RepoList>,
@@ -147,6 +150,9 @@ impl Hachimi {
             interceptor: Interceptor::default(),
             hooking_finished: AtomicBool::new(false),
             plugins: Mutex::default(),
+            plugin_init_callbacks: Mutex::default(),
+            #[cfg(target_os = "windows")]
+            present_callbacks: Mutex::default(),
 
             tl_repo_manager: Mutex::new(tl_repo::RepoList::default()),
 
