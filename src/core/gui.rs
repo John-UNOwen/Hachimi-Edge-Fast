@@ -2848,112 +2848,112 @@ impl ConfigEditor {
                     }
                 }
                 ui.end_row();
+            }
 
-                if should_show_option(search, &t!("config_editor.live_slider_always_show")) {
-                    ui.label(t!("config_editor.live_slider_always_show"));
-                    ui.checkbox(&mut config.live_slider_always_show, "");
+            if should_show_option(search, &t!("config_editor.live_slider_always_show")) {
+                ui.label(t!("config_editor.live_slider_always_show"));
+                ui.checkbox(&mut config.live_slider_always_show, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.live_playback_loop")) {
+                ui.label(t!("config_editor.live_playback_loop"));
+                ui.checkbox(&mut config.live_playback_loop, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.champions_live_show_text")) {
+                ui.label(t!("config_editor.champions_live_show_text"));
+                ui.checkbox(&mut config.champions_live_show_text, "");
+                ui.end_row();
+            }
+
+            if config.champions_live_show_text {
+                if should_show_option(search, &t!("config_editor.champions_live_resource_id")) {
+                    ui.label(t!("config_editor.champions_live_resource_id"));
+                    let mut choices: Vec<(i32, &str)> = Vec::new();
+                    for (i, name) in self.champions_resources.iter().enumerate() {
+                        choices.push(((i + 1) as i32, name.as_str()));
+                    }
+                    Gui::run_combo(ui, "champions_live_resource_id", &mut config.champions_live_resource_id, &choices);
+                    ui.end_row();
+                    ui.label(t!("config_editor.champions_live_year"));
+                    ui.add(egui::DragValue::new(&mut config.champions_live_year).range(2021..=2030));
+                    ui.end_row();
+                }
+            }
+
+            if should_show_option(search, &t!("config_editor.captions")) {
+                ui.label(t!("config_editor.captions"));
+                ui.checkbox(&mut config.caption.caption_enable, "");
+                ui.end_row();
+            }
+
+            if config.caption.caption_enable {
+                if should_show_option(search, &t!("config_editor.caption_lines_char_count")) {
+                    ui.label(t!("config_editor.caption_lines_char_count"));
+                    ui.add(egui::Slider::new(&mut config.caption.caption_lines_char_count, 10..=100));
                     ui.end_row();
                 }
 
-                if should_show_option(search, &t!("config_editor.live_playback_loop")) {
-                    ui.label(t!("config_editor.live_playback_loop"));
-                    ui.checkbox(&mut config.live_playback_loop, "");
+                if should_show_option(search, &t!("config_editor.caption_font_size")) {
+                    ui.label(t!("config_editor.caption_font_size"));
+                    ui.add(egui::Slider::new(&mut config.caption.caption_font_size, 10..=128));
                     ui.end_row();
                 }
 
-                if should_show_option(search, &t!("config_editor.champions_live_show_text")) {
-                    ui.label(t!("config_editor.champions_live_show_text"));
-                    ui.checkbox(&mut config.champions_live_show_text, "");
+                if should_show_option(search, &t!("config_editor.caption_pos_x")) {
+                    ui.label(t!("config_editor.caption_pos_x"));
+                    ui.add(egui::Slider::new(&mut config.caption.caption_pos_x, -10.0..=10.0));
                     ui.end_row();
                 }
 
-                if config.champions_live_show_text {
-                    if should_show_option(search, &t!("config_editor.champions_live_resource_id")) {
-                        ui.label(t!("config_editor.champions_live_resource_id"));
-                        let mut choices: Vec<(i32, &str)> = Vec::new();
-                        for (i, name) in self.champions_resources.iter().enumerate() {
-                            choices.push(((i + 1) as i32, name.as_str()));
-                        }
-                        Gui::run_combo(ui, "champions_live_resource_id", &mut config.champions_live_resource_id, &choices);
-                        ui.end_row();
-                        ui.label(t!("config_editor.champions_live_year"));
-                        ui.add(egui::DragValue::new(&mut config.champions_live_year).range(2021..=2030));
-                        ui.end_row();
-                    }
-                }
-
-                if should_show_option(search, &t!("config_editor.captions")) {
-                    ui.label(t!("config_editor.captions"));
-                    ui.checkbox(&mut config.caption.caption_enable, "");
+                if should_show_option(search, &t!("config_editor.caption_pos_y")) {
+                    ui.label(t!("config_editor.caption_pos_y"));
+                    ui.add(egui::Slider::new(&mut config.caption.caption_pos_y, -10.0..=10.0));
                     ui.end_row();
                 }
 
-                if config.caption.caption_enable {
-                    if should_show_option(search, &t!("config_editor.caption_lines_char_count")) {
-                        ui.label(t!("config_editor.caption_lines_char_count"));
-                        ui.add(egui::Slider::new(&mut config.caption.caption_lines_char_count, 10..=100));
-                        ui.end_row();
-                    }
+                if should_show_option(search, &t!("config_editor.caption_bg_alpha")) {
+                    ui.label(t!("config_editor.caption_bg_alpha"));
+                    ui.add(egui::Slider::new(&mut config.caption.caption_bg_alpha, 0.0..=1.0));
+                    ui.end_row();
+                }
 
-                    if should_show_option(search, &t!("config_editor.caption_font_size")) {
-                        ui.label(t!("config_editor.caption_font_size"));
-                        ui.add(egui::Slider::new(&mut config.caption.caption_font_size, 10..=128));
-                        ui.end_row();
-                    }
+                if should_show_option(search, &t!("config_editor.caption_color")) {
+                    ui.label(t!("config_editor.caption_color"));
+                    egui::ComboBox::new(ui.id().with("caption_color"), "")
+                        .selected_text(&config.caption.caption_color)
+                        .show_ui(ui, |ui| {
+                            for option in &self.font_color_options {
+                                ui.selectable_value(&mut config.caption.caption_color, option.clone(), option);
+                            }
+                        });
+                    ui.end_row();
+                }
 
-                    if should_show_option(search, &t!("config_editor.caption_pos_x")) {
-                        ui.label(t!("config_editor.caption_pos_x"));
-                        ui.add(egui::Slider::new(&mut config.caption.caption_pos_x, -10.0..=10.0));
-                        ui.end_row();
-                    }
+                if should_show_option(search, &t!("config_editor.caption_outline_size")) {
+                    ui.label(t!("config_editor.caption_outline_size"));
+                    egui::ComboBox::new(ui.id().with("caption_outline_size"), "")
+                        .selected_text(&config.caption.caption_outline_size)
+                        .show_ui(ui, |ui| {
+                            for option in &self.outline_size_options {
+                                ui.selectable_value(&mut config.caption.caption_outline_size, option.clone(), option);
+                            }
+                        });
+                    ui.end_row();
+                }
 
-                    if should_show_option(search, &t!("config_editor.caption_pos_y")) {
-                        ui.label(t!("config_editor.caption_pos_y"));
-                        ui.add(egui::Slider::new(&mut config.caption.caption_pos_y, -10.0..=10.0));
-                        ui.end_row();
-                    }
-
-                    if should_show_option(search, &t!("config_editor.caption_bg_alpha")) {
-                        ui.label(t!("config_editor.caption_bg_alpha"));
-                        ui.add(egui::Slider::new(&mut config.caption.caption_bg_alpha, 0.0..=1.0));
-                        ui.end_row();
-                    }
-
-                    if should_show_option(search, &t!("config_editor.caption_color")) {
-                        ui.label(t!("config_editor.caption_color"));
-                        egui::ComboBox::new(ui.id().with("caption_color"), "")
-                            .selected_text(&config.caption.caption_color)
-                            .show_ui(ui, |ui| {
-                                for option in &self.font_color_options {
-                                    ui.selectable_value(&mut config.caption.caption_color, option.clone(), option);
-                                }
-                            });
-                        ui.end_row();
-                    }
-
-                    if should_show_option(search, &t!("config_editor.caption_outline_size")) {
-                        ui.label(t!("config_editor.caption_outline_size"));
-                        egui::ComboBox::new(ui.id().with("caption_outline_size"), "")
-                            .selected_text(&config.caption.caption_outline_size)
-                            .show_ui(ui, |ui| {
-                                for option in &self.outline_size_options {
-                                    ui.selectable_value(&mut config.caption.caption_outline_size, option.clone(), option);
-                                }
-                            });
-                        ui.end_row();
-                    }
-
-                    if should_show_option(search, &t!("config_editor.caption_outline_color")) {
-                        ui.label(t!("config_editor.caption_outline_color"));
-                        egui::ComboBox::new(ui.id().with("caption_outline_color"), "")
-                            .selected_text(&config.caption.caption_outline_color)
-                            .show_ui(ui, |ui| {
-                                for option in &self.outline_color_options {
-                                    ui.selectable_value(&mut config.caption.caption_outline_color, option.clone(), option);
-                                }
-                            });
-                        ui.end_row();
-                    }
+                if should_show_option(search, &t!("config_editor.caption_outline_color")) {
+                    ui.label(t!("config_editor.caption_outline_color"));
+                    egui::ComboBox::new(ui.id().with("caption_outline_color"), "")
+                        .selected_text(&config.caption.caption_outline_color)
+                        .show_ui(ui, |ui| {
+                            for option in &self.outline_color_options {
+                                ui.selectable_value(&mut config.caption.caption_outline_color, option.clone(), option);
+                            }
+                        });
+                    ui.end_row();
                 }
             }
 
