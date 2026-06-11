@@ -2546,12 +2546,10 @@ impl ConfigEditor {
                 
                 if should_show_option(search, &t!("config_editor.custom_title_name")) {
                     ui.label(t!("config_editor.custom_title_name"));
-                    let mut title_val = config.windows.custom_title_name.take().unwrap_or_default();
-                    let res = ui.add(egui::TextEdit::singleline(&mut title_val).hint_text(t!("default")));
+                    let mut title_val = config.windows.custom_title_name.clone().unwrap_or_default();
+                    let _ = ui.add(egui::TextEdit::singleline(&mut title_val).hint_text(t!("default")));
+                    config.windows.custom_title_name = if title_val.is_empty() { None } else { Some(title_val) };
                     ui.end_row();
-                    if res.lost_focus() && title_val.trim().is_empty() {
-                        config.windows.custom_title_name = if title_val.is_empty() { None } else { Some(title_val) };
-                    }
                 }
             }
 
@@ -3120,19 +3118,21 @@ impl Window for ConfigEditor {
             #[cfg(target_os = "windows")]
             {
                 use windows::{core::HSTRING, Win32::UI::WindowsAndMessaging::SetWindowTextW};
-                let hwnd = crate::windows::wnd_hook::get_target_hwnd();
-                if let Some(ref title) = self.config.windows.custom_title_name {
-                    let _ = unsafe { SetWindowTextW(hwnd, &HSTRING::from(title.as_str())) };
-                } else {
-                    let default_title = if Hachimi::instance().game.region == Region::Japan
-                        && Hachimi::instance().game.is_steam_release
-                    {
-                        HSTRING::from("UmamusumePrettyDerby_Jpn")
+                let title_clone = self.config.windows.custom_title_name.clone();
+                std::thread::spawn(move || {
+                    let hachimi = Hachimi::instance();
+                    let hwnd = crate::windows::wnd_hook::get_target_hwnd();
+                    if let Some(title) = title_clone {
+                        let _ = unsafe { SetWindowTextW(hwnd, &HSTRING::from(title.as_str())) };
                     } else {
-                        HSTRING::from("umamusume")
-                    };
-                    let _ = unsafe { SetWindowTextW(hwnd, &default_title) };
-                }
+                        let default_title = if hachimi.game.region == Region::Japan && hachimi.game.is_steam_release {
+                            HSTRING::from("UmamusumePrettyDerby_Jpn")
+                        } else {
+                            HSTRING::from("umamusume")
+                        };
+                        let _ = unsafe { SetWindowTextW(hwnd, &default_title) };
+                    }
+                });
             }
             save_and_reload_config(self.config.clone());
         }
