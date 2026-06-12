@@ -4687,7 +4687,7 @@ impl Window for TranslationRepoInfoWindow {
                         ui.add_space(6.0 * scale);
                         egui::Grid::new(self.id.with("info_grid"))
                             .num_columns(2)
-                            .min_col_width(80.0 * scale)
+                            .min_col_width(95.0 * scale)
                             .spacing([12.0 * scale, 6.0 * scale])
                             .show(ui, |ui| {
                                 if !info.homepage.is_empty() {
