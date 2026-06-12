@@ -4,7 +4,7 @@ use fnv::FnvHashMap;
 use once_cell::sync::Lazy;
 use widestring::Utf16Str;
 
-use crate::{core::{ext::Utf16StringExt, hachimi::AssetMetadata}, il2cpp::{
+use crate::{core::{Hachimi, ext::Utf16StringExt, game::Region, hachimi::AssetMetadata}, il2cpp::{
     api::il2cpp_resolve_icall, ext::{Il2CppObjectExt, Il2CppStringExt}, hook::{
         umamusume::{StoryParamChangeEffect, StoryRaceTextAsset, StoryTimelineData, TextDotData, TextRubyData},
         Cute_UI_Assembly::AtlasReference,
@@ -28,19 +28,23 @@ pub static REQUEST_INFOS: Lazy<Mutex<FnvHashMap<usize, RequestInfo>>> = Lazy::ne
 pub fn check_asset_bundle_name(this: *mut Il2CppObject, metadata: &AssetMetadata) -> bool {
     if let Some(meta_bundle_name) = &metadata.bundle_name {
         let name_ptr = Object::get_name(this);
-        if !name_ptr.is_null() {
-            let logical_name = unsafe { (*name_ptr).as_utf16str().path_filename() };
+        if Hachimi::instance().game.region == Region::Japan {
+            if !name_ptr.is_null() {
+                let logical_name = unsafe { (*name_ptr).as_utf16str().path_filename() };
 
-            if let Some(real_hash) = crate::il2cpp::sql::MetaData::get_hash(&logical_name.to_string()) {
-                if real_hash == *meta_bundle_name {
-                    return true;
-                } else {
-                    warn!("Expected bundle {}, got {}", meta_bundle_name, real_hash);
-                    return false;
+                if let Some(real_hash) = crate::il2cpp::sql::MetaData::get_hash(&logical_name.to_string()) {
+                    if real_hash == *meta_bundle_name {
+                        return true;
+                    } else {
+                        warn!("Expected bundle {}, got {}", meta_bundle_name, real_hash);
+                        return false;
+                    }
                 }
+    
+                return false;
             }
-
-            return false;
+        } else {
+            return true; // Unsolved for other regions for now
         }
 
         warn!("Failed to resolve bundle path for metadata check!");
