@@ -99,6 +99,10 @@ first_time_setup:
   select_translation_repo: "Select a translation repo:"
   no_compatible_repo: "No translation repos are compatible with this game version."
   skip_translation: "Skip translations."
+  common_settings_heading: "Common Settings"
+  common_settings_content: >-
+    Here are some commonly used settings that you may want to configure.
+    You can always change these later in the Config Editor.
   complete_heading: "All done!"
   complete_content: >-
     Click on Done to save the configuration.
