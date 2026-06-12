@@ -91,6 +91,9 @@ pub fn set_menu_width(width: f32) {
     }
 }
 
+#[cfg(target_os = "windows")]
+static PENDING_TITLE: Mutex<Option<Option<String>>> = Mutex::new(None);
+
 static REMOVING_TLREPO: atomic::AtomicBool = atomic::AtomicBool::new(false);
 static REMOVED_TLREPO_ID: atomic::AtomicU32 = atomic::AtomicU32::new(u32::MAX);
 
@@ -3117,14 +3120,15 @@ impl Window for ConfigEditor {
         if save_clicked {
             #[cfg(target_os = "windows")]
             {
+                *PENDING_TITLE.lock().unwrap() = Some(self.config.windows.custom_title_name.clone());
                 use windows::{core::HSTRING, Win32::UI::WindowsAndMessaging::SetWindowTextW};
-                let title_clone = self.config.windows.custom_title_name.clone();
-                std::thread::spawn(move || {
-                    let hachimi = Hachimi::instance();
+                Thread::main_thread().schedule(move || {
                     let hwnd = crate::windows::wnd_hook::get_target_hwnd();
-                    if let Some(title) = title_clone {
-                        let _ = unsafe { SetWindowTextW(hwnd, &HSTRING::from(title.as_str())) };
+                    let title = PENDING_TITLE.lock().unwrap().take().flatten();
+                    if let Some(t) = title {
+                        let _ = unsafe { SetWindowTextW(hwnd, &HSTRING::from(t.as_str())) };
                     } else {
+                        let hachimi = Hachimi::instance();
                         let default_title = if hachimi.game.region == Region::Japan && hachimi.game.is_steam_release {
                             HSTRING::from("UmamusumePrettyDerby_Jpn")
                         } else {
