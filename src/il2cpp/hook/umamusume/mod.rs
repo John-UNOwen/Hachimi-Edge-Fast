@@ -7,7 +7,7 @@ pub mod StoryTimelineBlockData;
 pub mod StoryTimelineTrackData;
 pub mod StoryTimelineTextClipData;
 pub mod GallopUtil;
-mod UIManager;
+pub mod UIManager;
 pub mod GraphicSettings;
 mod CameraController;
 pub mod SingleModeStartResultCharaViewer;
@@ -32,7 +32,7 @@ mod SingleModeUtils;
 mod MasterSingleModeTurn;
 mod TextFontManager;
 mod TextFormat;
-mod TextCommon;
+pub mod TextCommon;
 mod TextMeshProUguiCommon;
 mod StoryChoiceController;
 mod StoryViewController;
@@ -56,12 +56,14 @@ mod LiveUtil;
 pub mod MasterDataUtil;
 pub mod DialogCommonBase;
 pub mod DialogObject;
+pub mod AudioManager;
+pub mod MasterCharacterSystemText;
 pub mod ImageCommon;
+pub mod Notification;
 pub mod TimeUtil;
 pub mod CameraData;
 pub mod DialogManager;
 
-#[cfg(target_os = "windows")]
 pub mod SceneManager;
 
 #[cfg(target_os = "windows")]
@@ -86,8 +88,21 @@ mod DownloadManager;
 mod DownloadView;
 mod DownloadErrorProcessor;
 mod TitleViewController;
-mod Director;
+pub mod Director;
 mod CySpringNative;
+pub mod LiveViewController;
+pub mod LiveTimeController;
+pub mod HomeViewController;
+pub mod WorkDataManager;
+pub mod AssetManager;
+pub mod WorkJukeboxData;
+pub mod JukeboxBgmSelector;
+pub mod JukeboxHomeTopUI;
+pub mod TempData;
+pub mod MasterJukeboxSetlistMusicData;
+pub mod HubViewControllerBase;
+mod LiveTheaterInfo;
+pub mod DownloadPathRegister;
 
 pub fn init() {
     get_assembly_image_or_return!(image, "umamusume.dll");
@@ -149,13 +164,17 @@ pub fn init() {
     MasterDataUtil::init(image);
     DialogCommonBase::init(image);
     DialogObject::init(image);
+    AudioManager::init(image);
+    MasterCharacterSystemText::init(image);
     ImageCommon::init(image);
+    Notification::init(image);
     TimeUtil::init(image);
     DialogManager::init(image);
 
+    SceneManager::init(image);
+
     #[cfg(target_os = "windows")]
     {
-        SceneManager::init(image);
         PaymentUtility::init(image);
     }
     LowResolutionCamera::init(image);
@@ -181,4 +200,17 @@ pub fn init() {
     TitleViewController::init(image);
     Director::init(image);
     CySpringNative::init(image);
+    LiveViewController::init(image);
+    LiveTimeController::init(image);
+    HomeViewController::init(image);
+    WorkDataManager::init(image);
+    AssetManager::init(image);
+    WorkJukeboxData::init(image);
+    JukeboxBgmSelector::init(image);
+    JukeboxHomeTopUI::init(image);
+    TempData::init(image);
+    MasterJukeboxSetlistMusicData::init(image);
+    HubViewControllerBase::init(image);
+    LiveTheaterInfo::init(image);
+    DownloadPathRegister::init(image);
 }

@@ -3,7 +3,7 @@ use fnv::{FnvHashMap, FnvHashSet};
 use sqlparser::ast;
 use once_cell::sync::Lazy;
 use crate::{
-    core::{utils::get_masterdb_path, Hachimi},
+    core::{utils::{get_data_path, get_masterdb_path}, Hachimi},
     il2cpp::{ext::{StringExt, Il2CppStringExt}, hook::LibNative_Runtime::Sqlite3::{Connection, Query}, types::{Il2CppObject, Il2CppString}}
 };
 
@@ -548,7 +548,7 @@ impl MetaData {
     fn load_from_db() -> Self {
         let mut logical_name_to_hash = FnvHashMap::default();
 
-        let meta_path = std::path::PathBuf::from(crate::core::utils::get_data_path()).join("meta");
+        let meta_path = std::path::PathBuf::from(get_data_path()).join("meta");
         let db_path_str = meta_path.to_string_lossy().to_string();
 
         let conn = Connection::new();
@@ -590,7 +590,7 @@ impl MetaData {
 
 fn get_single_column_int(sql: &str) -> Vec<i32> {
     let mut items = Vec::new();
-    let db_path = crate::core::utils::get_masterdb_path();
+    let db_path = get_masterdb_path();
     let conn = Connection::new();
     if Connection::Open(conn, db_path.to_il2cpp_string(), std::ptr::null_mut(), std::ptr::null_mut(), 0) {
         let query = Connection::Query(conn, sql.to_il2cpp_string());
@@ -627,7 +627,7 @@ pub fn get_default_dress_ids() -> Vec<i32> {
 
 pub fn get_all_cards() -> Vec<(i32, i32)> {
     let mut items = Vec::new();
-    let db_path = crate::core::utils::get_masterdb_path();
+    let db_path = get_masterdb_path();
     let conn = Connection::new();
     if Connection::Open(conn, db_path.to_il2cpp_string(), std::ptr::null_mut(), std::ptr::null_mut(), 0) {
         let query = Connection::Query(conn, "SELECT id, default_rarity FROM card_data WHERE id <= 999999".to_il2cpp_string());
@@ -643,7 +643,7 @@ pub fn get_all_cards() -> Vec<(i32, i32)> {
 }
 
 pub fn get_master_text(category: i32, index: i32) -> Option<String> {
-    let db_path = crate::core::utils::get_masterdb_path();
+    let db_path = get_masterdb_path();
     let conn = Connection::new();
     if Connection::Open(conn, db_path.to_il2cpp_string(), std::ptr::null_mut(), std::ptr::null_mut(), 0) {
         let sql = format!("SELECT text FROM text_data WHERE \"category\" = {} AND \"index\" = {}", category, index);
@@ -665,7 +665,7 @@ pub fn get_master_text(category: i32, index: i32) -> Option<String> {
 }
 
 pub fn get_jobs_info(reward_id: i32) -> Option<(i32, i32)> {
-    let db_path = crate::core::utils::get_masterdb_path();
+    let db_path = get_masterdb_path();
     let conn = Connection::new();
     if Connection::Open(conn, db_path.to_il2cpp_string(), std::ptr::null_mut(), std::ptr::null_mut(), 0) {
         let sql = format!("SELECT place_id, genre_id FROM jobs_reward WHERE \"id\" = {}", reward_id);
@@ -686,7 +686,7 @@ pub fn get_jobs_info(reward_id: i32) -> Option<(i32, i32)> {
 }
 
 pub fn get_jobs_place_race_track_id(place_id: i32) -> Option<i32> {
-    let db_path = crate::core::utils::get_masterdb_path();
+    let db_path = get_masterdb_path();
     let conn = Connection::new();
     if Connection::Open(conn, db_path.to_il2cpp_string(), std::ptr::null_mut(), std::ptr::null_mut(), 0) {
         let sql = format!("SELECT race_track_id FROM jobs_place WHERE \"id\" = {}", place_id);
@@ -707,7 +707,7 @@ pub fn get_jobs_place_race_track_id(place_id: i32) -> Option<i32> {
 
 pub fn get_champions_resources() -> Vec<String> {
     let mut items = Vec::new();
-    let db_path = crate::core::utils::get_masterdb_path();
+    let db_path = get_masterdb_path();
     let conn = Connection::new();
     if Connection::Open(conn, db_path.to_il2cpp_string(), ptr::null_mut(), ptr::null_mut(), 0) {
         let sql = "SELECT t.text FROM champions_schedule c LEFT OUTER JOIN text_data t on t.category = 206 AND t.\"index\" = c.id GROUP BY c.resource_id";
