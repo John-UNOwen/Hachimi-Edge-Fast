@@ -360,6 +360,14 @@ fn update_metadata(smtc: &SystemMediaTransportControls, music_id: i32) {
     }
 }
 
+fn get_temp_set_list_playing_data(top_ui: *mut Il2CppObject) -> *mut Il2CppObject {
+    if get_method_cached(unsafe { (*top_ui).klass() }, c"get_TempSetListPlayingData", 0).is_ok() {
+        JukeboxHomeTopUI::get_TempSetListPlayingData(top_ui)
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
 fn update_metadata_home(smtc: &SystemMediaTransportControls) {
     debug!("[smtc] update_metadata_home called");
     let mut has_set_list = false;
@@ -370,7 +378,7 @@ fn update_metadata_home(smtc: &SystemMediaTransportControls) {
         if hub_name == "HomeViewController" {
             let top_ui = HomeViewController::GetTopUI(hub_vc, 10);
             if !top_ui.is_null() {
-                let data = JukeboxHomeTopUI::get_TempSetListPlayingData(top_ui);
+                let data = get_temp_set_list_playing_data(top_ui);
                 if !data.is_null() {
                     let is_playing = JukeboxSetListPlayingData::get_IsPlaying(data);
                     if is_playing {
@@ -516,7 +524,7 @@ fn handle_button_pressed(args: &SystemMediaTransportControlsButtonPressedEventAr
                     let top_ui = HomeViewController::GetTopUI(hub_vc, 10);
                     if !top_ui.is_null() {
                         if button == SystemMediaTransportControlsButton::Play {
-                            let data = JukeboxHomeTopUI::get_TempSetListPlayingData(top_ui);
+                            let data = get_temp_set_list_playing_data(top_ui);
                             let mut is_set_list = false;
                             if !data.is_null() {
                                 let set_list_id = JukeboxSetListPlayingData::get_SetListId(data);
