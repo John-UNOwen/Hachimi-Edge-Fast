@@ -2224,6 +2224,7 @@ struct ConfigEditor {
     current_tab: ConfigEditorTab,
     search_term: String,
     champions_resources: Vec<String>,
+    champions_live_max_year: i32,
     font_color_options: Vec<String>,
     outline_size_options: Vec<String>,
     outline_color_options: Vec<String>,
@@ -2286,6 +2287,7 @@ impl ConfigEditor {
             current_tab: ConfigEditorTab::General,
             search_term: String::new(),
             champions_resources: crate::il2cpp::sql::get_champions_resources(),
+            champions_live_max_year: crate::il2cpp::sql::get_champions_live_max_year(),
             font_color_options: get_enum_options(c"FontColorType"),
             outline_size_options: get_enum_options(c"OutlineSizeType"),
             outline_color_options: get_enum_options(c"OutlineColorType"),
@@ -2901,7 +2903,7 @@ impl ConfigEditor {
                     Gui::run_combo(ui, "champions_live_resource_id", &mut config.champions_live_resource_id, &choices);
                     ui.end_row();
                     ui.label(t!("config_editor.champions_live_year"));
-                    ui.add(egui::DragValue::new(&mut config.champions_live_year).range(2021..=2030));
+                    ui.add(egui::DragValue::new(&mut config.champions_live_year).range(2022..=self.champions_live_max_year));
                     ui.end_row();
                 }
             }

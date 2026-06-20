@@ -31,11 +31,11 @@ extern "C" fn RegisterDownloadForLiveDirector(register: *mut Il2CppObject, id: i
     };
 
     let resource_id = config.champions_live_resource_id;
-    let year = config.champions_live_year % 100;
+    let texture_year_idx = (config.champions_live_year - 2022).max(0);
     let paths = [
         format!("Live/Image/Champions/tex_championslive_racename_{:02}", resource_id),
-        format!("Live/Image/Champions/tex_championslive_year_{:02}", year),
-        format!("Live/Image/Champions/tex_championslive_year_l_{:02}", year),
+        format!("Live/Image/Champions/tex_championslive_year_{:02}", texture_year_idx),
+        format!("Live/Image/Champions/tex_championslive_year_l_{:02}", texture_year_idx),
     ];
 
     let path_array = Array::<*mut Il2CppString>::new(string_class, paths.len());
@@ -53,7 +53,7 @@ extern "C" fn RegisterDownloadForLiveDirector(register: *mut Il2CppObject, id: i
 
     info!(
         "Pre-registered ChampionsMeeting bundle + title/year textures for Champions Live (music_id=1054, resource_id={}, year={} {:02}, {} paths)",
-        resource_id, config.champions_live_year, year, paths.len()
+        resource_id, config.champions_live_year, texture_year_idx, paths.len()
     );
 }
 

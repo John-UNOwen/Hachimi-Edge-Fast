@@ -727,3 +727,36 @@ pub fn get_champions_resources() -> Vec<String> {
     }
     items
 }
+
+pub fn get_champions_live_max_year() -> i32 {
+    let mut max_year = 2030;
+    let meta_path = std::path::PathBuf::from(get_data_path()).join("meta");
+    let db_path_str = meta_path.to_string_lossy().to_string();
+
+    let conn = Connection::new();
+    AUTO_UNLOCK_NEXT_DB.store(true, Ordering::Relaxed);
+    if Connection::Open(conn, db_path_str.to_il2cpp_string(), ptr::null_mut(), ptr::null_mut(), 0) {
+        let sql = "SELECT n FROM a WHERE n LIKE 'live/image/champions/tex_championslive_year_%'";
+        let query = Connection::Query(conn, sql.to_il2cpp_string());
+
+        if !query.is_null() {
+            let mut max_idx = -1;
+            while Query::Step(query) {
+                let text_ptr = Query::GetText(query, 0);
+                if let Some(text) = unsafe { text_ptr.as_ref() }.map(|s| s.as_utf16str().to_string()) {
+                    if let Some(idx_str) = text.strip_prefix("live/image/champions/tex_championslive_year_") {
+                        if let Ok(idx) = idx_str.parse::<i32>() {
+                            max_idx = max_idx.max(idx);
+                        }
+                    }
+                }
+            }
+            Query::Dispose(query);
+            if max_idx >= 0 {
+                max_year = 2022 + max_idx;
+            }
+        }
+        Connection::CloseDB(conn);
+    }
+    max_year
+}
