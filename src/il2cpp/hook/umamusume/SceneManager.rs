@@ -13,6 +13,11 @@ pub fn is_splash_shown() -> bool {
     SPLASH_SHOWN.load(atomic::Ordering::Acquire)
 }
 
+static HOME_INIT: AtomicBool = AtomicBool::new(false);
+pub fn is_home_init() -> bool {
+    HOME_INIT.load(atomic::Ordering::Acquire)
+}
+
 static mut CLASS: *mut Il2CppClass = 0 as _;
 pub fn class() -> *mut Il2CppClass {
     unsafe { CLASS }
@@ -37,6 +42,16 @@ impl_addr_wrapper_fn!(GetCurrentViewController, GETCURRENTVIEWCONTROLLER_ADDR, *
 fn ChangeViewCommon(next_view_id: i32) {
     if next_view_id == 1 { // ViewId.Splash
         SPLASH_SHOWN.store(true, atomic::Ordering::Release);
+    }
+    if next_view_id == 100 && !HOME_INIT.swap(true, atomic::Ordering::AcqRel) { // ViewId.Home
+        #[cfg(target_os = "windows")]
+        {
+            use crate::windows::{smtc, wnd_hook::get_target_hwnd};
+            if Hachimi::instance().config.load().windows.enable_smtc {
+                smtc::init(get_target_hwnd());
+            }
+        }
+        info!("HOME_INIT: {}", is_home_init());
     }
 }
 

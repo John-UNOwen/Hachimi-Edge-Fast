@@ -60,9 +60,6 @@ fn set_playback_status(smtc: &SystemMediaTransportControls, status: MediaPlaybac
 }
 
 pub fn init(hwnd: HWND) {
-    if !Hachimi::instance().config.load().windows.enable_smtc {
-        return;
-    }
     unsafe {
         TASKBAR_HWND = hwnd;
     }

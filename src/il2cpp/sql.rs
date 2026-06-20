@@ -4,8 +4,9 @@ use sqlparser::ast;
 use once_cell::sync::Lazy;
 use crate::{
     core::{utils::{get_data_path, get_masterdb_path}, Hachimi},
-    il2cpp::{ext::{StringExt, Il2CppStringExt}, hook::LibNative_Runtime::Sqlite3::{Connection, Query}, types::{Il2CppObject, Il2CppString}}
+    il2cpp::{ext::{StringExt, Il2CppStringExt}, hook::{LibNative_Runtime::Sqlite3::{Connection, Query}, umamusume::SceneManager}, types::{Il2CppObject, Il2CppString}}
 };
+use chrono::{Utc, Datelike};
 
 pub static RETRIEVED_RAW_KEY: Lazy<Mutex<Vec<u8>>> = Lazy::new(|| Mutex::new(Vec::new()));
 pub static AUTO_UNLOCK_NEXT_DB: AtomicBool = AtomicBool::new(false);
@@ -729,7 +730,8 @@ pub fn get_champions_resources() -> Vec<String> {
 }
 
 pub fn get_champions_live_max_year() -> i32 {
-    let mut max_year = 2030;
+    let mut max_year = Utc::now().year(); // fallback to the current year since it's guaranteed to have textures
+    if !SceneManager::is_home_init() { return max_year; }
     let meta_path = std::path::PathBuf::from(get_data_path()).join("meta");
     let db_path_str = meta_path.to_string_lossy().to_string();
 
