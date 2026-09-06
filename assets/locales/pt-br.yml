@@ -101,11 +101,11 @@ first_time_setup:
   title: "Configuração inicial"
   welcome_heading: "Bem-vindo"
   welcome_content: >-
-    O Hachimi foi instalado! Esta tela irá guiá-lo através do processo inicial de instalação.
+    O Hachimi Edge foi instalado! Esta tela irá guiá-lo através do processo inicial de instalação.
     Se não estiver interessado em utilizar as funcionalidades de tradução, pode ignorá-las fechando esta janela.
 
 
-    AVISO: O Hachimi é um projeto desenvolvido pela comunidade. Todas as traduções foram feitas por vários contribuidores.
+    AVISO: O Hachimi (e seu sucessor Hachimi Edge) é um projeto desenvolvido pela comunidade. Todas as traduções foram feitas por vários contribuidores.
     Este projeto não é desenvolvido e nem apoiado pela Cygames, Inc., e viola os termos de serviço do jogo. Ao continuar,
     você está aceitando os riscos envolvidos.
   translation_repo_heading: "Repositório de tradução"
@@ -230,6 +230,10 @@ config_editor:
   race_stat_hud_draggable_save: "Salvar posição ao mover interface de estatísticas da corrida"
   race_stat_hud_width_scale: "Escala horizontal da interface de estatísticas da corrida"
   race_stat_hud_height_scale: "Escala vertical da interface de estatísticas da corrida"
+  race_playback_slider: "Barra de progresso nas corridas"
+  race_playback_button: "Botão de pause nas corridas"
+  race_playback_key_enable: "Atalho para pausar as corridas"
+  race_playback_key: "Tecla para pausar as corridas"
   live_slider_always_show: "Sempre mostrar barra de progresso nos shows"
   live_playback_loop: "Reproduzir shows em loop"
   champions_live_show_text: "Substituir textos do show da Champions Meeting"
