@@ -5469,7 +5469,7 @@ impl ConfigEditor {
 
             if should_show_option(search, &t!("config_editor.ui_animation_scale")) {
                 ui.label(t!("config_editor.ui_animation_scale"));
-                ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
+                ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=1000.0).step_by(0.1));
                 ui.end_row();
             }
 
@@ -5632,13 +5632,13 @@ impl ConfigEditor {
 
             if should_show_option(search, &t!("config_editor.story_choice_auto_select_delay")) {
                 ui.label(t!("config_editor.story_choice_auto_select_delay"));
-                ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.1..=10.0).step_by(0.05));
+                ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.0001..=10.0).step_by(0.05));
                 ui.end_row();
             }
 
             if should_show_option(search, &t!("config_editor.story_text_speed_multiplier")) {
                 ui.label(t!("config_editor.story_text_speed_multiplier"));
-                ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=10.0).step_by(0.1));
+                ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=1000.0).step_by(0.1));
                 ui.end_row();
             }
 
@@ -6995,7 +6995,7 @@ impl Window for FirstTimeSetupWindow {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(t!("config_editor.ui_animation_scale"));
                         });
-                        let _ = ui.add(egui::Slider::new(&mut self.config.ui_animation_scale, 0.1..=10.0).step_by(0.1));
+                        let _ = ui.add(egui::Slider::new(&mut self.config.ui_animation_scale, 0.1..=1000.0).step_by(0.1));
                     }
                     3 => {
                         ui.heading(t!("first_time_setup.complete_heading"));
