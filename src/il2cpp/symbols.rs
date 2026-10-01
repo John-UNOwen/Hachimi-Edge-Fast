@@ -23,6 +23,17 @@ static mut HANDLE: *mut c_void = null_mut();
 static mut DOMAIN: *mut Il2CppDomain = null_mut();
 
 pub unsafe fn dlsym(name: &str) -> usize {
+    // The Global Android build hollows libil2cpp.so: its il2cpp_* exports are gone and the
+    // runtime dynamic section is zeroed, so the platform dlsym cannot find them. libunity
+    // carries an equivalent C-API table we can read in-process (see slot_table).
+    #[cfg(target_os = "android")]
+    {
+        let addr = super::slot_table::resolve(name);
+        if addr != 0 {
+            return addr;
+        }
+    }
+
     symbols_impl::dlsym(HANDLE, name)
 }
 
