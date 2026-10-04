@@ -2424,6 +2424,9 @@ struct PluginWindow {
     contents_callback: Option<PluginWindowCallback>,
     bottom_callback: Option<PluginWindowCallback>,
     userdata: usize,
+    /// Anchors the window top-left on its first frame only, then releases the
+    /// position so the player can drag it (and keep it there for the session).
+    pending_anchor: bool,
 }
 
 unsafe impl Send for PluginWindow {}
@@ -2502,7 +2505,10 @@ impl Window for PluginWindow {
         let mut open = true;
         let id = egui::Id::new("plugin_window").with(self.id);
 
-        new_window(ctx, id, &self.title)
+        let anchor = self.pending_anchor;
+        self.pending_anchor = false;
+
+        new_plugin_window(ctx, id, &self.title, anchor)
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
@@ -2546,6 +2552,7 @@ pub fn show_plugin_window(
         contents_callback,
         bottom_callback,
         userdata,
+        pending_anchor: true,
     };
     
     PLUGIN_WINDOWS_TO_SHOW.lock().unwrap().push(window);
@@ -4481,6 +4488,33 @@ fn new_window<'a>(ctx: &egui::Context, id: egui::Id, title: impl Into<egui::Widg
     .collapsible(false)
     .resizable(false)
     .constrain(false)
+}
+
+/// Plugin windows open in the top-left corner rather than the screen center:
+/// the middle is where the game itself draws its UI (event popups included),
+/// and the plugin API has no way to position a window from the plugin side.
+/// The anchor is applied on the first frame only — the window opens top-left,
+/// but the player can then drag it wherever they want, and egui keeps that
+/// position for the rest of the session.
+fn new_plugin_window<'a>(ctx: &egui::Context, id: egui::Id, title: impl Into<egui::WidgetText>, anchor: bool) -> egui::Window<'a> {
+    let scale = get_scale(ctx);
+    let salt = get_scale_salt(ctx);
+
+    let window = egui::Window::new(title)
+    .id(id.with(salt.to_bits()))
+    .pivot(egui::Align2::LEFT_TOP)
+    .min_width(96.0 * scale)
+    .max_width(320.0 * scale)
+    .max_height(250.0 * scale)
+    .collapsible(false)
+    .resizable(false)
+    .constrain(false);
+
+    if anchor {
+        window.fixed_pos(ctx.viewport_rect().min + egui::Vec2::new(12.0 * scale, 12.0 * scale))
+    } else {
+        window
+    }
 }
 
 fn new_setup_window<'a>(ctx: &egui::Context, id: egui::Id, title: impl Into<egui::WidgetText>) -> egui::Window<'a> {
