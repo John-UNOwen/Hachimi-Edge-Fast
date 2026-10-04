@@ -407,6 +407,9 @@ impl Hachimi {
         self.hooking_finished.store(true, atomic::Ordering::Relaxed);
 
         info!("GameAssembly finished loading");
+        // Re-measure resolution now that the game has finished loading its il2cpp image,
+        // before anything is actually called through it.
+        il2cpp::symbols::recheck();
         il2cpp::symbols::init();
         il2cpp::hook::init();
 

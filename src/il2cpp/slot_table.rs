@@ -213,7 +213,8 @@ unsafe fn name_string_matches(addr: usize, name: &str) -> bool {
     &actual[..len] == name.as_bytes() && actual[len] == 0
 }
 
-/// One-shot resolution diagnostic, run when the game's il2cpp handle is first captured.
+/// Resolution diagnostic, run at two moments so that load order can be told apart from a
+/// genuine resolution failure.
 ///
 /// It answers, on the device and in one log line, the question that static analysis
 /// cannot: does the platform `dlsym` find this build's il2cpp API at runtime, or is the
@@ -221,16 +222,21 @@ unsafe fn name_string_matches(addr: usize, name: &str) -> bool {
 /// routes can be compared directly. `dlsym` winning means the slot table is redundant
 /// on that build; `dlsym` losing is exactly the case the table exists for.
 ///
+/// A build whose symbol table is rebuilt by its own protection layer only becomes
+/// resolvable *after* that layer has run, so measuring once — at the instant `dlopen`
+/// returns — would report a failure the game never actually hits. `phase` labels the run.
+/// At most two runs are performed.
+///
 /// Only symbol lookups are performed — no address is ever called.
 #[cfg(target_os = "android")]
-pub unsafe fn diagnostic(handle: usize) {
-    static DONE: AtomicBool = AtomicBool::new(false);
-    if DONE.swap(true, Ordering::Relaxed) {
+pub unsafe fn diagnostic(handle: usize, phase: &str) {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    if RUNS.fetch_add(1, Ordering::Relaxed) >= 2 {
         return;
     }
 
     if handle == 0 {
-        log::warn!("diag: il2cpp handle is NULL — the dlopen hook never saw the il2cpp library");
+        log::warn!("diag[{phase}]: il2cpp handle is NULL — the dlopen hook never saw the il2cpp library");
         return;
     }
 
@@ -252,7 +258,8 @@ pub unsafe fn diagnostic(handle: usize) {
     }
 
     log::info!(
-        "diag: handle {:#x} — dlsym {}/{} slots, slot table {}/{} slots, both {}, libunity base {:?}",
+        "diag[{}]: handle {:#x} — dlsym {}/{} slots, slot table {}/{} slots, both {}, libunity base {:?}",
+        phase,
         handle,
         by_dlsym, total,
         by_table, total,
@@ -260,7 +267,7 @@ pub unsafe fn diagnostic(handle: usize) {
         table_base()
     );
     if !misses.is_empty() {
-        log::warn!("diag: resolved by neither route (first {}): {}", misses.len(), misses.join(", "));
+        log::warn!("diag[{}]: resolved by neither route (first {}): {}", phase, misses.len(), misses.join(", "));
     }
 }
 

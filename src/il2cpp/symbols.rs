@@ -42,10 +42,16 @@ pub unsafe fn dlsym(name: &str) -> usize {
 pub fn set_handle(handle: usize) {
     unsafe { HANDLE = handle as *mut c_void }
 
-    // Report which resolution route actually works on this device/build, once, at the
-    // moment the handle becomes available.
+    // Measure which resolution route works, at the moment the handle becomes available.
     #[cfg(target_os = "android")]
-    unsafe { super::slot_table::diagnostic(handle) }
+    unsafe { super::slot_table::diagnostic(handle, "on-dlopen") }
+}
+
+/// Re-measure once the game has finished loading its il2cpp image. A protection layer
+/// that rebuilds the symbol table itself only becomes visible by this point.
+pub fn recheck() {
+    #[cfg(target_os = "android")]
+    unsafe { super::slot_table::diagnostic(HANDLE as usize, "post-load") }
 }
 
 pub fn init() {
