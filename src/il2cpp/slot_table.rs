@@ -1,10 +1,14 @@
 //! Resolution of the il2cpp C API through libunity's `Il2CppApi` slot table.
 //!
-//! The Global Android build hollows `libil2cpp.so`: no `il2cpp_*` dynamic symbols at
-//! rest, and the runtime linker's dynamic section is zeroed, so `dlsym` cannot find the
-//! API there. `libunity.so` ships a generated compat layer instead — an init routine
-//! resolves every `il2cpp_*` name through an internal resolver and stores the resulting
-//! function pointers in a flat table inside libunity's BSS.
+//! The Global Android build ships a hollowed `libil2cpp.so`: 2347 of its 2388 dynamic
+//! symbol entries are zeroed, `.gnu.hash` describes only 16 symbols, and no `il2cpp_*`
+//! name appears anywhere in the 190 MB file — so a plain `dlsym` against the on-disk image
+//! cannot resolve the API. `libunity.so` carries a generated compat layer instead: its
+//! init routine calls `dlsym(handle, name)` for all 234 names (the handle is the one
+//! Unity's `libmain.so` bootstrap obtains for libil2cpp) and caches the results in a flat
+//! table in libunity's BSS. Whether that underlying `dlsym` succeeds at runtime is
+//! device-specific and is measured once by [`diagnostic`]; reading the cached table is the
+//! route that works when it does not.
 //!
 //! This module reads that table in-process. It is injection-agnostic: it only needs
 //! libunity to be loaded, which is true for any route that runs code inside the game.
@@ -207,6 +211,57 @@ unsafe fn name_string_matches(addr: usize, name: &str) -> bool {
     let len = name.len();
     let actual = std::slice::from_raw_parts(addr as *const u8, len + 1);
     &actual[..len] == name.as_bytes() && actual[len] == 0
+}
+
+/// One-shot resolution diagnostic, run when the game's il2cpp handle is first captured.
+///
+/// It answers, on the device and in one log line, the question that static analysis
+/// cannot: does the platform `dlsym` find this build's il2cpp API at runtime, or is the
+/// slot table the only route? Both are measured over the same name set, so the two
+/// routes can be compared directly. `dlsym` winning means the slot table is redundant
+/// on that build; `dlsym` losing is exactly the case the table exists for.
+///
+/// Only symbol lookups are performed — no address is ever called.
+#[cfg(target_os = "android")]
+pub unsafe fn diagnostic(handle: usize) {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    if handle == 0 {
+        log::warn!("diag: il2cpp handle is NULL — the dlopen hook never saw the il2cpp library");
+        return;
+    }
+
+    let total = gen::SLOTS.len();
+    let mut by_dlsym = 0usize;
+    let mut by_table = 0usize;
+    let mut both = 0usize;
+    let mut misses: Vec<&'static str> = Vec::new();
+
+    for slot in gen::SLOTS {
+        let d = crate::symbols_impl::dlsym(handle as *mut c_void, slot.name);
+        let t = resolve(slot.name);
+        if d != 0 { by_dlsym += 1; }
+        if t != 0 { by_table += 1; }
+        if d != 0 && t != 0 { both += 1; }
+        if d == 0 && t == 0 && misses.len() < 8 {
+            misses.push(slot.name);
+        }
+    }
+
+    log::info!(
+        "diag: handle {:#x} — dlsym {}/{} slots, slot table {}/{} slots, both {}, libunity base {:?}",
+        handle,
+        by_dlsym, total,
+        by_table, total,
+        both,
+        table_base()
+    );
+    if !misses.is_empty() {
+        log::warn!("diag: resolved by neither route (first {}): {}", misses.len(), misses.join(", "));
+    }
 }
 
 #[cfg(test)]

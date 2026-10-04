@@ -23,9 +23,11 @@ static mut HANDLE: *mut c_void = null_mut();
 static mut DOMAIN: *mut Il2CppDomain = null_mut();
 
 pub unsafe fn dlsym(name: &str) -> usize {
-    // The Global Android build hollows libil2cpp.so: its il2cpp_* exports are gone and the
-    // runtime dynamic section is zeroed, so the platform dlsym cannot find them. libunity
-    // carries an equivalent C-API table we can read in-process (see slot_table).
+    // The Global Android build ships a hollowed libil2cpp.so: 2347 of its 2388 dynamic
+    // symbol entries are zeroed and no il2cpp_* name exists anywhere in the file, so the
+    // platform dlsym may not find the API. libunity carries an equivalent C-API table that
+    // it fills with its own dlsym calls; we read that table in-process (see slot_table).
+    // Whether dlsym works on a given device/build is measured once by slot_table::diagnostic.
     #[cfg(target_os = "android")]
     {
         let addr = super::slot_table::resolve(name);
@@ -39,6 +41,11 @@ pub unsafe fn dlsym(name: &str) -> usize {
 
 pub fn set_handle(handle: usize) {
     unsafe { HANDLE = handle as *mut c_void }
+
+    // Report which resolution route actually works on this device/build, once, at the
+    // moment the handle becomes available.
+    #[cfg(target_os = "android")]
+    unsafe { super::slot_table::diagnostic(handle) }
 }
 
 pub fn init() {
