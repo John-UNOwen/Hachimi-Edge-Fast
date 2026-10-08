@@ -141,6 +141,7 @@ tl_updater:
 config_editor:
   title: "配置编辑器"
   general_tab: "\uf013 常规"
+  performance_tab: "\uf0e7 性能"
   graphics_tab: "\uf03e 图形"
   gameplay_tab: "\uf11b 游戏玩法"
   language: "语言"

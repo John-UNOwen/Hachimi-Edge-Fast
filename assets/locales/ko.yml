@@ -1,6 +1,4 @@
-hachimi: "Hachimi Edge"
-
-windows:
+ows:
   menu_open_key: "<"
 
 android:
@@ -138,6 +136,7 @@ tl_updater:
 config_editor:
   title: "고급 설정"
   general_tab: "\uf013 일반"
+  performance_tab: "\uf0e7 성능"
   graphics_tab: "\uf03e 품질"
   gameplay_tab: "\uf11b 게임"
   language: "언어"

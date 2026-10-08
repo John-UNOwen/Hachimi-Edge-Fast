@@ -105,6 +105,7 @@ tl_updater:
 config_editor:
   title: "設置編輯器"
   general_tab: "\uf013 一般"
+  performance_tab: "\uf0e7 效能"
   graphics_tab: "\uf03e 圖像"
   gameplay_tab: "\uf11b 遊戲"
   language: "語言"

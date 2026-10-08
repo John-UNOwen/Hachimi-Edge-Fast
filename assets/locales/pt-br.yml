@@ -148,6 +148,7 @@ tl_updater:
 config_editor:
   title: "Editor de configurações"
   general_tab: "\uf013 Geral"
+  performance_tab: "\uf0e7 Desempenho"
   graphics_tab: "\uf03e Gráficos"
   gameplay_tab: "\uf11b Jogabilidade"
   language: "Idioma"

@@ -101,6 +101,7 @@ tl_updater:
 config_editor:
   title: "Chỉnh sửa cài đặt"
   general_tab: "\uf013 Chung"
+  performance_tab: "\uf0e7 Hiệu năng"
   graphics_tab: "\uf03e Đồ họa"
   gameplay_tab: "\uf11b Gameplay"
   language: "Ngôn ngữ"

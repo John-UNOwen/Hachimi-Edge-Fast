@@ -123,6 +123,7 @@ tl_updater:
 
 config_editor:
   general_tab: "\uf013 Pangkalahatan"
+  performance_tab: "\uf0e7 Prestasyon"
   gameplay_tab: "\uf11b Paglalaro"
   language: "Wika"
   restore_defaults: "I-restore sa mga default"

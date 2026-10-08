@@ -130,6 +130,7 @@ tl_updater:
 config_editor:
   title: "Editor Konfigurasi"
   general_tab: "\uf013 Umum"
+  performance_tab: "\uf0e7 Performa"
   graphics_tab: "\uf03e Grafis"
   gameplay_tab: "\uf11b Gameplay"
   language: "Bahasa"
