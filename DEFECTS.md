@@ -1636,3 +1636,36 @@ What arrived:
   `ko.yml` and `zh-cn.yml` still carry the E1 duplicate keys.
 - A6, A13, C22, C23 and C24 are untouched by this merge. Upstream changed nothing in `NowLoading.rs`,
   and its `StoryTimelineData.rs` edit is the JP `rewrite_story_shadow_types` path.
+
+## F. Release v0.32.0-fork.1 (2026-10-08)
+
+First release on this fork's repository, `John-UNOwen/Hachimi-Edge`. The repo had no tags and no releases
+before it. The 51 tags in the local clone, `v0.14.1` through `v0.32.0`, are upstream's, fetched from
+`kairusds/Hachimi-Edge`.
+
+- Tag `v0.32.0-fork.1`, annotated, on commit `d42b6d9`, covering 62 non-merge commits of fork work since
+  the upstream v0.32.0 merge at `5f89a7e`. `main` and the tag were both pushed.
+- Release page: https://github.com/John-UNOwen/Hachimi-Edge/releases/tag/v0.32.0-fork.1, marked
+  pre-release because the training cut-in is still unmeasured (fix order item 34) and the Android legs C42
+  and C43 have never been run on a device.
+- Asset `hachimi-edge-0.32.0-fork.1-windows.zip`, 15,278,813 bytes, SHA256
+  `24848DAB0F0478606F6FD2A5119190DAA8F5F496D92B31174AD4AB21532DBFD4`, holding `cri_mana_vpx.dll` at
+  29,352,448 bytes SHA256 `1E689C12106242ACFA02E981284375D4B71313CDF93AC76029DD34F5226D673B` and an
+  `INSTALL.txt`.
+- The DLL reports `v0.32.0-d42b6d9`. That is `build.rs:28-62` writing `v{CARGO_PKG_VERSION}` plus
+  `git rev-parse --short HEAD`, with no `-dirty` because the tree was clean at build time.
+- The same binary is deployed at the game root, so the next career run measures the released build rather
+  than a different one.
+- Built on this machine after the checks the release text claims: `cargo test --lib` 65 passed,
+  `cargo check --all-targets` clean, clippy clean on `x86_64-pc-windows-msvc --all-targets` and
+  `aarch64-linux-android --all-targets` with `-D warnings`, `cargo build --release` 2 m 15 s.
+- GitHub Actions has never run on this fork. `GET /repos/John-UNOwen/Hachimi-Edge/actions/runs` returns
+  `total_count: 0` while all three workflows are listed `active` and the repo reports
+  `allowed_actions: all`. Actions is off by default on a fork of a public repository, and switching it on
+  is a settings action in the web UI. Until that happens, every CI claim about this fork is a local run
+  like the one above and not a CI result.
+- Not used, deliberately: `.github/workflows/create_release.yml`. It is `workflow_dispatch` only, it names
+  the release from `Cargo.toml` which would be plain `v0.32.0`, the same name upstream already used, and its
+  Windows job also builds Cellar, FunnyHoney and `hachimi_installer.exe` out of four pinned third party
+  repositories along with an Android `.so` this fork has never run on a device. If a future release wants
+  the installer path, that workflow is the place, and the version in `Cargo.toml` has to be bumped first.
