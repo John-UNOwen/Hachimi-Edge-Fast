@@ -4951,14 +4951,16 @@ struct ConfigEditor {
 #[derive(Eq, PartialEq, Clone, Copy)]
 enum ConfigEditorTab {
     General,
+    Performance,
     Graphics,
     Gameplay
 }
 
 impl ConfigEditorTab {
-    fn display_list() -> [(ConfigEditorTab, Cow<'static, str>); 3] {
+    fn display_list() -> [(ConfigEditorTab, Cow<'static, str>); 4] {
         [
             (ConfigEditorTab::General, t!("config_editor.general_tab")),
+            (ConfigEditorTab::Performance, t!("config_editor.performance_tab")),
             (ConfigEditorTab::Graphics, t!("config_editor.graphics_tab")),
             (ConfigEditorTab::Gameplay, t!("config_editor.gameplay_tab"))
         ]
@@ -4966,7 +4968,8 @@ impl ConfigEditorTab {
 
     fn next(self) -> ConfigEditorTab {
         match self {
-            ConfigEditorTab::General => ConfigEditorTab::Graphics,
+            ConfigEditorTab::General => ConfigEditorTab::Performance,
+            ConfigEditorTab::Performance => ConfigEditorTab::Graphics,
             ConfigEditorTab::Graphics => ConfigEditorTab::Gameplay,
             ConfigEditorTab::Gameplay => ConfigEditorTab::General,
         }
@@ -4975,7 +4978,8 @@ impl ConfigEditorTab {
     fn prev(self) -> ConfigEditorTab {
         match self {
             ConfigEditorTab::General => ConfigEditorTab::Gameplay,
-            ConfigEditorTab::Graphics => ConfigEditorTab::General,
+            ConfigEditorTab::Performance => ConfigEditorTab::General,
+            ConfigEditorTab::Graphics => ConfigEditorTab::Performance,
             ConfigEditorTab::Gameplay => ConfigEditorTab::Graphics,
         }
     }
@@ -4983,14 +4987,16 @@ impl ConfigEditorTab {
     fn index(self) -> usize {
         match self {
             ConfigEditorTab::General => 0,
-            ConfigEditorTab::Graphics => 1,
-            ConfigEditorTab::Gameplay => 2,
+            ConfigEditorTab::Performance => 1,
+            ConfigEditorTab::Graphics => 2,
+            ConfigEditorTab::Gameplay => 3,
         }
     }
 
     fn scroll_salt(self) -> &'static str {
         match self {
             ConfigEditorTab::General => "body_scroll_general",
+            ConfigEditorTab::Performance => "body_scroll_performance",
             ConfigEditorTab::Graphics => "body_scroll_graphics",
             ConfigEditorTab::Gameplay => "body_scroll_gameplay",
         }
@@ -5457,15 +5463,6 @@ impl ConfigEditor {
 
         // Graphics tab
         if show_all || tab == ConfigEditorTab::Graphics {
-            if should_show_option(search, &t!("config_editor.target_fps")) {
-                Self::option_slider(ui, &t!("config_editor.target_fps"), &mut config.target_fps, 30..=690);
-            }
-
-            #[cfg(target_os = "windows")]
-            if should_show_option(search, &t!("config_editor.target_fps_unfocused")) {
-                Self::option_slider(ui, &t!("config_editor.target_fps_unfocused"), &mut config.windows.target_fps_unfocused, 10..=30);
-            }
-
             if should_show_option(search, &t!("config_editor.virtual_resolution_multiplier")) {
                 ui.label(t!("config_editor.virtual_resolution_multiplier"));
                 ui.add(egui::Slider::new(&mut config.virtual_res_mult, 1.0..=4.0).step_by(0.1));
@@ -5499,48 +5496,6 @@ impl ConfigEditor {
                     ]);
                     ui.end_row();
                 }
-            }
-
-            if should_show_option(search, &t!("config_editor.ui_animation_scale")) {
-                ui.label(t!("config_editor.ui_animation_scale"));
-                ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=1000.0).step_by(0.1));
-                ui.end_row();
-            }
-
-            if should_show_option(search, &t!("config_editor.time_scale")) {
-                ui.label(t!("config_editor.time_scale"));
-                ui.add(egui::Slider::new(&mut config.time_scale, 0.1..=10.0).step_by(0.1));
-                ui.end_row();
-            }
-
-            if should_show_option(search, &t!("config_editor.transition_speed")) {
-                ui.label(t!("config_editor.transition_speed"));
-                ui.add(egui::Slider::new(&mut config.transition_speed, 1.0..=20.0).step_by(0.5));
-                ui.end_row();
-            }
-
-            if should_show_option(search, &t!("config_editor.result_screen_speed")) {
-                ui.label(t!("config_editor.result_screen_speed"));
-                ui.add(egui::Slider::new(&mut config.result_screen_speed, 1.0..=20.0).step_by(0.5));
-                ui.end_row();
-            }
-
-            if should_show_option(search, &t!("config_editor.story_speed")) {
-                ui.label(t!("config_editor.story_speed"));
-                ui.add(egui::Slider::new(&mut config.story_speed, 1.0..=10.0).step_by(0.5));
-                ui.end_row();
-            }
-
-            if should_show_option(search, &t!("config_editor.auto_skip_result_screens")) {
-                ui.label(t!("config_editor.auto_skip_result_screens"));
-                ui.checkbox(&mut config.auto_skip_result_screens, "");
-                ui.end_row();
-            }
-
-            if should_show_option(search, &t!("config_editor.high_speed_settings")) {
-                ui.label(t!("config_editor.high_speed_settings"));
-                ui.checkbox(&mut config.high_speed_settings, "");
-                ui.end_row();
             }
 
             if should_show_option(search, &t!("config_editor.render_scale")) {
@@ -5680,8 +5635,72 @@ impl ConfigEditor {
         }
         // Graphics tab end
 
-        // Gameplay tab
-        if show_all || tab == ConfigEditorTab::Gameplay {
+        // Performance tab: frame caps, the speed groups that shorten Gallop animations,
+        // the story text and choice pacing, and the spring physics update mode.
+        if show_all || tab == ConfigEditorTab::Performance {
+            if should_show_option(search, &t!("config_editor.target_fps")) {
+                Self::option_slider(ui, &t!("config_editor.target_fps"), &mut config.target_fps, 30..=690);
+            }
+
+            #[cfg(target_os = "windows")]
+            if should_show_option(search, &t!("config_editor.target_fps_unfocused")) {
+                Self::option_slider(ui, &t!("config_editor.target_fps_unfocused"), &mut config.windows.target_fps_unfocused, 10..=30);
+            }
+
+            if should_show_option(search, &t!("config_editor.ui_animation_scale")) {
+                ui.label(t!("config_editor.ui_animation_scale"));
+                ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=1000.0).step_by(0.1));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.time_scale")) {
+                ui.label(t!("config_editor.time_scale"));
+                ui.add(egui::Slider::new(&mut config.time_scale, 0.1..=10.0).step_by(0.1));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.transition_speed")) {
+                ui.label(t!("config_editor.transition_speed"));
+                ui.add(egui::Slider::new(&mut config.transition_speed, 1.0..=20.0).step_by(0.5));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.result_screen_speed")) {
+                ui.label(t!("config_editor.result_screen_speed"));
+                ui.add(egui::Slider::new(&mut config.result_screen_speed, 1.0..=20.0).step_by(0.5));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.story_speed")) {
+                ui.label(t!("config_editor.story_speed"));
+                ui.add(egui::Slider::new(&mut config.story_speed, 1.0..=10.0).step_by(0.5));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.auto_skip_result_screens")) {
+                ui.label(t!("config_editor.auto_skip_result_screens"));
+                ui.checkbox(&mut config.auto_skip_result_screens, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.high_speed_settings")) {
+                ui.label(t!("config_editor.high_speed_settings"));
+                ui.checkbox(&mut config.high_speed_settings, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.story_text_speed_multiplier")) {
+                ui.label(t!("config_editor.story_text_speed_multiplier"));
+                ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=1000.0).step_by(0.1));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.story_choice_auto_select_delay")) {
+                ui.label(t!("config_editor.story_choice_auto_select_delay"));
+                ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.0001..=10.0).step_by(0.05));
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.physics_update_mode")) {
                 ui.label(t!("config_editor.physics_update_mode"));
                 Gui::run_combo(ui, "physics_update_mode", &mut config.physics_update_mode, &[
@@ -5699,19 +5718,11 @@ impl ConfigEditor {
                 ui.checkbox(&mut config.cyspring_mono_uncap_frame_scale, "");
                 ui.end_row();
             }
+        }
+        // Performance tab end
 
-            if should_show_option(search, &t!("config_editor.story_choice_auto_select_delay")) {
-                ui.label(t!("config_editor.story_choice_auto_select_delay"));
-                ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.0001..=10.0).step_by(0.05));
-                ui.end_row();
-            }
-
-            if should_show_option(search, &t!("config_editor.story_text_speed_multiplier")) {
-                ui.label(t!("config_editor.story_text_speed_multiplier"));
-                ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=1000.0).step_by(0.1));
-                ui.end_row();
-            }
-
+        // Gameplay tab
+        if show_all || tab == ConfigEditorTab::Gameplay {
             if should_show_option(search, &t!("config_editor.force_allow_dynamic_camera")) {
                 ui.label(t!("config_editor.force_allow_dynamic_camera"));
                 ui.checkbox(&mut config.force_allow_dynamic_camera, "");
