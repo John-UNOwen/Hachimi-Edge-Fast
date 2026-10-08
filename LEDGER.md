@@ -1,6 +1,8 @@
 # Defect ledger
 
-Ledger for known defects in this fork. Not a changelog. Status marks:
+Ledger for known defects in this fork. Not a changelog. This file is named LEDGER.md, renamed from
+DEFECTS.md on 2026-10-08 so the name matches how it is used. Entries that quote the old name inside a
+command or a citation are history and are left as they happened. Status marks:
 
 - `[x]` fixed and verified in source
 - `[~]` partially fixed, remainder listed
@@ -381,6 +383,59 @@ is not static`, same as run 7), 0 panics. `introspect.log` written again, 1,941,
   (only its `story_tcps` name on the snapshot line), `ui_animation_scale 1000` (one `TweenManager` install
   line, no call), `cyspring_mono_uncap_frame_scale true` (name on the snapshot line, no call). See A18.
 
+### Run 9, training heavy career run on the release build `v0.32.0-d42b6d9`, 23:05:42 to 23:16:01, 617.5 s
+
+Build: the release asset binary, 29,352,448 bytes, SHA256 `1E689C12106242ACFA02E981284375D4B71313CDF93AC76029DD34F5226D673B`,
+reporting `v0.32.0-d42b6d9` (`hachimi.log:1`). The run started before `v0.32.0-974da9c` was deployed, so it carries
+the probe but neither the screen attribution nor the scaling point counters. `debug_mode` on, `Hooking finished: 207
+hooks armed in one pass, 0.065 s` (L568). Config snapshot L12 is identical to run 8, and `HighSpeedSetting` again
+reports `training 2` (L596), the game's own maximum.
+
+Session 617.5 s from the first view change to the last log line. Dwell by view, summing the gap to the next view
+change: SingleModeMain 1101 523.4 s over 14 visits, SingleModePaddock 1200 48.6 s over 7, SingleModeMonthStart 1100
+8.5 s over 6, Story 3000 7.8 s over 6, SingleModeSuccessionEvent 1501 7.6 s, SingleModeStart 1000 7.2 s, Splash 3.7 s,
+Title 2.8 s, HomeHub 2.7 s, SingleModeSuccessionCut 1500 0.9 s. 85% of the session sits on 1101, which is where the
+player decides and where the training animation plays, so a view change cannot separate thinking time from animation
+time. That is exactly the gap the probe was meant to fill.
+
+Probe install: `18 of 19 observe only probes installed` (L550). The one failure is
+`TrainingParamChangeUI::InitializePlateList` (L551), and the dump now says why (C48).
+
+Reached and counted, from the totals lines L801 to L999:
+
+| probe | calls | peak value |
+|---|---|---|
+| `CutInTimelineController::UpdateSpeed` | 3194 | none printed, void |
+| `SingleModeTrainingCutInHelper::GetTargetSpeed` | 824 | 8.334 |
+| `SingleModeUtils::GetTrainingCutTimeScale` | 124 | 8.334, pairs `[3.04, 6.08]` and `[2.4, 4.8]` |
+| `CutInTimelineController::SkipRuntime(time)` | 70 | `0.0` and `-1.0` |
+| `SingleModeTrainingCutInHelper::IsHighSpeedMode` | 67 | bool, not printed |
+| `SingleModeMainTrainingCuttController::WaitTapAsync` | 31 | |
+| `SingleModeMainTrainingCuttController::FadeOutResultFlash` | 31 | |
+| `SingleModeTrainingCutInHelper::SkipRuntime` | 16 | |
+| `SingleModeMainViewTrainingCutStatus::Skip(skip)` | 16 | every call with the argument false |
+
+Never reached in 617 s of training: `CutInTimelineController::ResetCurrentTime`, `SetSpeed`, `get_CurrentTime`,
+`get_CurrentTimeScale`, `get_WaitingTime`, `SkipRuntimeFrames`, `SkipTimeDirect`, `SingleModeMainViewController::WaitTap`,
+`CoroutineDoTweenTimeScale`. `cut runs 0` in all 22 totals lines, so the wall clock half of item 34 produced no number
+at all. The boundary was chosen from the class name and this client does not drive a training cut-in through
+`ResetCurrentTime` (C47).
+
+What the counts do say: 31 `WaitTapAsync` with 31 `FadeOutResultFlash` is 31 training cut plays, each of which reached
+the game's own tap wait, and `Skip` was asked 16 times and answered false every time. The cut already runs at up to
+8.334 (`GetTrainingCutTimeScale` returns double what it is given, and `GetTimeScaleByHighSpeedType` reached 8 in the
+story path at L784), which is the game's own high speed ceiling. The remaining lever on this path is the game's own
+skip and autoplay doors (A28, A29), not another multiplier.
+
+The five training scaling hooks installed in run 8 printed an install line (L458 to L478) and again no call line, which
+is the fact `95bf6d1` exists to settle. Their counters appear on the probe totals line from `v0.32.0-974da9c` onward.
+
+Story side of the same run: `GetTimeScaleByHighSpeedType(0)` returned 1 three times early and 8 from L784 on,
+`IsHighSpeedMode 0 -> 1` was asked 7 times (L770, L904, L940, L959, L976, L982, L989),
+`StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` (L815), `CheckChoiceAutoTap 0.1333528 -> 1.000146` (L855), and
+`Time::set_timeScale call n: 1 -> 1 (lever x2)` six times (L856 to L904). Story was 7.8 s of a 617.5 s session, so in
+this session the training turns are the time, not the story.
+
 ## A18 and C44, added from run 8
 
 - [ ] **A18 Three performance options are installed and never called on this client.** A whole career,
@@ -517,6 +572,55 @@ Sources: a token index built from `UmamusumePrettyDerby_Data\il2cpp_data\Metadat
 
 Bracketed status totals after this research edit: 11 `[x]`, 19 `[~]`, 47 `[ ]`, 3 `[latent]`, and 28
 numbered fix order items.
+
+## A28 to A30, what the run 9 allowlist dump actually delivered (2026-10-08)
+
+The run 9 dump is 1,921,600 bytes over 27,463 lines and ends with `527 classes (27 from the allowlist), 15157 methods,
+11238 fields written`. Line numbers below are in `hachimi\introspect.log`.
+
+- [ ] **A28 The training cut-in names its own state, its phases, and the friendship test.**
+  `Gallop.SingleModeMainTrainingCuttController` (dump L22929) has
+  `get_IsPlayingCutt/0 -> bool()` and `set_IsPlayingCutt/1 -> void(bool)`, which is the game saying when a cut is
+  playing, and the phase coroutines `TrainingAsync/1 -> IEnumerator(TrainingCommandId)`,
+  `PlayTrainingCut/1 -> IEnumerator(CuttPlayInfo)`, `PlayScenarioTrainingCut/1 -> IEnumerator(CuttPlayInfo)`,
+  `PlayTrainingSaboriAsync/1 -> IEnumerator(TrainingCommandId)`,
+  `PlayTrainingCutEndAsync/3 -> IEnumerator(TrainingCommandId, bool, bool)`,
+  `CleanUpCuttAndAssetUnload/0 -> IEnumerator()`, `CleanUpCutt/0 -> void()`, the per frame drivers
+  `UpdateTrainingCutIn/0`, `FixedUpdateTrainingCutIn/0`, `LateUpdateTrainingCutIn/0`, the status panel doors
+  `PlayInTrainingStatus/0 -> void()` and `PlayOutTrainingStatus/0 -> void()`, and
+  `IsAutoPlay/0 -> bool()` next to `WaitTapAsync/0 -> IEnumerator()`. It also has
+  `IsValidTag/2 -> bool(TrainingResultType, List<SupportCardData>)`, which is the regular versus friendship test this
+  ledger has been missing, plus the friendship specific flash paths `LoadResultFlashTag/0`, `LoadResultFlashNormal/0`
+  and `StartResultFlash/1 -> void(bool)`. `TryEnterStoryOnEndCutt/1 -> static bool(SingleModeEventPlayTiming&)` and
+  `HasStoryOnEndCutt/0 -> static bool()` say a cut can hand off into a story event.
+- [ ] **A29 The cut-in timeline reports its own length and progress, and it has an autoplay flag.**
+  `Gallop.CutIn.Cutt.CutInTimelineController` (dump L26098) exposes `GetTotalTime/0 -> float()`,
+  `GetTotalTimeCeil/0 -> float()`, `GetTotalFrameCeil/0 -> int()`, `get_CurrentFrame/0 -> int()`,
+  `FrameToTime/1 -> float(int)`, `get_Speed/0 -> float()`, `get_DeltaTime/0 -> float()`,
+  `get_WaitingTime/0 -> float()`, `get_DeltaWaitingTime/0 -> float()`, `get_IsWaitingUpdate/0 -> bool()`,
+  `get_TargetFps/0 -> int()`, `get_IsMainCutt/0 -> bool()`, `get_IsEndless/0` with `set_IsEndless/1`,
+  `get_DoNotOverTime/0` with `set_DoNotOverTime/1`, `set_SkipFrame/1 -> void(int)`, `UseResumeEndFrame/1 -> void(bool)`,
+  `SetLoadFinish/0 -> void()`, and `get_IsAutoPlay/0 -> bool()` with `set_IsAutoPlay/1 -> void(bool)`. The game already
+  knows how long the animation is and how far it has got, so a measurement should read that instead of inferring it
+  from wall clock, and a skip should go through `set_IsAutoPlay` or `set_SkipFrame`, which are the game's own doors.
+  `Gallop.SingleModeMainViewTrainingCutStatus` (dump L23742) has `PlayIn/4 -> void(float, int, bool, Action)`,
+  `CoroutinePlayIn/2 -> IEnumerator(float, int)`, `PlayOut/2 -> void(bool, Action)`, `PlayPreIn/0`, `PlayEnd/0`,
+  `GetIntervalOutBegine/1 -> float(float)` with `field OUT_BEGINE_INTERVAL [static const float]` and no setter
+  sibling, `WillRankUpInHighSpeedMode/0 -> bool()`, `TargetFrameWillRankUp/1 -> bool(int)`, `ExistPlayingFrame/0`,
+  `Skip/1 -> void(bool)` and `field _skipped [bool]`. `Gallop.TrainingParamChangeUI` (dump L24571) carries
+  `field SCROLL_DURATION`, `GROUP_TYPEWRITE_INTERVAL`, `GROUP_TYPEWRITE_INTERVAL_HIGH`, `SEQUENCE_INTERVAL`,
+  `SEQUENCE_INTERVAL_SUCCESSION` and `PLAY_SPEED_FOR_SKIP`, all `static const float`, beside the instance fields
+  `_delay`, `_tapWait`, `_groupInterval`, `_sequenceInterval`, `_forceTapWait`. `PLAY_SPEED_FOR_SKIP` says the plate
+  cascade already has a faster path the game uses when it is skipped.
+- [ ] **A30 The friendship cut-in is a separate, shorter object.**
+  `Gallop.SingleModeMainViewTagTrainingCutInPlayer` (dump L23709) has `PlayCutIn/2 -> void(List<SupportCardData>, Action)`,
+  `PlayCutInOut/1 -> void(Action)`, `PlayButtonEffect/3 -> void(Transform, Vector3, Action)`, `DestroyButtonEffect/0`,
+  `CreateLineEffect/1 -> Animator`, `PlayLineEffect/0`, `StopLineEffect/0`, `DestroyLineEffect/0`,
+  `PlaySuccessTextEffect/0`, `SetResultFlashPlayer/1 -> void(FlashPlayer)`, `IsValidTag/1 -> static bool(List<SupportCardData>)`,
+  and the constants `GRADATION_DEFAULT_ALPHA [static const float]`, `CUT_IN_MIN [static const int]`,
+  `CUT_IN_MAX [public static const int]`, `TAG_TRAINING_CUT_IN_FLASH_SORT_OFFSET [public static const int]`. Each entry
+  ends by invoking an `Action` the caller supplied, so anything that shortens these has to still call that callback or
+  the coroutine that is waiting on it never resumes.
 
 ## B. Open items from the animation feature review
 
@@ -1193,6 +1297,32 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
   measurement note rather than a fix. `story_speed` was also left at 1.0..=10.0 even though the code would
   honour MAX_FACTOR, because 10 is the value the runs measured with.
 
+- [ ] **C47 The probe chose a cut run boundary that this client never calls.** Run 9 installed 18 of 19 probes and
+  printed `cut runs 0` on all 22 totals lines across 617 s of training, while `CutInTimelineController::UpdateSpeed`
+  reached 3194 calls and `SkipRuntime(time)` 70, so the timeline was plainly running. `ResetCurrentTime` is in
+  `Gallop.CutIn.Cutt.CutInTimelineController` (dump L26098) and was hooked, but a training cut-in does not go through
+  it, and neither do `SetSpeed`, `get_CurrentTime`, `get_CurrentTimeScale`, `get_WaitingTime`, `SkipRuntimeFrames` or
+  `SkipTimeDirect`. Evidence: `hachimi.log:550` and the totals lines L801 to L999. A boundary chosen from a class name
+  is a guess, and this is what a guess costs. The fix is the game's own state flag
+  `set_IsPlayingCutt/1 -> void(bool)` on `SingleModeMainTrainingCuttController` (dump L22929): observe the setter, treat
+  `true` as a cut opening and `false` as it closing, and read `GetTotalTime/0`, `GetTotalFrameCeil/0` and
+  `get_CurrentFrame/0` for the length the game itself believes it has (A29).
+  - Not yet done: the replacement boundary, and no scaling depends on it, so nothing else was exposed.
+
+- [ ] **C48 A generic collection parameter does not match `CLASS`, so one probe never installed.**
+  `TrainingParamChangeUI::InitializePlateList` was the only probe of 19 that failed (`hachimi.log:551`, reported as
+  "no class or no matching overload"). The dump gives it as
+  `InitializePlateList/2 -> void(generic<System.Collections.Generic.List<Gallop.TrainingParamChangeUI.ChangeParameterInfo>:24B>, float)`
+  (dump L24571), and the probe asked for `IL2CPP_TYPE_CLASS` for that argument. A generic instantiation carries
+  `Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST` (21) in its parameter record, not `CLASS`, so the signature walk rejected a
+  method that exists. The resolver's note that "`CLASS` matches every reference type" (AGENTS section 5) is true for
+  plain reference types and false for a generic instantiated one. Fix: let the probe's parameter matcher accept
+  `GENERICINST` alongside `CLASS` for a reference slot, which is safe for an observe only hook because the probe never
+  reads or writes the argument, it only matches the overload.
+  - Not yet done: the matcher change and the re-install of that probe. This also explains why other reference type
+    signatures in the fork may have been reported as missing overloads; none of the speed hooks is known to be a
+    casualty, because the ones that matter printed `new_hook!` lines.
+
 ## D. Fix order
 
 1. [x] A1 duration argument index in `NowLoading` (`db3c272`).
@@ -1457,7 +1587,7 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     path covers the result tween chains and printed nothing for the confirm screen. Read what the confirm
     screen spends its 13.4 s on in `hachimi.log` before writing a hook there.
 
-34. [ ] Measure the training cut-in before scaling anything in it. Run 8 recorded 104.7 s on
+34. [~] Measure the training cut-in before scaling anything in it. Run 8 recorded 104.7 s on
     `SingleModeMainView` and 39.7 s on the paddock, but it proved nothing about the cut-in: none of the
     installed training hooks printed a call line, and the log cannot say whether a friendship training even
     happened. A probe in the shape of `StoryFrameProbe` is what closes this: first-hit and totals for
@@ -1465,7 +1595,7 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     `GetTargetSpeed`, `SingleModeTrainingCutInHelper.IsHighSpeedMode`, and the three `SingleModeUtils`
     getters in A20, plus the wall clock between the start and stop lines. Run 5 is the warning this item
     exists for.
-35. [~] The classes that matter are not in the dump yet. `CLASS_FILTERS` in
+35. [x] The classes that matter are not in the dump yet. `CLASS_FILTERS` in
     [src/il2cpp/introspect.rs](src/il2cpp/introspect.rs) has no match for `trainingcutt`, `tagtraining`,
     `trainingcutin` or `cuttcontroller`, so `TrainingCuttController`, `SingleModeTrainingCutInHelper` and
     `SingleModeMainViewTagTrainingCutInPlayer` appear only as name fragments in the metadata token index,
@@ -1473,7 +1603,11 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
      dump needs an exact name allowlist and a higher `MAX_FULL_CLASSES`, and the dump file it writes is
      already 1.94 MB per launch (C44). Built in `253458f` and not yet run: `FULL_DUMP_NAMES` now names 21
      classes for a full dump out of their own `MAX_ALLOWLIST_CLASSES = 40` budget, and `cutt` and `cutin`
-     were added to `METHOD_FILTERS`.
+     were added to `METHOD_FILTERS`. Run 9 ran it: the dump ends `527 classes (27 from the allowlist), 15157 methods,
+     11238 fields written`, and `SingleModeMainTrainingCuttController` (dump L22929),
+     `SingleModeMainViewTagTrainingCutInPlayer` (L23709), `SingleModeMainViewTrainingCutStatus` (L23742),
+     `TrainingParamChangeUI` (L24571) and `Gallop.CutIn.Cutt.CutInTimelineController` (L26098) are there with full
+     signatures, which is what A28, A29 and A30 are written from.
 36. [ ] Pick the door with the measurement in hand. The game offers two shapes: its own skip
     (`SingleModeTrainingCutInHelper.SkipRuntime/0`, `ContextExtension.SkipRuntimeAll/1`,
     `ContextExtension.SkipPause/1`) which removes the animation, and its own rate
@@ -1503,7 +1637,30 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     pair at the start and the end of the cut. `hit()` is silent when scaling changes nothing
     (`raw == scaled`, which includes a `0.0` duration), so the existing call lines cannot answer "was it
     called" (A21). This is also the run that settles whether a friendship training cut-in happened at all
-    in run 8.
+    in run 8. Run 9 printed no call line for those five either, and their counters ride on the probe totals line from
+    `v0.32.0-974da9c`.
+
+39. [ ] Rebuild the cut run boundary on the game's own state instead of a guessed method. `set_IsPlayingCutt/1` and
+    `get_IsPlayingCutt/0` on `SingleModeMainTrainingCuttController` (A28) open and close a cut, and
+    `GetTotalTime/0`, `GetTotalFrameCeil/0`, `get_CurrentFrame/0` and `get_Speed/0` on the timeline (A29) say how long
+    the game thinks the cut is and how far it has got. Run 9 is the cost of not doing this first (C47). Attribute each
+    run with `IsValidTag/2` (A28) so a friendship cut and a regular one stop sharing one number.
+40. [ ] Re install the probe the matcher threw away. Accept `IL2CPP_TYPE_GENERICINST` in a reference parameter slot for
+    the observe only probes so `TrainingParamChangeUI::InitializePlateList/2` resolves (C48).
+41. [ ] Use the game's own skip and autoplay doors on the training cut before adding any multiplier. Run 9 counted 31
+    `WaitTapAsync` and 31 `FadeOutResultFlash`, `Skip` asked 16 times with false, and the cut already runs at up to
+    8.334. `IsAutoPlay/0` on the cutt controller, `get_IsAutoPlay/0` with `set_IsAutoPlay/1` on the timeline,
+    `set_SkipFrame/1 -> void(int)`, and `field PLAY_SPEED_FOR_SKIP` beside `_forceTapWait` on `TrainingParamChangeUI`
+    (A28, A29) are the paths the game itself uses. This is the same shape as the result screen auto skip in section 8
+    item 4: go through the game's own skip, never past it.
+42. [ ] Probe the story event the same way. `Gallop.StoryViewController` carries `SkipStory/0`, `SetTimelineIsPlaying/0`,
+    `OnSetCurrentTime/1 -> void(float)`, `SkipTrainingCutt/0`, `OnStartTrainingCutt/1`, `OnPreloadTrainingCutt/1`,
+    `GetOriginalRaceAnimationWaitTime/0 -> float()`, `FadeCharacterAysnc/3 -> IEnumerator(bool,
+    List<EventTimelineModelController>, float)` with a `public float duration` field on its coroutine,
+    `PlayParameterChangeAsync` with a `public float delay` field, and the constants `DELAY_AFTER_PARAMETER_CHANGE` and
+    `SINGLE_MODE_STILL_FADE_TIME`. Run 9 spent only 7.8 s on Story out of 617.5 s, so the story event is worth measuring
+    on a session that actually plays one, and the probe should read the same shape as `StoryFrameProbe`: counts, peaks,
+    and the game's own totals.
 
 ### Probe build `253458f`, deployed and waiting for a career run (2026-10-08)
 
