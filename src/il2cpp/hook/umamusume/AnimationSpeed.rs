@@ -219,14 +219,34 @@ pub fn scale_time_scale(value: f32, group: Group) -> f32 {
 
 // A detour installed against the wrong overload reads its arguments from the wrong
 // registers, so the parameter list and the return type both have to match the declared
-// method before anything is hooked.
+// method before anything is hooked. How permissive that match may be depends on how the
+// wrapper declares itself: a wrapper that reserves a register for `this` cannot take a static
+// target, a wrapper without one must have it, and a wrapper that declares value parameters
+// cannot take a method whose parameters are references, because those travel as addresses.
+#[derive(Clone, Copy)]
+struct MethodMatch {
+    allow_static: bool,
+    require_static: bool,
+    require_ref: bool,
+    forbid_ref: bool,
+}
+
+// A wrapper with a `this` parameter and plain value arguments.
+const MATCH_INSTANCE_VALUE: MethodMatch = MethodMatch { allow_static: false, require_static: false, require_ref: false, forbid_ref: true };
+// A zero argument getter: a static one simply ignores the `this` register it is handed.
+const MATCH_GETTER_EITHER: MethodMatch = MethodMatch { allow_static: true, require_static: false, require_ref: false, forbid_ref: true };
+// A wrapper that writes through reference parameters.
+const MATCH_REFERENCE: MethodMatch = MethodMatch { allow_static: false, require_static: false, require_ref: true, forbid_ref: false };
+// A wrapper that declares only the real arguments, so the target has to be static.
+const MATCH_STATIC_VALUE: MethodMatch = MethodMatch { allow_static: true, require_static: true, require_ref: false, forbid_ref: true };
+
 pub unsafe fn resolve_method(
     class: *mut Il2CppClass,
     name: &str,
     params: &[Il2CppTypeEnum],
     ret: Il2CppTypeEnum,
 ) -> usize {
-    resolve_method_any(class, name, params, ret, false, false)
+    resolve_method_any(class, name, params, ret, MATCH_INSTANCE_VALUE)
 }
 
 // A method that reports its result through `ref` parameters hands back pointers, and this
@@ -240,19 +260,26 @@ pub unsafe fn resolve_ref_method(
     params: &[Il2CppTypeEnum],
     ret: Il2CppTypeEnum,
 ) -> usize {
-    resolve_method_any(class, name, params, ret, false, true)
+    resolve_method_any(class, name, params, ret, MATCH_REFERENCE)
 }
 
-// `allow_static` is only for wrappers that carry no real arguments: a static method
-// simply ignores the `this` register such a wrapper hands over. `expect_ref` is for
-// wrappers that write back through reference parameters.
+// A static method has no hidden `this`, so its wrapper declares only the dumped arguments.
+// The dump spells a class typed parameter as `class<...>`, which is the CLASS enum.
+pub unsafe fn resolve_static_method(
+    class: *mut Il2CppClass,
+    name: &str,
+    params: &[Il2CppTypeEnum],
+    ret: Il2CppTypeEnum,
+) -> usize {
+    resolve_method_any(class, name, params, ret, MATCH_STATIC_VALUE)
+}
+
 unsafe fn resolve_method_any(
     class: *mut Il2CppClass,
     name: &str,
     params: &[Il2CppTypeEnum],
     ret: Il2CppTypeEnum,
-    allow_static: bool,
-    expect_ref: bool,
+    required: MethodMatch,
 ) -> usize {
     let method = match crate::il2cpp::symbols::get_method_overload(class, name, params) {
         Ok(method) => method,
@@ -270,19 +297,41 @@ unsafe fn resolve_method_any(
     // A wrapper reserves the first register for `this`. Against a static method that
     // register holds the first real argument, so every following argument would be read
     // from the wrong place. `flags` is the MethodAttributes word, and bit 0x0010 is static.
-    if !allow_static && (*method).flags & METHOD_ATTRIBUTE_STATIC != 0 {
-        debug!("AnimationSpeed: {} is static, its arguments would be misread", name);
+    let is_static = (*method).flags & METHOD_ATTRIBUTE_STATIC != 0;
+
+    if is_static {
+        if !required.allow_static && !required.require_static {
+            debug!("AnimationSpeed: {} is static, its arguments would be misread", name);
+            return 0;
+        }
+    }
+    else if required.require_static {
+        debug!("AnimationSpeed: {} is not static, a wrapper without `this` would misread it", name);
         return 0;
     }
 
-    if expect_ref {
-        for index in 0..params.len() as u32 {
-            let param = il2cpp_method_get_param(method, index);
+    for index in 0..params.len() as u32 {
+        let param = il2cpp_method_get_param(method, index);
 
-            if param.is_null() || (*param).byref() == 0 {
-                debug!("AnimationSpeed: {} parameter {} is not passed by reference", name, index);
+        if param.is_null() {
+            if required.require_ref {
+                debug!("AnimationSpeed: {} parameter {} has no readable type", name, index);
                 return 0;
             }
+
+            continue;
+        }
+
+        let byref = (*param).byref() != 0;
+
+        if required.require_ref && !byref {
+            debug!("AnimationSpeed: {} parameter {} is not passed by reference", name, index);
+            return 0;
+        }
+
+        if required.forbid_ref && byref {
+            debug!("AnimationSpeed: {} parameter {} is passed by reference, the wrapper declares a value", name, index);
+            return 0;
         }
     }
 
@@ -308,7 +357,7 @@ unsafe fn resolve_method_any(
 unsafe fn resolve_getter(class: *mut Il2CppClass, name: &str, ret: Il2CppTypeEnum) -> usize {
     // Zero-argument getters are safe either way: a static one simply ignores the `this`
     // register the wrapper hands over.
-    let addr = resolve_method_any(class, name, &[], ret, true, false);
+    let addr = resolve_method_any(class, name, &[], ret, MATCH_GETTER_EITHER);
 
     if addr == 0 {
         return 0;
