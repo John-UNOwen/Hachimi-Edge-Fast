@@ -1,4 +1,4 @@
-use std::sync::{atomic::{self, AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize}, Mutex};
+use std::sync::{atomic::{self, AtomicBool, AtomicI32, AtomicI64, AtomicUsize}, Mutex};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -150,60 +150,39 @@ fn count_step(calls: &AtomicUsize, name: &'static str) {
     }
 }
 
-// Same counter for the paths whose value is known on the way in, so the log shows what the
-// scaling did to it even when the option is off and the two are equal.
-fn log_step(calls: &AtomicUsize, name: &'static str, raw: i32, scaled: i32) {
+// Same counter for the paths whose value is known on the way in.
+fn log_step(calls: &AtomicUsize, name: &'static str, value: i32) {
     let calls = calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
 
     if calls <= STEP_DETAIL_LIMIT {
-        debug!("Story step {name} call {calls}: {raw} -> {scaled}");
+        debug!("Story step {name} call {calls}: {value}");
     } else if calls % STEP_CHUNK == 0 {
         debug!("Story step {name} {calls} calls");
     }
 }
 
-// The skip paths measured 76, 182, 313, 448 and 583 frames in rising order, and the same values
-// reached SkipMotionFrame, which reads like a frame target inside the timeline rather than a
-// wait length. So the option only ever extends the value and never shortens it, and one step may
-// add at most MAX_SKIP_EXTENSION frames: a story block is a few hundred frames long, and a
-// multiplier that reaches past the block the timeline is standing in is what C23 warns about.
-// Both calls get the same scaled value so the pair stays consistent.
-const MAX_SKIP_SCALE: f32 = 8.0;
-const MAX_SKIP_EXTENSION: i32 = 600;
-
-static STORY_SKIP_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
-
-fn extend_skip(frames: i32) -> i32 {
-    let factor = f32::from_bits(STORY_SKIP_FACTOR.load(atomic::Ordering::Relaxed));
-
-    if factor == 1.0 || frames <= 0 {
-        return frames;
-    }
-
-    let wanted = (frames as f64 * factor as f64).round();
-    let ceiling = frames as f64 + MAX_SKIP_EXTENSION as f64;
-
-    (wanted.min(ceiling) as i32).max(frames)
-}
-
+// These two paths are hooked to measure them, not to change them. A run that extended the frame
+// value they carry froze the story timeline: SkipFrameCount(133) went on as 733, the game handed
+// that 733 to SkipMotionFrame, and this hook raised it again to 1333. The value one call receives
+// is fed into the next, so scaling either one compounds along the chain instead of landing once.
+// The wait count then stopped moving at 96, UpdateTimeScaleByHispeedType stopped at 49, and
+// IsHighSpeedMode ran at a flat 3600 calls per 20 s while nothing advanced. The measured values
+// (133, 243, 161, 263, 691, 163) read like frame targets inside the timeline rather than wait
+// lengths, so there is no multiplier here that is safe. Every argument is passed through untouched.
 type SkipFrameCountFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, flag1: bool, flag2: bool);
 extern "C" fn SkipFrameCount(this: *mut Il2CppObject, frames: i32, flag1: bool, flag2: bool) {
     mark_story_activity();
+    log_step(&SKIP_FRAME_CALLS, "StoryTimelineController::SkipFrameCount", frames);
 
-    let scaled = extend_skip(frames);
-    log_step(&SKIP_FRAME_CALLS, "StoryTimelineController::SkipFrameCount", frames, scaled);
-
-    get_orig_fn!(SkipFrameCount, SkipFrameCountFn)(this, scaled, flag1, flag2);
+    get_orig_fn!(SkipFrameCount, SkipFrameCountFn)(this, frames, flag1, flag2);
 }
 
 type SkipMotionFrameFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
 extern "C" fn SkipMotionFrame(this: *mut Il2CppObject, frames: i32) {
     mark_story_activity();
+    log_step(&SKIP_MOTION_CALLS, "StoryTimelineController::SkipMotionFrame", frames);
 
-    let scaled = extend_skip(frames);
-    log_step(&SKIP_MOTION_CALLS, "StoryTimelineController::SkipMotionFrame", frames, scaled);
-
-    get_orig_fn!(SkipMotionFrame, SkipMotionFrameFn)(this, scaled);
+    get_orig_fn!(SkipMotionFrame, SkipMotionFrameFn)(this, frames);
 }
 
 // The game holds its story high speed mode in a static field of StoryTimelineController and
@@ -247,19 +226,27 @@ fn mark_story_activity() {
     }
 }
 
-// Config is read here, not in a detour, and the values are mirrored into atoms for the hooks.
+// Config is read here, not in a detour, so a change lands on the game thread and the hooks only
+// read an atom. The line is the proof that the option reached this layer: a run had the option on
+// and produced no engagement line at all, and without this there is no way to tell whether the
+// option was off or the mirror never ran.
 pub fn apply_config() {
     let config = Hachimi::instance().config.load();
+    let enabled = config.story_high_speed_mode;
 
-    HIGH_SPEED_ENABLED.store(config.story_high_speed_mode, atomic::Ordering::Relaxed);
+    if HIGH_SPEED_ENABLED.swap(enabled, atomic::Ordering::AcqRel) != enabled {
+        info!("StoryTimelineController: story high speed mode option {}", if enabled { "on" } else { "off" });
+    }
+}
 
-    let scale = if config.story_skip_frame_scale.is_finite() {
-        config.story_skip_frame_scale.clamp(1.0, MAX_SKIP_SCALE)
-    } else {
-        1.0
-    };
+// Every exit that is not the option being off has to say why it did nothing, or the feature
+// cannot be read out of a log.
+static ENGAGE_NOTES: AtomicUsize = AtomicUsize::new(0);
 
-    STORY_SKIP_FACTOR.store(scale.to_bits(), atomic::Ordering::Relaxed);
+fn note_engage_blocked(reason: &str) {
+    if ENGAGE_NOTES.fetch_add(1, atomic::Ordering::Relaxed) < STEP_DETAIL_LIMIT {
+        debug!("StoryTimelineController: story high speed mode left alone, {reason}");
+    }
 }
 
 // Called from the game thread. It does nothing while the option is off, and only acts while the
@@ -277,6 +264,7 @@ pub fn engage_high_speed_mode() {
     let last_engage = ENGAGE_LAST_SEC.load(atomic::Ordering::Relaxed);
 
     if last_activity < 0 || now - last_activity > STORY_ACTIVE_WINDOW_SECS {
+        note_engage_blocked("no story stepping path ran in the last 10 s");
         return;
     }
 
@@ -289,12 +277,14 @@ pub fn engage_high_speed_mode() {
     let target = HighSpeedSetting::GetMaxHighSpeedType();
 
     if target <= 0 {
+        note_engage_blocked("StoryManager::GetMaxHighSpeedType gave {target}");
         return;
     }
 
     let before = IsStoryHighSpeedMode();
 
     if before != 0 {
+        note_engage_blocked("the game already reports story high speed mode");
         return;
     }
 
