@@ -247,8 +247,18 @@ pub fn init() {
     {
         let config = crate::core::Hachimi::instance().config.load();
 
+        // The unfocused cap is the one Performance knob that does not exist on every platform:
+        // its storage and the code that honours it sit behind cfg(target_os = "windows"), as
+        // does the tab row, so the log names it only where the option is reachable. It travels
+        // as a finished fragment because a format string is a literal and cannot hold a
+        // cfg'd placeholder.
+        #[cfg(target_os = "windows")]
+        let target_fps_unfocused = format!(" target_fps_unfocused {}", config.windows.target_fps_unfocused.unwrap_or(-1));
+        #[cfg(not(target_os = "windows"))]
+        let target_fps_unfocused = "";
+
         info!(
-            "Config snapshot: transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?}",
+            "Config snapshot: transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
             config.transition_speed,
             config.result_screen_speed,
             config.story_speed,
@@ -257,11 +267,13 @@ pub fn init() {
             config.story_tcps_multiplier,
             config.story_choice_auto_select_delay,
             config.target_fps.unwrap_or(-1),
+            target_fps_unfocused,
             config.auto_skip_result_screens,
             config.high_speed_settings,
             config.story_high_speed_mode,
             config.hide_now_loading,
-            config.physics_update_mode
+            config.physics_update_mode,
+            config.cyspring_mono_uncap_frame_scale
         );
     }
 
