@@ -29,15 +29,24 @@ use crate::{
 // getters the engine reads every frame, so their hooks do one atomic increment and one atomic max, and
 // the value is still handed back untouched.
 //
-// The run boundaries come from `ResetCurrentTime`, which the engine calls when a cut starts. That is a
-// proven signature rather than an assumed one: `PlayTrainingCutt`, `OnStartTrainingCutt` and
-// `OnStopTrainingCutt` are names in the metadata with no dumped signature yet.
+// The run boundary is `set_IsPlayingCutt/1 -> void(bool)` on the training cutt controller, which is the
+// game's own statement that a cut is playing. The first version of this probe used
+// `CutInTimelineController::ResetCurrentTime`, chosen from the class name, and run 9 showed what that was
+// worth: 18 of 19 probes installed, the timeline reached 3194 times, and `cut runs 0` because a training
+// cut never calls it (C47). `ResetCurrentTime` stays observed as a count so a non training cut-in is still
+// visible.
+//
+// Alongside the counts the probe now reads the numbers the cut-in engine keeps for itself:
+// `GetTotalTime`, `GetTotalFrameCeil`, `get_CurrentFrame` and `get_Speed`. The game already knows how long
+// the animation is and how far it has got, so a length should come from it rather than be inferred from
+// wall clock (A29). `IsValidTag` and the tag cut-in player separate a friendship cut from a regular one,
+// which run 9 could not do at all (A28, A30).
 //
 // Installed only when debug_mode is on, like StoryFrameProbe, and installed after the scaling modules
 // so both resolve the same class lookups.
-const PROBE_DETAIL_LIMIT: usize = 8;
-const PROBE_CHUNK: usize = 4096;
-const REPORT_INTERVAL_SECS: i64 = 20;
+pub(crate) const PROBE_DETAIL_LIMIT: usize = 8;
+pub(crate) const PROBE_CHUNK: usize = 4096;
+pub(crate) const REPORT_INTERVAL_SECS: i64 = 20;
 // A timeline peak is summed as whole milliseconds so the total stays an integer.
 const MS_PER_SECOND: f32 = 1000.0;
 
@@ -45,14 +54,37 @@ const R4: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_R4;
 const I4: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_I4;
 const BOOL: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN;
 const CLASS: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_CLASS;
+// `struct<Gallop.TrainingDefine.TrainingCommandId:4B>` and `TrainingResultType` are value types of
+// four bytes, which is the size A5 proved travels in a general purpose register. A probe only hands
+// them back untouched, and the resolver still measures the size before anything is installed.
+const VALUETYPE: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE;
 const VOID: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_VOID;
 const NO_PARAMS: &[Il2CppTypeEnum] = &[];
 const ONE_FLOAT: &[Il2CppTypeEnum] = &[R4];
 const ONE_FLAG: &[Il2CppTypeEnum] = &[BOOL];
+const ONE_INFO: &[Il2CppTypeEnum] = &[CLASS];
+const ONE_ID: &[Il2CppTypeEnum] = &[VALUETYPE];
+const ONE_INT: &[Il2CppTypeEnum] = &[I4];
+const ONE_ACTION: &[Il2CppTypeEnum] = &[CLASS];
+// Dumped as `void(generic<System.Collections.Generic.List<...>:24B>, float)`. The dump spells the
+// first parameter as a generic, and the generic resolver is what answers it (C48).
 const LIST_AND_FLOAT: &[Il2CppTypeEnum] = &[CLASS, R4];
+const ID_AND_FLAGS: &[Il2CppTypeEnum] = &[VALUETYPE, BOOL, BOOL];
+const RESULT_AND_LIST: &[Il2CppTypeEnum] = &[VALUETYPE, CLASS];
 const FRAMES_AND_FLAG: &[Il2CppTypeEnum] = &[I4, BOOL];
+// `PlayCutIn/2 -> void(generic<List<SupportCardData>>, class<System.Action>)`.
+const LIST_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, CLASS];
+// `PlayIn/4 -> void(float, int, bool, Action)` on the training status panel.
+const DURATION_COUNT_FLAG_ACTION: &[Il2CppTypeEnum] = &[R4, I4, BOOL, CLASS];
+// `PlayOut/2 -> void(bool, class<System.Action>)`.
+const FLAG_AND_ACTION: &[Il2CppTypeEnum] = &[BOOL, CLASS];
 
-fn bit(flag: bool) -> f64 {
+pub(crate) fn bit(flag: bool) -> f64 {
+    if flag { 1.0 } else { 0.0 }
+}
+
+// A bool sampled into a peak answers "was this ever true" for the whole run without a log line per read.
+pub(crate) fn flag_bit(flag: bool) -> f32 {
     if flag { 1.0 } else { 0.0 }
 }
 
@@ -60,7 +92,7 @@ fn bit(flag: bool) -> f64 {
 // atomic is enough. A negative or non finite reading is ignored instead of becoming the peak, because
 // a NaN would out rank every real value behind it, and a 0.0 answer from a class that is still being
 // set up must not wipe a peak already measured.
-fn peak_merge(current: u32, value: f32) -> u32 {
+pub(crate) fn peak_merge(current: u32, value: f32) -> u32 {
     if !value.is_finite() || value < 0.0 {
         return current;
     }
@@ -70,17 +102,17 @@ fn peak_merge(current: u32, value: f32) -> u32 {
     if candidate > current { candidate } else { current }
 }
 
-fn peak_seconds(bits: u32) -> f32 {
+pub(crate) fn peak_seconds(bits: u32) -> f32 {
     f32::from_bits(bits)
 }
 
-fn peak_milliseconds(bits: u32) -> i64 {
+pub(crate) fn peak_milliseconds(bits: u32) -> i64 {
     (f32::from_bits(bits) * MS_PER_SECOND) as i64
 }
 
 // A report is due when the totals moved and the interval passed. A quiet path stays quiet, which is
 // the rule StoryFrameProbe runs on.
-fn report_due(now_sec: i64, last_sec: i64, totals: usize, last_totals: usize, interval: i64) -> bool {
+pub(crate) fn report_due(now_sec: i64, last_sec: i64, totals: usize, last_totals: usize, interval: i64) -> bool {
     if totals == 0 || totals == last_totals {
         return false;
     }
@@ -88,7 +120,9 @@ fn report_due(now_sec: i64, last_sec: i64, totals: usize, last_totals: usize, in
     last_sec < 0 || now_sec - last_sec >= interval
 }
 
-struct CutProbe {
+// Shared by both cut probes so the counting rules, the chunked logging and the peak merge live in one
+// place. A hook the game reaches every frame must not format anything.
+pub(crate) struct CutProbe {
     name: &'static str,
     calls: AtomicUsize,
     // Set for the probes worth a peak: the largest value this path handed back all run.
@@ -97,17 +131,17 @@ struct CutProbe {
 }
 
 impl CutProbe {
-    const fn counted(name: &'static str) -> Self {
+    pub(crate) const fn counted(name: &'static str) -> Self {
         Self { name, calls: AtomicUsize::new(0), peaked: false, peak: AtomicU32::new(0) }
     }
 
-    const fn peaked(name: &'static str) -> Self {
+    pub(crate) const fn peaked(name: &'static str) -> Self {
         Self { name, calls: AtomicUsize::new(0), peaked: true, peak: AtomicU32::new(0) }
     }
 
     // First hits print the values, later ones only the count, so a path the game polls every frame
     // cannot fill the log.
-    fn observe(&self, values: &[f64]) {
+    pub(crate) fn observe(&self, values: &[f64]) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
 
         if calls <= PROBE_DETAIL_LIMIT {
@@ -118,12 +152,12 @@ impl CutProbe {
         }
     }
 
-    fn count(&self) {
+    pub(crate) fn count(&self) {
         self.observe(&[]);
     }
 
     // The frame hot shape: one increment, one max, no slice and no formatting until a chunk boundary.
-    fn sample(&self, value: f32) {
+    pub(crate) fn sample(&self, value: f32) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
 
         if self.peaked {
@@ -136,20 +170,23 @@ impl CutProbe {
         }
     }
 
-    fn calls(&self) -> usize {
+    pub(crate) fn calls(&self) -> usize {
         self.calls.load(atomic::Ordering::Relaxed)
     }
 
-    fn peak_bits(&self) -> u32 {
+    pub(crate) fn peak_bits(&self) -> u32 {
         self.peak.load(atomic::Ordering::Relaxed)
     }
 
-    // The totals line carries the method name without its argument list.
-    fn short(&self) -> &str {
-        match self.name.split_once('(') {
-            Some((head, _)) => head,
-            None => self.name,
-        }
+    pub(crate) fn is_peaked(&self) -> bool {
+        self.peaked
+    }
+
+    // The label the totals line prints. It carries the argument list on purpose: `SkipRuntime(time)` and
+    // `SkipRuntime(frames, keep)` are two different doors, and dropping the list made the log print them
+    // under one name.
+    pub(crate) fn label(&self) -> &str {
+        self.name
     }
 }
 
@@ -173,7 +210,40 @@ static PLATE_INITIALIZE_LIST: CutProbe = CutProbe::peaked("TrainingParamChangeUI
 static MAIN_COROUTINE_DOTWEEN_SCALE: CutProbe = CutProbe::counted("SingleModeMainViewController::CoroutineDoTweenTimeScale()");
 static MAIN_WAIT_TAP: CutProbe = CutProbe::counted("SingleModeMainViewController::WaitTap()");
 
-static PROBES: [&CutProbe; 19] = [
+// The doors the run 9 dump turned from guesses into signatures (A28, A29). The cut in progress flag is
+// the boundary v1 was missing, and the driver trio is what actually spends the frames.
+static CUTT_SET_IS_PLAYING_CUTT: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::set_IsPlayingCutt(playing)");
+static CUTT_GET_IS_PLAYING_CUTT: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::get_IsPlayingCutt()");
+static CUTT_IS_AUTO_PLAY: CutProbe = CutProbe::peaked("SingleModeMainTrainingCuttController::IsAutoPlay()");
+static CUTT_UPDATE_TRAINING_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::UpdateTrainingCutIn()");
+static CUTT_FIXED_UPDATE_TRAINING_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::FixedUpdateTrainingCutIn()");
+static CUTT_LATE_UPDATE_TRAINING_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::LateUpdateTrainingCutIn()");
+static CUTT_PLAY_TRAINING_CUT: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayTrainingCut(info)");
+static CUTT_PLAY_SCENARIO_TRAINING_CUT: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayScenarioTrainingCut(info)");
+static CUTT_PLAY_TRAINING_SABORI: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayTrainingSaboriAsync(id)");
+static CUTT_PLAY_TRAINING_CUT_END: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayTrainingCutEndAsync(id, flag, flag)");
+static CUTT_TRAINING_ASYNC: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::TrainingAsync(id)");
+static CUTT_PLAY_IN_TRAINING_STATUS: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayInTrainingStatus()");
+static CUTT_PLAY_OUT_TRAINING_STATUS: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayOutTrainingStatus()");
+static CUTT_CLEAN_UP_CUTT: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::CleanUpCutt()");
+static CUTT_GET_TOTAL_TIME: CutProbe = CutProbe::peaked("CutInTimelineController::GetTotalTime()");
+static CUTT_GET_SPEED: CutProbe = CutProbe::peaked("CutInTimelineController::get_Speed()");
+static CUTT_SET_SKIP_FRAME: CutProbe = CutProbe::counted("CutInTimelineController::set_SkipFrame(frames)");
+static CUTT_SET_IS_AUTO_PLAY: CutProbe = CutProbe::counted("CutInTimelineController::set_IsAutoPlay(playing)");
+static CUTT_GET_IS_AUTO_PLAY: CutProbe = CutProbe::peaked("CutInTimelineController::get_IsAutoPlay()");
+static STATUS_PLAY_IN: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::PlayIn(duration, count, flag, action)");
+static STATUS_PLAY_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::PlayOut(flag, action)");
+static STATUS_INTERVAL_OUT: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::GetIntervalOutBegine(time)");
+static STATUS_RANK_UP_HIGH_SPEED: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::WillRankUpInHighSpeedMode()");
+static STATUS_EXIST_PLAYING_FRAME: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::ExistPlayingFrame()");
+// The friendship split v1 could not make. `IsValidTag` answers whether the cards a training produced
+// carry a friendship, and the tag cut-in player is the door a friendship cut-in is played through.
+static TAG_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::IsValidTag(result, cards)");
+static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::IsValidTag(cards)");
+static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
+static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
+
+static PROBES: [&CutProbe; 47] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -193,6 +263,34 @@ static PROBES: [&CutProbe; 19] = [
     &PLATE_INITIALIZE_LIST,
     &MAIN_COROUTINE_DOTWEEN_SCALE,
     &MAIN_WAIT_TAP,
+    &CUTT_SET_IS_PLAYING_CUTT,
+    &CUTT_GET_IS_PLAYING_CUTT,
+    &CUTT_IS_AUTO_PLAY,
+    &CUTT_UPDATE_TRAINING_CUT_IN,
+    &CUTT_FIXED_UPDATE_TRAINING_CUT_IN,
+    &CUTT_LATE_UPDATE_TRAINING_CUT_IN,
+    &CUTT_PLAY_TRAINING_CUT,
+    &CUTT_PLAY_SCENARIO_TRAINING_CUT,
+    &CUTT_PLAY_TRAINING_SABORI,
+    &CUTT_PLAY_TRAINING_CUT_END,
+    &CUTT_TRAINING_ASYNC,
+    &CUTT_PLAY_IN_TRAINING_STATUS,
+    &CUTT_PLAY_OUT_TRAINING_STATUS,
+    &CUTT_CLEAN_UP_CUTT,
+    &CUTT_GET_TOTAL_TIME,
+    &CUTT_GET_SPEED,
+    &CUTT_SET_SKIP_FRAME,
+    &CUTT_SET_IS_AUTO_PLAY,
+    &CUTT_GET_IS_AUTO_PLAY,
+    &STATUS_PLAY_IN,
+    &STATUS_PLAY_OUT,
+    &STATUS_INTERVAL_OUT,
+    &STATUS_RANK_UP_HIGH_SPEED,
+    &STATUS_EXIST_PLAYING_FRAME,
+    &TAG_IS_VALID_TAG,
+    &TAG_PLAYER_IS_VALID_TAG,
+    &TAG_PLAYER_PLAY_CUT_IN,
+    &TAG_PLAYER_PLAY_CUT_OUT,
 ];
 
 // One cut-in run, opened by `ResetCurrentTime` and closed by the next one. The wall clock between the
@@ -205,10 +303,10 @@ static PROBES: [&CutProbe; 19] = [
 // `TagTrainingCutInPlayer` signatures the next dump has to provide. What this can separate today is
 // the screen, and that is what makes the number readable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ViewBucket { Training, Story, Gacha, Race, Other }
+pub(crate) enum ViewBucket { Training, Story, StoryEvent, Gacha, Race, Other }
 
-const BUCKET_COUNT: usize = 5;
-const BUCKET_NAMES: [&str; BUCKET_COUNT] = ["training screen", "story", "gacha", "race scene", "other"];
+pub(crate) const BUCKET_COUNT: usize = 6;
+pub(crate) const BUCKET_NAMES: [&str; BUCKET_COUNT] = ["training screen", "story", "story event screen", "gacha", "race scene", "other"];
 
 // Read from the game's own `ViewId` so a game update that moves a number shows up here as a compile
 // error rather than as a silent mislabel.
@@ -217,9 +315,10 @@ const VIEW_TRAINING: [i32; 5] = [
     ViewId::SingleModeConfirmComplete as i32, ViewId::SingleModeResult as i32,
 ];
 const VIEW_STORY: i32 = ViewId::Story as i32;
+const VIEW_STORY_EVENT: i32 = ViewId::StoryEventMission as i32;
 const VIEW_GACHA: i32 = ViewId::GachaMain as i32;
 
-fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
+pub(crate) fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
     // The scene check first: a skill cut-in inside a race reaches the same timeline controller this
     // probe hooks, and it is not a training animation. It reads the scene id `SceneManager::AlterUpdate`
     // already caches, so it costs no game call.
@@ -233,6 +332,11 @@ fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
     else if view_id == VIEW_STORY {
         ViewBucket::Story
     }
+    // The story event mission screen is its own view, and a cut-in played there is the thing the story
+    // event probe is measuring.
+    else if view_id == VIEW_STORY_EVENT {
+        ViewBucket::StoryEvent
+    }
     else if view_id == VIEW_GACHA {
         ViewBucket::Gacha
     }
@@ -243,7 +347,7 @@ fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
 
 // One view read per cut run, not per frame. `GetCurrentViewId` is the method the mod already resolves
 // for other features, and its wrapper refuses an unresolved address instead of jumping to 0 (C1).
-fn current_view_id() -> i32 {
+pub(crate) fn current_view_id() -> i32 {
     let scene_manager = SceneManager::instance();
 
     if scene_manager.is_null() {
@@ -253,17 +357,35 @@ fn current_view_id() -> i32 {
     SceneManager::GetCurrentViewId(scene_manager)
 }
 
+// What the game last answered for "do these cards carry a friendship", kept so the cut that opens next
+// can be labelled with the answer that decided it (A28).
+const TAG_UNKNOWN: usize = 0;
+const TAG_FRIENDSHIP: usize = 1;
+const TAG_REGULAR: usize = 2;
+const TAG_COUNT: usize = 3;
+const TAG_NAMES: [&str; TAG_COUNT] = ["tag answer unknown", "friendship cut", "regular cut"];
+
+static LAST_TAG_ANSWER: AtomicUsize = AtomicUsize::new(TAG_UNKNOWN);
 static RUN_OPENED_MS: AtomicI64 = AtomicI64::new(-1);
 static RUN_VIEW_ID: AtomicI32 = AtomicI32::new(0);
 static RUN_BUCKET: AtomicUsize = AtomicUsize::new(BUCKET_COUNT - 1);
+static RUN_TAG_PLAYER_SEEN: AtomicUsize = AtomicUsize::new(0);
+static RUN_TAG_NAME: AtomicUsize = AtomicUsize::new(TAG_UNKNOWN);
 static RUN_BUCKET_COUNT: [AtomicUsize; BUCKET_COUNT] = [const { AtomicUsize::new(0) }; BUCKET_COUNT];
 static RUN_BUCKET_VIEW: [AtomicI32; BUCKET_COUNT] = [const { AtomicI32::new(0) }; BUCKET_COUNT];
 static RUN_BUCKET_WALL_MS: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
 static RUN_BUCKET_PEAK_MS: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
+static RUN_TAG_COUNT: [AtomicUsize; TAG_COUNT] = [const { AtomicUsize::new(0) }; TAG_COUNT];
+static RUN_TAG_WALL_MS: [AtomicI64; TAG_COUNT] = [const { AtomicI64::new(0) }; TAG_COUNT];
 static RUN_PEAK_BITS: AtomicU32 = AtomicU32::new(0);
 static RUNS_CLOSED: AtomicUsize = AtomicUsize::new(0);
 static RUN_WALL_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static RUN_PEAK_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+// What the cut-in engine says about itself: the length of the animation in frames, the last frame it
+// reached, and the frame rate it is playing against (A29).
+static TIMELINE_TOTAL_FRAMES_PEAK: AtomicU32 = AtomicU32::new(0);
+static TIMELINE_CURRENT_FRAME_PEAK: AtomicU32 = AtomicU32::new(0);
+static TIMELINE_TARGET_FPS: AtomicU32 = AtomicU32::new(0);
 
 fn elapsed_ms() -> i64 {
     match START.get() {
@@ -272,32 +394,55 @@ fn elapsed_ms() -> i64 {
     }
 }
 
-// Called on every `ResetCurrentTime`. The run before is closed first, so the first cut-in a session
-// plays is measured the same way as the last one.
+// A run is a friendship cut when the tag cut-in player was reached during it, which is the door the game
+// plays one through. Otherwise the last answer the game gave its own `IsValidTag` stands, and an answer
+// it never gave stays unknown instead of being guessed at.
+fn tag_kind_for_run(tag_player_seen: bool, last_answer: usize) -> usize {
+    if tag_player_seen { TAG_FRIENDSHIP } else { last_answer }
+}
+
+// Called when the game writes `true` into its own cut-in playing flag. The run before is closed first, so
+// a cut-in that was never closed is still measured instead of silently merged with the next one.
 fn open_cut_run() {
     let now = elapsed_ms();
-    CUTT_RESET_CURRENT_TIME.count();
 
     if now < 0 {
         return;
     }
 
+    close_cut_run();
+
     let view = current_view_id();
     let bucket = bucket_for(view, SceneManager::is_race_scene_family());
-    let closed_bucket = RUN_BUCKET.swap(bucket as usize, atomic::Ordering::Relaxed);
-    let closed_view = RUN_VIEW_ID.swap(view, atomic::Ordering::Relaxed);
 
-    let opened = RUN_OPENED_MS.swap(now, atomic::Ordering::Relaxed);
-    let peak = RUN_PEAK_BITS.swap(0, atomic::Ordering::Relaxed);
+    RUN_OPENED_MS.store(now, atomic::Ordering::Relaxed);
+    RUN_VIEW_ID.store(view, atomic::Ordering::Relaxed);
+    RUN_BUCKET.store(bucket as usize, atomic::Ordering::Relaxed);
+    RUN_TAG_PLAYER_SEEN.store(0, atomic::Ordering::Relaxed);
+    RUN_TAG_NAME.store(tag_kind_for_run(false, LAST_TAG_ANSWER.load(atomic::Ordering::Relaxed)), atomic::Ordering::Relaxed);
+    RUN_PEAK_BITS.store(0, atomic::Ordering::Relaxed);
+}
+
+// Called when the game writes `false`. A close with nothing open is the game clearing a flag that was
+// already clear, so it is not counted as a run.
+fn close_cut_run() {
+    let opened = RUN_OPENED_MS.swap(-1, atomic::Ordering::Relaxed);
 
     if opened < 0 {
         return;
     }
 
+    let now = elapsed_ms();
+    let peak = RUN_PEAK_BITS.swap(0, atomic::Ordering::Relaxed);
+    let closed_bucket = RUN_BUCKET.load(atomic::Ordering::Relaxed);
+    let closed_view = RUN_VIEW_ID.load(atomic::Ordering::Relaxed);
+    let tag_kind = tag_kind_for_run(RUN_TAG_PLAYER_SEEN.load(atomic::Ordering::Relaxed) != 0, RUN_TAG_NAME.load(atomic::Ordering::Relaxed));
+
     let run_ms = now - opened;
     let runs = RUNS_CLOSED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
-    RUN_WALL_MS_TOTAL.fetch_add(run_ms, atomic::Ordering::Relaxed);
     let peak_ms = peak_milliseconds(peak);
+
+    RUN_WALL_MS_TOTAL.fetch_add(run_ms, atomic::Ordering::Relaxed);
     RUN_PEAK_MS_TOTAL.fetch_add(peak_ms, atomic::Ordering::Relaxed);
 
     // The bucket is the one captured when this run opened, so a cut-in that started in training and
@@ -307,8 +452,11 @@ fn open_cut_run() {
     RUN_BUCKET_PEAK_MS[closed_bucket].fetch_add(peak_ms, atomic::Ordering::Relaxed);
     RUN_BUCKET_VIEW[closed_bucket].store(closed_view, atomic::Ordering::Relaxed);
 
+    RUN_TAG_COUNT[tag_kind].fetch_add(1, atomic::Ordering::Relaxed);
+    RUN_TAG_WALL_MS[tag_kind].fetch_add(run_ms, atomic::Ordering::Relaxed);
+
     if runs <= PROBE_DETAIL_LIMIT {
-        info!("Cutt probe: cut run {} closed at {now} ms in view {closed_view} {}, timeline peak {} s, wall {run_ms} ms", runs, BUCKET_NAMES[closed_bucket], peak_seconds(peak));
+        info!("Cutt probe: cut run {} closed at {now} ms in view {closed_view} {} as {}, timeline peak {} s, wall {run_ms} ms", runs, BUCKET_NAMES[closed_bucket], TAG_NAMES[tag_kind], peak_seconds(peak));
     }
 }
 
@@ -349,8 +497,11 @@ extern "C" fn TrainingCuttHelper_IsHighSpeedMode() -> bool {
 }
 
 type CuttResetCurrentTimeFn = extern "C" fn(this: *mut Il2CppObject);
+// Kept as a count, not as the run boundary. Run 9 showed a training cut-in never reaches it, which is why
+// `cut runs` read 0 while the timeline was reached 3194 times (C47). A cut-in that does reset the timeline
+// is still visible here.
 extern "C" fn CuttTimeline_ResetCurrentTime(this: *mut Il2CppObject) {
-    open_cut_run();
+    CUTT_RESET_CURRENT_TIME.count();
 
     get_orig_fn!(CuttTimeline_ResetCurrentTime, CuttResetCurrentTimeFn)(this);
 }
@@ -465,10 +616,282 @@ extern "C" fn SingleModeMain_WaitTap(this: *mut Il2CppObject) -> *mut Il2CppObje
     get_orig_fn!(SingleModeMain_WaitTap, CoroutineReturnFn)(this)
 }
 
+type SetIsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
+// Dumped: `set_IsPlayingCutt/1 -> void(bool)` on the training cutt controller. The value is handed back
+// exactly as it arrived; the only thing this detour does is start and stop the wall clock measurement on
+// the edges the game itself wrote (C47).
+extern "C" fn TrainingCutt_SetIsPlayingCutt(this: *mut Il2CppObject, playing: bool) {
+    CUTT_SET_IS_PLAYING_CUTT.count();
+
+    if playing {
+        open_cut_run();
+    }
+    else {
+        close_cut_run();
+    }
+
+    get_orig_fn!(TrainingCutt_SetIsPlayingCutt, SetIsPlayingCuttFn)(this, playing);
+}
+
+type IsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
+extern "C" fn TrainingCutt_GetIsPlayingCutt(this: *mut Il2CppObject) -> bool {
+    CUTT_GET_IS_PLAYING_CUTT.count();
+
+    get_orig_fn!(TrainingCutt_GetIsPlayingCutt, IsPlayingCuttFn)(this)
+}
+
+type CuttBoolFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
+// `IsAutoPlay/0 -> bool()`: whether the cut-in is already set to play without a tap. Sampled as a peak
+// of 1.0 so the totals line answers "was it ever on" without a line per read.
+extern "C" fn TrainingCutt_IsAutoPlay(this: *mut Il2CppObject) -> bool {
+    let value = get_orig_fn!(TrainingCutt_IsAutoPlay, CuttBoolFn)(this);
+    CUTT_IS_AUTO_PLAY.sample(flag_bit(value));
+
+    value
+}
+
+type CuttVoidFn = extern "C" fn(this: *mut Il2CppObject);
+// The three drivers the cut-in runs through. Counted rather than sampled: these are the frames the
+// animation actually spends, and a run's cost is the count of them.
+extern "C" fn TrainingCutt_UpdateTrainingCutIn(this: *mut Il2CppObject) {
+    CUTT_UPDATE_TRAINING_CUT_IN.count();
+
+    get_orig_fn!(TrainingCutt_UpdateTrainingCutIn, CuttVoidFn)(this);
+}
+
+extern "C" fn TrainingCutt_FixedUpdateTrainingCutIn(this: *mut Il2CppObject) {
+    CUTT_FIXED_UPDATE_TRAINING_CUT_IN.count();
+
+    get_orig_fn!(TrainingCutt_FixedUpdateTrainingCutIn, CuttVoidFn)(this);
+}
+
+extern "C" fn TrainingCutt_LateUpdateTrainingCutIn(this: *mut Il2CppObject) {
+    CUTT_LATE_UPDATE_TRAINING_CUT_IN.count();
+
+    get_orig_fn!(TrainingCutt_LateUpdateTrainingCutIn, CuttVoidFn)(this);
+}
+
+extern "C" fn TrainingCutt_CleanUpCutt(this: *mut Il2CppObject) {
+    CUTT_CLEAN_UP_CUTT.count();
+
+    get_orig_fn!(TrainingCutt_CleanUpCutt, CuttVoidFn)(this);
+}
+
+extern "C" fn TrainingCutt_PlayInTrainingStatus(this: *mut Il2CppObject) {
+    CUTT_PLAY_IN_TRAINING_STATUS.count();
+
+    get_orig_fn!(TrainingCutt_PlayInTrainingStatus, CuttVoidFn)(this);
+}
+
+extern "C" fn TrainingCutt_PlayOutTrainingStatus(this: *mut Il2CppObject) {
+    CUTT_PLAY_OUT_TRAINING_STATUS.count();
+
+    get_orig_fn!(TrainingCutt_PlayOutTrainingStatus, CuttVoidFn)(this);
+}
+
+type PlayTrainingCutFn = extern "C" fn(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject;
+// Dumped: `PlayTrainingCut/1 -> IEnumerator(class<Gallop.SingleModeMainTrainingCuttController.CuttPlayInfo>)`.
+// The coroutine object is created by the original and handed straight back, so nothing here changes what
+// the game ends up playing.
+extern "C" fn TrainingCutt_PlayTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
+    CUTT_PLAY_TRAINING_CUT.count();
+
+    get_orig_fn!(TrainingCutt_PlayTrainingCut, PlayTrainingCutFn)(this, info)
+}
+
+extern "C" fn TrainingCutt_PlayScenarioTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
+    CUTT_PLAY_SCENARIO_TRAINING_CUT.count();
+
+    get_orig_fn!(TrainingCutt_PlayScenarioTrainingCut, PlayTrainingCutFn)(this, info)
+}
+
+type TrainingIdCoroutineFn = extern "C" fn(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject;
+// Dumped: `TrainingAsync/1 -> IEnumerator(struct<Gallop.TrainingDefine.TrainingCommandId:4B>)`. A four
+// byte struct travels in a general purpose register (A5) and this wrapper only passes it through, so it
+// never has to interpret what the id means.
+extern "C" fn TrainingCutt_TrainingAsync(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject {
+    CUTT_TRAINING_ASYNC.count();
+
+    get_orig_fn!(TrainingCutt_TrainingAsync, TrainingIdCoroutineFn)(this, id)
+}
+
+extern "C" fn TrainingCutt_PlayTrainingSaboriAsync(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject {
+    CUTT_PLAY_TRAINING_SABORI.count();
+
+    get_orig_fn!(TrainingCutt_PlayTrainingSaboriAsync, TrainingIdCoroutineFn)(this, id)
+}
+
+type PlayTrainingCutEndFn = extern "C" fn(this: *mut Il2CppObject, id: i32, first: bool, second: bool) -> *mut Il2CppObject;
+extern "C" fn TrainingCutt_PlayTrainingCutEndAsync(this: *mut Il2CppObject, id: i32, first: bool, second: bool) -> *mut Il2CppObject {
+    CUTT_PLAY_TRAINING_CUT_END.count();
+
+    get_orig_fn!(TrainingCutt_PlayTrainingCutEndAsync, PlayTrainingCutEndFn)(this, id, first, second)
+}
+
+type IsValidTagFn = extern "C" fn(this: *mut Il2CppObject, result: i32, cards: *mut Il2CppObject) -> bool;
+// Dumped: `IsValidTag/2 -> bool(struct<TrainingResultType:4B>, generic<List<SupportCardData>>)`. This is
+// the game deciding whether the cards a training produced carry a friendship, which is the only place a
+// probe can tell a friendship cut-in from a regular one (A28). The answer is remembered for the cut that
+// is opened next, and both arguments are handed back untouched.
+extern "C" fn TrainingCutt_IsValidTag(this: *mut Il2CppObject, result: i32, cards: *mut Il2CppObject) -> bool {
+    let value = get_orig_fn!(TrainingCutt_IsValidTag, IsValidTagFn)(this, result, cards);
+
+    LAST_TAG_ANSWER.store(if value { TAG_FRIENDSHIP } else { TAG_REGULAR }, atomic::Ordering::Relaxed);
+    TAG_IS_VALID_TAG.count();
+
+    value
+}
+
+type TagCutInPlayerPlayFn = extern "C" fn(this: *mut Il2CppObject, cards: *mut Il2CppObject, done: *mut Il2CppObject);
+// Dumped: `PlayCutIn/2 -> void(generic<List<SupportCardData>>, class<System.Action>)`. Both parameters are
+// references the wrapper holds as addresses and passes straight back. The call is also what settles the
+// kind of the cut that is open, because this is the door a friendship cut-in is played through.
+extern "C" fn TagCutInPlayer_PlayCutIn(this: *mut Il2CppObject, cards: *mut Il2CppObject, done: *mut Il2CppObject) {
+    TAG_PLAYER_PLAY_CUT_IN.count();
+    RUN_TAG_PLAYER_SEEN.store(1, atomic::Ordering::Relaxed);
+
+    get_orig_fn!(TagCutInPlayer_PlayCutIn, TagCutInPlayerPlayFn)(this, cards, done);
+}
+
+type TagCutInPlayerPlayOutFn = extern "C" fn(this: *mut Il2CppObject, done: *mut Il2CppObject);
+extern "C" fn TagCutInPlayer_PlayCutInOut(this: *mut Il2CppObject, done: *mut Il2CppObject) {
+    TAG_PLAYER_PLAY_CUT_OUT.count();
+
+    get_orig_fn!(TagCutInPlayer_PlayCutInOut, TagCutInPlayerPlayOutFn)(this, done);
+}
+
+type StaticIsValidTagFn = extern "C" fn(cards: *mut Il2CppObject) -> bool;
+// Dumped: `IsValidTag/1 -> static bool(generic<List<SupportCardData>>)`. A static target has no hidden
+// `this`, so this wrapper declares only the dumped argument (A3).
+extern "C" fn TagCutInPlayer_IsValidTag(cards: *mut Il2CppObject) -> bool {
+    let value = get_orig_fn!(TagCutInPlayer_IsValidTag, StaticIsValidTagFn)(cards);
+
+    LAST_TAG_ANSWER.store(if value { TAG_FRIENDSHIP } else { TAG_REGULAR }, atomic::Ordering::Relaxed);
+    TAG_PLAYER_IS_VALID_TAG.count();
+
+    value
+}
+
+type GetTotalTimeFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
+// The cut-in engine's own answer to how long the animation is, read from inside its detours where `this`
+// is a live timeline. A length measured this way does not have to be inferred from wall clock (A29).
+extern "C" fn CuttTimeline_GetTotalTime(this: *mut Il2CppObject) -> f32 {
+    let value = get_orig_fn!(CuttTimeline_GetTotalTime, GetTotalTimeFn)(this);
+    CUTT_GET_TOTAL_TIME.sample(value);
+
+    value
+}
+
+type TimelineGetSpeedFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
+extern "C" fn CuttTimeline_GetSpeed(this: *mut Il2CppObject) -> f32 {
+    let value = get_orig_fn!(CuttTimeline_GetSpeed, TimelineGetSpeedFn)(this);
+    CUTT_GET_SPEED.sample(value);
+
+    value
+}
+
+type TimelineIntFn = extern "C" fn(this: *mut Il2CppObject) -> i32;
+extern "C" fn CuttTimeline_GetTotalFrameCeil(this: *mut Il2CppObject) -> i32 {
+    let value = get_orig_fn!(CuttTimeline_GetTotalFrameCeil, TimelineIntFn)(this);
+
+    if value > 0 {
+        TIMELINE_TOTAL_FRAMES_PEAK.fetch_max(value as u32, atomic::Ordering::Relaxed);
+    }
+
+    value
+}
+
+extern "C" fn CuttTimeline_GetCurrentFrame(this: *mut Il2CppObject) -> i32 {
+    let value = get_orig_fn!(CuttTimeline_GetCurrentFrame, TimelineIntFn)(this);
+
+    if value > 0 {
+        TIMELINE_CURRENT_FRAME_PEAK.fetch_max(value as u32, atomic::Ordering::Relaxed);
+    }
+
+    value
+}
+
+extern "C" fn CuttTimeline_GetTargetFps(this: *mut Il2CppObject) -> i32 {
+    let value = get_orig_fn!(CuttTimeline_GetTargetFps, TimelineIntFn)(this);
+
+    if value > 0 {
+        TIMELINE_TARGET_FPS.fetch_max(value as u32, atomic::Ordering::Relaxed) as i32;
+    }
+
+    value
+}
+
+type SetSkipFrameFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
+// `set_SkipFrame/1 -> void(int)`: whether the game itself uses the door an auto skip option would have to
+// use. Observed only, and the frame count is written back untouched (A30).
+extern "C" fn CuttTimeline_SetSkipFrame(this: *mut Il2CppObject, frames: i32) {
+    CUTT_SET_SKIP_FRAME.observe(&[frames as f64]);
+
+    get_orig_fn!(CuttTimeline_SetSkipFrame, SetSkipFrameFn)(this, frames);
+}
+
+type TimelineSetFlagFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
+extern "C" fn CuttTimeline_SetIsAutoPlay(this: *mut Il2CppObject, playing: bool) {
+    CUTT_SET_IS_AUTO_PLAY.observe(&[bit(playing)]);
+
+    get_orig_fn!(CuttTimeline_SetIsAutoPlay, TimelineSetFlagFn)(this, playing);
+}
+
+extern "C" fn CuttTimeline_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
+    let value = get_orig_fn!(CuttTimeline_GetIsAutoPlay, CuttBoolFn)(this);
+    CUTT_GET_IS_AUTO_PLAY.sample(flag_bit(value));
+
+    value
+}
+
+type StatusPlayInFn = extern "C" fn(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject);
+// Dumped: `PlayIn/4 -> void(float, int, bool, class<System.Action>)` on the status panel that pops in over
+// a training result. The float is the only duration in the list, so it is the only value sampled (A1).
+extern "C" fn TrainingCutStatus_PlayIn(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject) {
+    STATUS_PLAY_IN.observe(&[duration as f64, frames as f64, bit(flag)]);
+    STATUS_PLAY_IN.sample(duration);
+
+    get_orig_fn!(TrainingCutStatus_PlayIn, StatusPlayInFn)(this, duration, frames, flag, action);
+}
+
+type StatusPlayOutFn = extern "C" fn(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject);
+extern "C" fn TrainingCutStatus_PlayOut(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject) {
+    STATUS_PLAY_OUT.observe(&[bit(flag)]);
+
+    get_orig_fn!(TrainingCutStatus_PlayOut, StatusPlayOutFn)(this, flag, action);
+}
+
+type StatusIntervalFn = extern "C" fn(this: *mut Il2CppObject, time: f32) -> f32;
+// `GetIntervalOutBegine/1 -> float(float)`, with no setter sibling in the dump. Sampled as a peak because
+// it is the gap the status panel waits before it plays out.
+extern "C" fn TrainingCutStatus_GetIntervalOutBegine(this: *mut Il2CppObject, time: f32) -> f32 {
+    let value = get_orig_fn!(TrainingCutStatus_GetIntervalOutBegine, StatusIntervalFn)(this, time);
+    STATUS_INTERVAL_OUT.observe(&[time as f64, value as f64]);
+    STATUS_INTERVAL_OUT.sample(value);
+
+    value
+}
+
+type StatusBoolFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
+// `WillRankUpInHighSpeedMode/0 -> bool()`: the game's own decision that the status panel may rank up in
+// high speed mode. Sampled as a peak of 1.0 so the totals line answers whether it ever said yes.
+extern "C" fn TrainingCutStatus_WillRankUpInHighSpeedMode(this: *mut Il2CppObject) -> bool {
+    let value = get_orig_fn!(TrainingCutStatus_WillRankUpInHighSpeedMode, StatusBoolFn)(this);
+    STATUS_RANK_UP_HIGH_SPEED.sample(flag_bit(value));
+
+    value
+}
+
+extern "C" fn TrainingCutStatus_ExistPlayingFrame(this: *mut Il2CppObject) -> bool {
+    STATUS_EXIST_PLAYING_FRAME.count();
+
+    get_orig_fn!(TrainingCutStatus_ExistPlayingFrame, StatusBoolFn)(this)
+}
+
 // The dump prints a class as `namespace.name`, and this client has only ever looked classes up under
 // `Gallop`. The cut-in engine sits under `Gallop.CutIn.Cutt` (A27), so a label is resolved by taking
 // its last segment as the class name and the rest as the namespace.
-fn class_for_label(image: *const Il2CppImage, label: &str) -> Option<*mut Il2CppClass> {
+pub(crate) fn class_for_label(image: *const Il2CppImage, label: &str) -> Option<*mut Il2CppClass> {
     let (namespace, name) = match label.rsplit_once('.') {
         Some((namespace, name)) => (namespace, name),
         None => ("", label),
@@ -503,6 +926,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     let cutt_controller = class_for_label(umamusume, "Gallop.SingleModeMainTrainingCuttController");
     let plate_ui = class_for_label(umamusume, "Gallop.TrainingParamChangeUI");
     let main_view = class_for_label(umamusume, "Gallop.SingleModeMainViewController");
+    let tag_player = class_for_label(umamusume, "Gallop.SingleModeMainViewTagTrainingCutInPlayer");
 
     let mut missing: Vec<&str> = Vec::new();
     let mut installed = 0usize;
@@ -550,6 +974,47 @@ pub fn init(umamusume: *const Il2CppImage) {
         };
     }
 
+    // A parameter the dump spells as `generic<...>` reports GENERICINST, so it only resolves through the
+    // resolver whose wrapper declares a pointer there. Nothing in this file writes through such a
+    // parameter: every one of them is handed back to the original untouched (C48).
+    macro_rules! generic_probe {
+        ($class:expr, $hook:ident, $method:literal, $params:expr, $ret:expr, $label:literal) => {
+            match $class {
+                Some(class) => {
+                    let addr = unsafe { AnimationSpeed::resolve_generic_ref_method(class, $method, $params, $ret) };
+
+                    if addr != 0 {
+                        new_hook!(addr, $hook);
+                        installed += 1;
+                    }
+                    else {
+                        missing.push($label);
+                    }
+                },
+                None => missing.push($label),
+            }
+        };
+    }
+
+    macro_rules! static_generic_probe {
+        ($class:expr, $hook:ident, $method:literal, $params:expr, $ret:expr, $label:literal) => {
+            match $class {
+                Some(class) => {
+                    let addr = unsafe { AnimationSpeed::resolve_static_generic_ref_method(class, $method, $params, $ret) };
+
+                    if addr != 0 {
+                        new_hook!(addr, $hook);
+                        installed += 1;
+                    }
+                    else {
+                        missing.push($label);
+                    }
+                },
+                None => missing.push($label),
+            }
+        };
+    }
+
     static_probe!(single_mode_utils, TrainingCuttUtils_GetTrainingCutTimeScale, "GetTrainingCutTimeScale", ONE_FLOAT, R4, "SingleModeUtils::GetTrainingCutTimeScale");
 
     probe!(cut_in_helper, TrainingCuttHelper_SkipRuntime, "SkipRuntime", NO_PARAMS, VOID, "SingleModeTrainingCutInHelper::SkipRuntime");
@@ -568,14 +1033,57 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_SkipRuntimeFrames, "SkipRuntime", FRAMES_AND_FLAG, VOID, "CutInTimelineController::SkipRuntime(frames, keep)");
     probe!(timeline, CuttTimeline_SkipTimeDirect, "SkipTimeDirect", ONE_FLOAT, VOID, "CutInTimelineController::SkipTimeDirect");
 
+    // What the timeline says about its own length, and the two doors an auto skip option would have to
+    // open (A29, A30). Observed only: no value here is written back.
+    probe!(timeline, CuttTimeline_GetTotalTime, "GetTotalTime", NO_PARAMS, R4, "CutInTimelineController::GetTotalTime");
+    probe!(timeline, CuttTimeline_GetTotalFrameCeil, "GetTotalFrameCeil", NO_PARAMS, I4, "CutInTimelineController::GetTotalFrameCeil");
+    probe!(timeline, CuttTimeline_GetCurrentFrame, "get_CurrentFrame", NO_PARAMS, I4, "CutInTimelineController::get_CurrentFrame");
+    probe!(timeline, CuttTimeline_GetTargetFps, "get_TargetFps", NO_PARAMS, I4, "CutInTimelineController::get_TargetFps");
+    probe!(timeline, CuttTimeline_GetSpeed, "get_Speed", NO_PARAMS, R4, "CutInTimelineController::get_Speed");
+    probe!(timeline, CuttTimeline_SetSkipFrame, "set_SkipFrame", ONE_INT, VOID, "CutInTimelineController::set_SkipFrame");
+    probe!(timeline, CuttTimeline_SetIsAutoPlay, "set_IsAutoPlay", ONE_FLAG, VOID, "CutInTimelineController::set_IsAutoPlay");
+    probe!(timeline, CuttTimeline_GetIsAutoPlay, "get_IsAutoPlay", NO_PARAMS, BOOL, "CutInTimelineController::get_IsAutoPlay");
+
     probe!(cut_status, TrainingCutStatus_Skip, "Skip", ONE_FLAG, VOID, "SingleModeMainViewTrainingCutStatus::Skip");
+    probe!(cut_status, TrainingCutStatus_PlayIn, "PlayIn", DURATION_COUNT_FLAG_ACTION, VOID, "SingleModeMainViewTrainingCutStatus::PlayIn");
+    probe!(cut_status, TrainingCutStatus_PlayOut, "PlayOut", FLAG_AND_ACTION, VOID, "SingleModeMainViewTrainingCutStatus::PlayOut");
+    probe!(cut_status, TrainingCutStatus_GetIntervalOutBegine, "GetIntervalOutBegine", ONE_FLOAT, R4, "SingleModeMainViewTrainingCutStatus::GetIntervalOutBegine");
+    probe!(cut_status, TrainingCutStatus_WillRankUpInHighSpeedMode, "WillRankUpInHighSpeedMode", NO_PARAMS, BOOL, "SingleModeMainViewTrainingCutStatus::WillRankUpInHighSpeedMode");
+    probe!(cut_status, TrainingCutStatus_ExistPlayingFrame, "ExistPlayingFrame", NO_PARAMS, BOOL, "SingleModeMainViewTrainingCutStatus::ExistPlayingFrame");
+
     probe!(cutt_controller, TrainingCutt_WaitTapAsync, "WaitTapAsync", NO_PARAMS, CLASS, "SingleModeMainTrainingCuttController::WaitTapAsync");
     probe!(cutt_controller, TrainingCutt_FadeOutResultFlash, "FadeOutResultFlash", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::FadeOutResultFlash");
-    probe!(plate_ui, TrainingParamChangeUI_InitializePlateList, "InitializePlateList", LIST_AND_FLOAT, VOID, "TrainingParamChangeUI::InitializePlateList");
+
+    // The boundary v1 had to guess at, and the doors that say which cut is playing.
+    probe!(cutt_controller, TrainingCutt_SetIsPlayingCutt, "set_IsPlayingCutt", ONE_FLAG, VOID, "SingleModeMainTrainingCuttController::set_IsPlayingCutt");
+    probe!(cutt_controller, TrainingCutt_GetIsPlayingCutt, "get_IsPlayingCutt", NO_PARAMS, BOOL, "SingleModeMainTrainingCuttController::get_IsPlayingCutt");
+    probe!(cutt_controller, TrainingCutt_IsAutoPlay, "IsAutoPlay", NO_PARAMS, BOOL, "SingleModeMainTrainingCuttController::IsAutoPlay");
+    probe!(cutt_controller, TrainingCutt_UpdateTrainingCutIn, "UpdateTrainingCutIn", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::UpdateTrainingCutIn");
+    probe!(cutt_controller, TrainingCutt_FixedUpdateTrainingCutIn, "FixedUpdateTrainingCutIn", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::FixedUpdateTrainingCutIn");
+    probe!(cutt_controller, TrainingCutt_LateUpdateTrainingCutIn, "LateUpdateTrainingCutIn", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::LateUpdateTrainingCutIn");
+    probe!(cutt_controller, TrainingCutt_PlayTrainingCut, "PlayTrainingCut", ONE_INFO, CLASS, "SingleModeMainTrainingCuttController::PlayTrainingCut");
+    probe!(cutt_controller, TrainingCutt_PlayScenarioTrainingCut, "PlayScenarioTrainingCut", ONE_INFO, CLASS, "SingleModeMainTrainingCuttController::PlayScenarioTrainingCut");
+    probe!(cutt_controller, TrainingCutt_PlayTrainingSaboriAsync, "PlayTrainingSaboriAsync", ONE_ID, CLASS, "SingleModeMainTrainingCuttController::PlayTrainingSaboriAsync");
+    probe!(cutt_controller, TrainingCutt_PlayTrainingCutEndAsync, "PlayTrainingCutEndAsync", ID_AND_FLAGS, CLASS, "SingleModeMainTrainingCuttController::PlayTrainingCutEndAsync");
+    probe!(cutt_controller, TrainingCutt_TrainingAsync, "TrainingAsync", ONE_ID, CLASS, "SingleModeMainTrainingCuttController::TrainingAsync");
+    probe!(cutt_controller, TrainingCutt_PlayInTrainingStatus, "PlayInTrainingStatus", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::PlayInTrainingStatus");
+    probe!(cutt_controller, TrainingCutt_PlayOutTrainingStatus, "PlayOutTrainingStatus", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::PlayOutTrainingStatus");
+    probe!(cutt_controller, TrainingCutt_CleanUpCutt, "CleanUpCutt", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::CleanUpCutt");
+    generic_probe!(cutt_controller, TrainingCutt_IsValidTag, "IsValidTag", RESULT_AND_LIST, BOOL, "SingleModeMainTrainingCuttController::IsValidTag");
+
+    // The friendship door (A28). `PlayCutIn` and the static `IsValidTag` are the two places a tag cut-in is
+    // named by the game itself rather than by a class label.
+    generic_probe!(tag_player, TagCutInPlayer_PlayCutIn, "PlayCutIn", LIST_AND_ACTION, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn");
+    probe!(tag_player, TagCutInPlayer_PlayCutInOut, "PlayCutInOut", ONE_ACTION, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut");
+    static_generic_probe!(tag_player, TagCutInPlayer_IsValidTag, "IsValidTag", ONE_INFO, BOOL, "SingleModeMainViewTagTrainingCutInPlayer::IsValidTag");
+
+    // Run 9's one install failure: the parameter is a generic instantiation, which the exact walk has never
+    // answered (C48). The wrapper declares a pointer for it and never reads through it.
+    generic_probe!(plate_ui, TrainingParamChangeUI_InitializePlateList, "InitializePlateList", LIST_AND_FLOAT, VOID, "TrainingParamChangeUI::InitializePlateList");
     probe!(main_view, SingleModeMain_CoroutineDoTweenTimeScale, "CoroutineDoTweenTimeScale", NO_PARAMS, CLASS, "SingleModeMainViewController::CoroutineDoTweenTimeScale");
     probe!(main_view, SingleModeMain_WaitTap, "WaitTap", NO_PARAMS, CLASS, "SingleModeMainViewController::WaitTap");
 
-    info!("Cutt probe: {installed} of {} observe only probes installed, cut runs measured from ResetCurrentTime and attributed to the view they start on", PROBES.len());
+    info!("Cutt probe: {installed} of {} observe only probes installed, cut runs measured from the game's own IsPlayingCutt flag and attributed to the view they start on", PROBES.len());
 
     if !missing.is_empty() {
         info!("Cutt probe: not installed, no class or no matching overload: {}", missing.join(", "));
@@ -610,10 +1118,10 @@ pub fn report_if_due() {
         }
 
         if probe.peaked {
-            let _ = write!(line, " {}={} peak {:.3}", probe.short(), calls, peak_seconds(probe.peak_bits()));
+            let _ = write!(line, " {}={} peak {:.3}", probe.label(), calls, peak_seconds(probe.peak_bits()));
         }
         else {
-            let _ = write!(line, " {}={}", probe.short(), calls);
+            let _ = write!(line, " {}={}", probe.label(), calls);
         }
     }
 
@@ -653,8 +1161,32 @@ pub fn report_if_due() {
         let _ = write!(doors, " {name}={}", AnimationSpeed::hit_calls(*slot));
     }
 
+    // The friendship split, and what the cut-in engine reported about itself. On their own line so the
+    // totals above stay readable (A28, A29).
+    let mut kinds = String::new();
+
+    for index in 0..TAG_COUNT {
+        let count = RUN_TAG_COUNT[index].load(atomic::Ordering::Relaxed);
+
+        if count == 0 {
+            continue;
+        }
+
+        let _ = write!(
+            kinds,
+            " {} runs {count} wall {} ms",
+            TAG_NAMES[index],
+            RUN_TAG_WALL_MS[index].load(atomic::Ordering::Relaxed)
+        );
+    }
+
+    let total_frames = TIMELINE_TOTAL_FRAMES_PEAK.load(atomic::Ordering::Relaxed);
+    let last_frame = TIMELINE_CURRENT_FRAME_PEAK.load(atomic::Ordering::Relaxed);
+    let target_fps = TIMELINE_TARGET_FPS.load(atomic::Ordering::Relaxed);
+
     info!("Cutt probe totals at {now_sec} s:{line} cut runs {runs} wall {wall_ms} ms timeline {peak_ms} ms open {open_for} ms");
     info!("Cutt probe cut runs by screen:{buckets}");
+    info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");
     info!("Cutt probe training scaling points reached:{doors}");
 }
 
@@ -702,9 +1234,12 @@ mod tests {
     }
 
     #[test]
-    fn probe_names_in_the_totals_line_drop_their_argument_list() {
-        assert_eq!(CUTT_SKIP_RUNTIME_FRAMES.short(), "CutInTimelineController::SkipRuntime");
-        assert_eq!(CUTT_GET_CURRENT_TIME.short(), "CutInTimelineController::get_CurrentTime");
+    fn two_overloads_of_the_same_method_keep_different_labels() {
+        // `SkipRuntime(time)` and `SkipRuntime(frames, keep)` are two doors. An earlier version of the
+        // totals line dropped the argument list, which printed both of them under one name.
+        assert_eq!(CUTT_SKIP_RUNTIME_TIME.label(), "CutInTimelineController::SkipRuntime(time)");
+        assert_eq!(CUTT_SKIP_RUNTIME_FRAMES.label(), "CutInTimelineController::SkipRuntime(frames, keep)");
+        assert_ne!(CUTT_SKIP_RUNTIME_TIME.label(), CUTT_SKIP_RUNTIME_FRAMES.label());
     }
 
     #[test]
@@ -713,6 +1248,8 @@ mod tests {
         assert_eq!(bucket_for(ViewId::SingleModePaddock as i32, false), ViewBucket::Training);
         assert_eq!(bucket_for(ViewId::SingleModeResult as i32, false), ViewBucket::Training);
         assert_eq!(bucket_for(ViewId::Story as i32, false), ViewBucket::Story);
+        // The story event mission screen is its own view, and the story event probe reports against it.
+        assert_eq!(bucket_for(ViewId::StoryEventMission as i32, false), ViewBucket::StoryEvent);
         assert_eq!(bucket_for(ViewId::GachaMain as i32, false), ViewBucket::Gacha);
         assert_eq!(bucket_for(ViewId::Title as i32, false), ViewBucket::Other);
 
@@ -725,6 +1262,38 @@ mod tests {
     fn every_bucket_has_a_name_for_the_totals_line() {
         assert_eq!(BUCKET_NAMES.len(), BUCKET_COUNT);
         assert_eq!(BUCKET_NAMES[ViewBucket::Training as usize], "training screen");
+    }
+
+    #[test]
+    fn a_cut_kind_comes_from_the_door_the_game_played_through() {
+        // The tag cut-in player is the door a friendship cut is played through, so a call there decides
+        // the kind even when no `IsValidTag` answer was seen.
+        assert_eq!(tag_kind_for_run(true, TAG_UNKNOWN), TAG_FRIENDSHIP);
+        assert_eq!(tag_kind_for_run(true, TAG_REGULAR), TAG_FRIENDSHIP);
+        // Without that door the game's own answer stands, and an answer it never gave stays unknown.
+        assert_eq!(tag_kind_for_run(false, TAG_FRIENDSHIP), TAG_FRIENDSHIP);
+        assert_eq!(tag_kind_for_run(false, TAG_REGULAR), TAG_REGULAR);
+        assert_eq!(tag_kind_for_run(false, TAG_UNKNOWN), TAG_UNKNOWN);
+    }
+
+    #[test]
+    fn every_cut_kind_has_a_name_for_the_totals_line() {
+        assert_eq!(TAG_NAMES.len(), TAG_COUNT);
+        assert_eq!(TAG_NAMES[TAG_FRIENDSHIP], "friendship cut");
+    }
+
+    #[test]
+    fn no_probe_is_measured_under_two_names() {
+        // The install lines and this list are maintained by hand, and a duplicated entry is how run 9's
+        // count would have been reported twice.
+        let mut names: Vec<&str> = PROBES.iter().map(|probe| probe.name).collect();
+        let total = names.len();
+
+        names.sort_unstable();
+        names.dedup();
+
+        assert_eq!(names.len(), total);
+        assert_eq!(names.len(), PROBES.len());
     }
 
     #[test]
