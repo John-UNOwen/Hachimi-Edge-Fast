@@ -234,4 +234,8 @@ pub fn init() {
     Cute_Core_Assembly::init();
 
     info!("Hooking finished");
+
+    // debug_mode only: writes the game's own method and field names to
+    // <data dir>/introspect.log so hooks can be aimed at real names.
+    crate::il2cpp::introspect::dump_if_enabled();
 }

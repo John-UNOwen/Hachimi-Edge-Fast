@@ -2,6 +2,7 @@ pub mod types;
 pub mod api;
 pub mod symbols;
 pub mod hook;
+pub mod introspect;
 mod utils;
 pub mod ext;
 pub mod sql;

@@ -731,6 +731,26 @@ pub fn race_seek_seh<F: FnOnce()>(f: F) -> bool {
     true
 }
 
+/// General version of the guard above: run a pass under SEH on Windows so a bad pointer
+/// in someone else's code cannot take the game down. Android has no SEH, so the pass
+/// simply runs there.
+#[cfg(target_os = "windows")]
+pub fn seh_guard<F: FnMut()>(label: &str, mut f: F) -> bool {
+    if let Err(e) = microseh::try_seh(|| f()) {
+        error!("[{}] faulted: {} at {:#x}", label, e.code(), e.address() as usize);
+        false
+    }
+    else {
+        true
+    }
+}
+
+#[cfg(target_os = "android")]
+pub fn seh_guard<F: FnOnce()>(_label: &str, f: F) -> bool {
+    f();
+    true
+}
+
 pub fn clear_il2cpp_list(list: *mut Il2CppObject) {
     use crate::il2cpp::symbols::get_method_addr_cached;
 
