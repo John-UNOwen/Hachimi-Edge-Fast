@@ -1188,8 +1188,10 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
   and this client's config carries 1000.0, so the typewriter runs at 1000 times the game's rate while every
   speed lever this fork added is capped at MAX_FACTOR (AGENTS section 2). Unmeasured: whether one asset
   object can reach that path twice and compound, which is the C22 shape, and what the client does with a
-  typewriter rate that large. It is an upstream option, so bounding it is a behaviour decision and not a
-  tidy up.
+  typewriter rate that large. It is an upstream option, so bounding it is a behaviour decision. Decision taken 2026-10-08: leave the
+  slider and the value as they are, story text stays at 1000 times the game's rate, and C46 stands as a
+  measurement note rather than a fix. `story_speed` was also left at 1.0..=10.0 even though the code would
+  honour MAX_FACTOR, because 10 is the value the runs measured with.
 
 ## D. Fix order
 
