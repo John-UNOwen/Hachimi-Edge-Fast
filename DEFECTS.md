@@ -395,7 +395,7 @@ is not static`, same as run 7), 0 panics. `introspect.log` written again, 1,941,
   It is our cost, it is avoidable at launch, and it is the largest single thing the mod writes per start.
   Not measured as a duration yet: the log has no timestamp pair around the dump.
 
-## A19 to A21, the training screen research (2026-10-08)
+## A19 to A25, the training screen research (2026-10-08)
 
 Sources: a token index built from `UmamusumePrettyDerby_Data\il2cpp_data\Metadata\global-metadata.dat`
 (281,297 unique identifiers, written to `hachimi-global-recon\pc_metadata_tokens.txt`) and the mod's own
@@ -440,11 +440,83 @@ Sources: a token index built from `UmamusumePrettyDerby_Data\il2cpp_data\Metadat
   `SingleModeMainTrainingCuttController.FLASH_LABEL_SPEED_UP_SUCCESS_IN` and
   `FLASH_LABEL_SPEED_UP_FAILURE_IN`) are refused as compile-time constants, and the one story-side attempt
   `StoryTimelineTrainingCuttClipData.DelayFrame` is refused as "is not static" (run 7 and run 8 log lines)
-  because the dump says it is `public int`, an instance field. The three installed hooks
-  (`TrainingFooter_GetCloseAnimWaitTime`, `TrainingCuttClip_getDelayTime`,
-  `SingleModeMainViewTrainingFooter.GetItemAnimDuration`) and `SingleModeUtils_GetCutTimeScale` printed
-  install lines in run 8 and no call line for the whole career. `StoryTimelineTrainingCuttClipData.DelayFrame`
-  is therefore a getter-or-instance-field target, not a static write.
+  because the dump says it is `public int`, an instance field. The five installed hooks
+  `TrainingFooter_GetCloseAnimWaitTime`, `TrainingFooter_GetItemAnimDuration`, `TrainingCuttClip_getDelayTime`,
+  `SingleModeUtils_GetHighSpeedPlayDuration` and `SingleModeUtils_GetCutTimeScale` printed
+  `new_hook!` lines in run 8 (`hachimi.log:464,466,468,474,478`) and no call line for the whole career,
+     while `CountupModifier_getDuration` did print one, so the call logging itself works. The two footer
+   getters sit on `Gallop.SingleModeMainViewTrainingFooter`, where the dump marks
+   `GetCloseAnimWaitTime/0 -> static float()` as static and `GetItemAnimDuration/1 ->
+   float(class<Gallop.SingleModeMainViewTrainingFooterItem>)` as an instance method (L25725-25726);
+   `resolve_getter` documents that a zero argument static is harmless here (`AnimationSpeed.rs:781-784`).
+   `StoryTimelineTrainingCuttClipData.DelayFrame` is an instance field, so it needs a method door and not
+   a static write.
+  - The evidence that a hook was reached is weaker than it looks. `hit()` (`AnimationSpeed.rs:811`) logs
+    only when `raw != scaled`, so a call that returns `0.0` is scaled to `0.0` and prints nothing. "No
+    call line" means "never changed anything the mod could see", not "never called", so a probe for this
+    work has to count calls rather than changed values (item 38).
+- [ ] **A22 The cut-in has a playback engine with its own skip doors and its own speed doors.**
+  `Gallop.CutIn.Cutt.CutInTimelineController` carries both families, verbatim from the dump:
+  `set_SkipFrame/1 -> void(int)` (L26955), `SkipRuntime/2 -> void(int, bool)` and `SkipRuntime/1 ->
+  void(float)` (L26967-26968), `SkipTimeDirect/1 -> void(float)` (L26969), `SkipAutoUpdate/1` in two
+  overloads, one taking `struct<...SkipType:4B>` and one taking a `List<TimelineEffectList>`
+  (L26976-26977), plus the waiting gates `get_WaitingTime/0`, `get_IsWaitingUpdate/0`,
+  `SetEnableWaitingUpdate/1`, `AddWaitingTime/1`, `GetNextWaitTapTime/0` and `UpdateNextWaitTapTime/0`
+  (L26952-26966, L26979-26980). Its rate side is `get_Speed/0`, `SetSpeed/1`, `GetCurrentSpeed/0`,
+  `UpdateSpeed/0`, `UpdateCharacterSpeed/2`, `UpdateEffectSpeed/2`, `SetCurrentTime/1`,
+  `ResetCurrentTime/0`, `get_CurrentTimeScale/0`, `get_CurrentCySpringTimeScale/0` and
+  `AlterUpdate_TimeScale/0` (L26958-26985) over the instance fields `_speed` (L27009), `_prevSpeed`
+  (L27007), `_timeScaleFromCurve` (L27011), `_cySpringTimeScaleFromCurve` (L27012) and
+  `_tempTimelineKeyTimeScaleData [class<Gallop.CutIn.Cutt.TimelineKeyTimeScaleData>]` (L27013). Speed
+  inside the cut asset is keyed per clip: `TimelineKeyCharacterMotionData::get_{Body,Facial,Ear,
+  Position}ClipPlaySpeed/0 -> class<Gallop.CutIn.Cutt.KeyFloat>` (L27056-27059) returns a keyframe
+  container and not a float, so it is unreachable through a getter hook.
+- [ ] **A23 The training screen has its own skip UI, typed by the game's own high speed enum.**
+  `Gallop.PartsSingleModeCommonFooter::UpdateSkipButton/0`, `::OnClickSkip/0` and `::SetSkipButton/1 ->
+  void(struct<Gallop.StoryTimelineController.HighSpeedType:4B>)` (L25706-25708), plus
+  `Gallop.SingleModeMainViewTrainingCutStatus::Skip/1 -> void(bool)` (L25719) and
+  `Gallop.SingleModeMainViewTrainingCutStatusFrame::Skip/5 -> void(int, int, int, int, int)` (L25721).
+  `SingleModeMainViewTrainingCutStatus::WillRankUpInHighSpeedMode/0 -> bool()` (L25718) shows a high
+  speed branch in the training status animation. `Gallop.StoryViewController::SkipTrainingCutt/0 ->
+  void()` (L26187) belongs to the story timeline path and not to this screen, which matches
+  `TrainingCuttClip_getDelayTime` being installed and never called.
+- [ ] **A24 The game ships a 3X cut path and a short motion variant, both as literals.**
+  `Gallop.SingleModeDefine::field CUT_PLAY_SPEED_1X`, `CUT_PLAY_SPEED_3X` and `CUT_PLAY_DURATION_3X`, all
+  `public static const float` (L25687-25689), and `Gallop.TrainingParamChangeUI::field PLAY_SPEED_DEFAULT`
+  and `PLAY_SPEED_FOR_SKIP` (L26128-26129) prove a fast form exists whose numbers are literals, so only
+  its readers can be hooked. `Gallop.TrainingParamChangeA2U::GetSkipMotionName/1 ->
+  string<System.String>(int)` (L26107) picks a skip variant by index, which is cheaper than speeding the
+  long motion. `Gallop.TrainingParamChangeUI` holds the post-training plate cascade as instance fields
+  `_delay`, `_tapWait`, `_groupInterval`, `_sequenceInterval` and `_forceTapWait` (L26130-26134) reached
+  through `InitializePlateList/2 -> void(List<...ChangeParameterInfo>, float)` (L26121).
+- [ ] **A25 The cut-in coroutine snapshots the clock at its start.** `<PlayTrainingCut>d__70::field
+  <timeScale>5__7 [float]`, `<isHighSpeedOnStart>5__9 [bool]`, `<waitForFixedUpdate>5__10
+  [class<UnityEngine.WaitForFixedUpdate>]` and `<allTextWaitTime>5__12 [float]` (L25496-25499) name one
+  entry point spelled `PlayTrainingCut` with a single t, distinct from the `TrainingCutt` names, that reads
+  a time scale and the high speed state when it starts, waits one fixed update, and holds its own text
+  wait. Its compiler index 70 sits below `WaitTapAsync`'s lambda at 81 and `FadeOutResultFlash`'s at 92 in
+  the same dump region, so `SingleModeMainTrainingCuttController` is the likely owner. `WaitForFixedUpdate`
+  means that part is locked to the fixed step, so a `Time.timeScale` change reaches it only if the fixed
+  step moves with it (C40).
+- [ ] **A26 The dump cannot reach the classes this work needs, and the token index cannot name them
+  either.** The 500 full class cap (`MAX_FULL_CLASSES`, `introspect.rs:60`) ran out at `introspect.log`
+  L23504 while the `umamusume.dll` walk continued to L27524, so `SingleModeMainTrainingCuttController`,
+  `SingleModeUtils`, `CutInTimelineController` and `TrainingParamChangeUI` produced hit lines only. Their
+  members are invisible unless the method and field filters match them, and those filters
+  (`introspect.rs:43-53`) contain no `cutt`, `cutin`, `frame`, `play`, `start`, `stop`, `update`, `skip`,
+  `tag` or `tap`. Absence of `PlayTrainingCutt`, `_isTrainingCuttSkip`, `_trainingCuttStartFrame` and the
+  `Update/FixedUpdate/LateUpdateTrainingCutt` trio from the dump therefore proves nothing. The token index
+  in `hachimi-global-recon\pc_metadata_tokens.txt` holds no dotted token at all, so it can name a member
+  but never its declaring class.
+- [ ] **A27 Some of these classes are not in the `Gallop` namespace.** The dump prints a bare label for a
+  class with an empty namespace or a nested type, and `SingleModeMainViewTagTrainingCutInPlayer` (L26716)
+  and `<PlayTrainingCut>d__70` appear that way, while their neighbours print `Gallop.`. The mod resolves
+  every speed class with `il2cpp_class_from_name(umamusume, c"Gallop", name)`
+  (`AnimationSpeed.rs:1189`), so a hook on such a class logs "not present in this build" instead of
+  failing loudly for another reason.
+
+Bracketed status totals after this research edit: 11 `[x]`, 19 `[~]`, 47 `[ ]`, 3 `[latent]`, and 28
+numbered fix order items.
 
 ## B. Open items from the animation feature review
 
@@ -1377,7 +1449,9 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     [src/il2cpp/introspect.rs](src/il2cpp/introspect.rs) has no match for `trainingcutt`, `tagtraining`,
     `trainingcutin` or `cuttcontroller`, so `TrainingCuttController`, `SingleModeTrainingCutInHelper` and
     `SingleModeMainViewTagTrainingCutInPlayer` appear only as name fragments in the metadata token index,
-    with no signature. Adding those filters is the cheap way to get the real parameter lists.
+    with no signature. Filters alone are not enough (A26): the 500 full class cap is already spent, so the
+     dump needs an exact name allowlist and a higher `MAX_FULL_CLASSES`, and the dump file it writes is
+     already 1.94 MB per launch (C44).
 36. [ ] Pick the door with the measurement in hand. The game offers two shapes: its own skip
     (`SingleModeTrainingCutInHelper.SkipRuntime/0`, `ContextExtension.SkipRuntimeAll/1`,
     `ContextExtension.SkipPause/1`) which removes the animation, and its own rate
@@ -1386,6 +1460,24 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     `GetTargetSpeed`: check for a matching setter or a backing field before scaling a getter. Skipping
     outright also has to answer what happens to the flash labels that report the training result
     (`FLASH_LABEL_SPEED_UP_SUCCESS_IN`, `FLASH_LABEL_SPEED_UP_FAILURE_IN`) and to `WaitTapAsync`.
+
+37. [ ] Give the dump an exact class allowlist. The names worth a full signature are
+    `SingleModeMainTrainingCuttController`, `SingleModeTrainingCutInHelper`, `SingleModeTrainingCutSettings`,
+    `TagTrainingCutInPlayer`, `SingleModeMainViewTagTrainingCutInPlayer`,
+    `SingleModeMainViewTrainingCutStatus`, `SingleModeMainViewTrainingCutStatusFrame`, `SingleModeUtils`,
+    `SingleModeDefine`, `TrainingParamChangeUI`, `CutInTimelineController` and `TrainingCuttController`.
+    Reaching them means an allowlist plus a higher `MAX_FULL_CLASSES`
+    ([src/il2cpp/introspect.rs](src/il2cpp/introspect.rs)), because the cap is spent at
+    `introspect.log:23504` while the image walk continues to L27524 (A26), and it has to be measured
+    against C44: the dump already costs 1.94 MB of log inside the loader lock window.
+38. [ ] Count calls, not changed values. Before any training cut number is scaled, put first hit and
+    periodic totals on `SingleModeUtils.GetTrainingCutTimeScale/1`,
+    `SingleModeTrainingCutInHelper.GetTargetSpeed/0`, `SingleModeTrainingCutInHelper.IsHighSpeedMode/0`,
+    `CutInTimelineController.SetSpeed/1` and `CutInTimelineController.UpdateSpeed/0`, and log a wall clock
+    pair at the start and the end of the cut. `hit()` is silent when scaling changes nothing
+    (`raw == scaled`, which includes a `0.0` duration), so the existing call lines cannot answer "was it
+    called" (A21). This is also the run that settles whether a friendship training cut-in happened at all
+    in run 8.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
