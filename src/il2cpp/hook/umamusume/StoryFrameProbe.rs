@@ -86,11 +86,10 @@ static UPDATE_TIME_SCALE_BY_HIGHSPEED: FrameProbe = FrameProbe::new("StoryTimeli
 static GET_TIME_SCALE: FrameProbe = FrameProbe::new("StoryTimelineController::get_TimeScale()");
 static SET_TIME_SCALE: FrameProbe = FrameProbe::new("StoryTimelineController::set_TimeScale(scale)");
 static IS_SKIP_TO_TEXT_CLIP: FrameProbe = FrameProbe::new("StoryTimelineController::IsSkipToTextClip(skip_text, skip_block)");
-static IS_HIGH_SPEED_MODE: FrameProbe = FrameProbe::new("StoryTimelineController::IsHighSpeedMode()");
 static STORY_END_FRAME_SKIPPED: FrameProbe = FrameProbe::new("StoryTimelineController::IsStoryEndFrameOrGrandLiveWaitFrameSkipped(frame, next_frame)");
 static TEXT_CLIP_WAIT_FRAME: FrameProbe = FrameProbe::new("StoryTimelineTextClipData::GetWaitFrameUntilNextBlockLocalize()");
 
-static PROBES: [&FrameProbe; 13] = [
+static PROBES: [&FrameProbe; 12] = [
     &SET_FRAME_COUNT_FOR_WAITING,
     &WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK,
     &WAIT_FRAME_UNTIL_NEXT_BLOCK,
@@ -101,7 +100,6 @@ static PROBES: [&FrameProbe; 13] = [
     &GET_TIME_SCALE,
     &SET_TIME_SCALE,
     &IS_SKIP_TO_TEXT_CLIP,
-    &IS_HIGH_SPEED_MODE,
     &STORY_END_FRAME_SKIPPED,
     &TEXT_CLIP_WAIT_FRAME,
 ];
@@ -184,16 +182,10 @@ extern "C" fn IsSkipToTextClip(this: *mut Il2CppObject, skip_text: bool, skip_bl
     value
 }
 
-// Dumped as `IsHighSpeedMode/0 -> static bool()`. A static method carries no hidden `this`, so a
-// wrapper that declares no parameters matches it exactly.
-type IsHighSpeedModeFn = extern "C" fn() -> bool;
-extern "C" fn IsHighSpeedMode() -> bool {
-    let value = get_orig_fn!(IsHighSpeedMode, IsHighSpeedModeFn)();
-    IS_HIGH_SPEED_MODE.observe(&[bit(value)]);
-
-    value
-}
-
+// `IsHighSpeedMode()` is not probed. The game polls it about 130 times a second while a scene is
+// running, and a probe on a path that hot pays a `get_orig_fn!` lookup on every poll, which is the
+// mod's own cost rather than the game's. The mode is read once per report instead, through the
+// guarded wrapper StoryTimelineController already installs for its own decision.
 // Dumped as `IsStoryEndFrameOrGrandLiveWaitFrameSkipped/4 -> static bool(class, class, int, int)`,
 // so the first two registers are real arguments rather than an instance pointer.
 type StoryEndFrameSkippedFn = extern "C" fn(
@@ -303,11 +295,6 @@ pub fn init(umamusume: *const Il2CppImage) {
     ) };
     probe!(skip_clip_addr, IsSkipToTextClip, "IsSkipToTextClip");
 
-    let high_speed_mode_addr = unsafe { AnimationSpeed::resolve_static_method(
-        controller, "IsHighSpeedMode", &[], Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN,
-    ) };
-    probe!(high_speed_mode_addr, IsHighSpeedMode, "IsHighSpeedMode");
-
     let story_end_addr = unsafe { AnimationSpeed::resolve_static_method(
         controller, "IsStoryEndFrameOrGrandLiveWaitFrameSkipped",
         &[
@@ -368,7 +355,11 @@ pub fn report_if_due() {
         let _ = write!(line, " {}={}", probe.short(), probe.calls());
     }
 
-    info!("Frame probe totals at {now} s:{line}");
+    // The mode the timeline is actually in, read once per report through the guarded wrapper
+    // instead of from a hook on the path the game polls a hundred and thirty times a second.
+    let mode = crate::il2cpp::hook::umamusume::StoryTimelineController::IsStoryHighSpeedMode();
+
+    info!("Frame probe totals at {now} s:{line} story high speed mode {}", u8::from(mode != 0));
 }
 
 static START: OnceLock<Instant> = OnceLock::new();
