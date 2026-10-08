@@ -1445,13 +1445,15 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     `GetTargetSpeed`, `SingleModeTrainingCutInHelper.IsHighSpeedMode`, and the three `SingleModeUtils`
     getters in A20, plus the wall clock between the start and stop lines. Run 5 is the warning this item
     exists for.
-35. [ ] The classes that matter are not in the dump yet. `CLASS_FILTERS` in
+35. [~] The classes that matter are not in the dump yet. `CLASS_FILTERS` in
     [src/il2cpp/introspect.rs](src/il2cpp/introspect.rs) has no match for `trainingcutt`, `tagtraining`,
     `trainingcutin` or `cuttcontroller`, so `TrainingCuttController`, `SingleModeTrainingCutInHelper` and
     `SingleModeMainViewTagTrainingCutInPlayer` appear only as name fragments in the metadata token index,
     with no signature. Filters alone are not enough (A26): the 500 full class cap is already spent, so the
      dump needs an exact name allowlist and a higher `MAX_FULL_CLASSES`, and the dump file it writes is
-     already 1.94 MB per launch (C44).
+     already 1.94 MB per launch (C44). Built in `253458f` and not yet run: `FULL_DUMP_NAMES` now names 21
+     classes for a full dump out of their own `MAX_ALLOWLIST_CLASSES = 40` budget, and `cutt` and `cutin`
+     were added to `METHOD_FILTERS`.
 36. [ ] Pick the door with the measurement in hand. The game offers two shapes: its own skip
     (`SingleModeTrainingCutInHelper.SkipRuntime/0`, `ContextExtension.SkipRuntimeAll/1`,
     `ContextExtension.SkipPause/1`) which removes the animation, and its own rate
@@ -1461,7 +1463,7 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     outright also has to answer what happens to the flash labels that report the training result
     (`FLASH_LABEL_SPEED_UP_SUCCESS_IN`, `FLASH_LABEL_SPEED_UP_FAILURE_IN`) and to `WaitTapAsync`.
 
-37. [ ] Give the dump an exact class allowlist. The names worth a full signature are
+37. [~] Give the dump an exact class allowlist. The names worth a full signature are
     `SingleModeMainTrainingCuttController`, `SingleModeTrainingCutInHelper`, `SingleModeTrainingCutSettings`,
     `TagTrainingCutInPlayer`, `SingleModeMainViewTagTrainingCutInPlayer`,
     `SingleModeMainViewTrainingCutStatus`, `SingleModeMainViewTrainingCutStatusFrame`, `SingleModeUtils`,
@@ -1469,8 +1471,10 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     Reaching them means an allowlist plus a higher `MAX_FULL_CLASSES`
     ([src/il2cpp/introspect.rs](src/il2cpp/introspect.rs)), because the cap is spent at
     `introspect.log:23504` while the image walk continues to L27524 (A26), and it has to be measured
-    against C44: the dump already costs 1.94 MB of log inside the loader lock window.
-38. [ ] Count calls, not changed values. Before any training cut number is scaled, put first hit and
+    against C44: the dump already costs 1.94 MB of log inside the loader lock window. `253458f` implements the allowlist and the
+    reserved budget, and the dump's last line now reads `N classes (M from the allowlist), ...` so a run
+    can say which budget was spent. It is `[~]` until a launch shows the classes.
+38. [~] Count calls, not changed values. Before any training cut number is scaled, put first hit and
     periodic totals on `SingleModeUtils.GetTrainingCutTimeScale/1`,
     `SingleModeTrainingCutInHelper.GetTargetSpeed/0`, `SingleModeTrainingCutInHelper.IsHighSpeedMode/0`,
     `CutInTimelineController.SetSpeed/1` and `CutInTimelineController.UpdateSpeed/0`, and log a wall clock
@@ -1478,6 +1482,57 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     (`raw == scaled`, which includes a `0.0` duration), so the existing call lines cannot answer "was it
     called" (A21). This is also the run that settles whether a friendship training cut-in happened at all
     in run 8.
+
+### Probe build `253458f`, deployed and waiting for a career run (2026-10-08)
+
+Deployed as `cri_mana_vpx.dll` at the game root, 29,352,448 bytes, SHA256
+`8C115D7C207A11F05D9321F600B48CAE13BD4C54E03AC665F8789F6221860038`, replacing the run 8 build (29,284,864
+bytes, `2E36C270CCAE9B34B783D7DA5A1DE36F8987CD7CB107CD6BE3B0007F2BD8C88A`). Nothing in it changes
+behaviour: every new hook hands its arguments to the original untouched, and they arm only under
+`debug_mode`, which this client already has on.
+
+What it adds:
+
+- [src/il2cpp/hook/umamusume/TrainingCuttProbe.rs](src/il2cpp/hook/umamusume/TrainingCuttProbe.rs), 19
+  observe only hooks over the training screen: the game's own rate query
+  `SingleModeUtils.GetTrainingCutTimeScale/1` (static, so an argument only wrapper),
+  `SingleModeTrainingCutInHelper.GetTargetSpeed/0`, `SkipRuntime/0`, `IsHighSpeedMode/0`, the cut-in
+  engine's `ResetCurrentTime/0`, `get_CurrentTime/0`, `get_CurrentTimeScale/0`, `get_WaitingTime/0`,
+  `SetSpeed/1`, `UpdateSpeed/0`, both `SkipRuntime` overloads and `SkipTimeDirect/1`, the training
+  status `Skip/1`, `WaitTapAsync/0`, `FadeOutResultFlash/0`, `TrainingParamChangeUI.InitializePlateList/2`
+  and the controller's `CoroutineDoTweenTimeScale/0` and `WaitTap/0`. Counts, not scaled values, which
+  closes the `hit()` blind spot in A21. The frame hot getters do one increment and one atomic max and
+  print nothing until a 4096 call chunk.
+- Cut run measurement from `ResetCurrentTime`, the only proven start marker: a line per closed run with
+  the peak of `get_CurrentTime` in the cut's own seconds and the wall clock between the two markers, plus
+  running totals. `PlayTrainingCutt`, `OnStartTrainingCutt` and `OnStopTrainingCutt` are still
+  signature-less, so no assumed name is hooked.
+- Namespace aware class lookup: `class_for_label` splits a dump label at its last dot, which is how
+  `Gallop.CutIn.Cutt.CutInTimelineController` resolves at all. A `Gallop.` lookup alone could not find
+  it, which is A27.
+- The dump allowlist described in item 37.
+- Six unit tests over the peak merge, the millisecond conversion, the report gate, the totals line names
+  and the label split. `cargo test --lib` is 65 passed, `cargo check --all-targets` clean, clippy clean on
+  both legs.
+
+What the next career run has to show before any training number is scaled, item 34:
+
+1. `Cutt probe: X of 19 observe only probes installed` and the names in the "no class or no matching
+   overload" line.
+2. `Cutt probe: cut run N closed at T ms, timeline peak S s, wall W ms`, which is the first number this
+   fork has ever had for the length of a friendship training cut-in.
+3. `Cutt probe totals at N s:` with counts and peaks per probe, in particular
+   `SingleModeUtils::GetTrainingCutTimeScale` and `SingleModeTrainingCutInHelper::GetTargetSpeed`, which
+   say what rate the game already asks for.
+4. `introspect.log` full dumps for the allowlisted classes, where `PlayTrainingCutt`,
+   `OnStartTrainingCutt`, `_trainingCuttStartFrame`, `_trainingCuttEndFrame`, `_isTrainingCuttSkip` and
+   the `TagTraining` holders should finally get signatures. The run also has to show the log did not blow
+   up past a readable size (C44).
+5. Whether a friendship training happened at all, which run 8 could not answer.
+
+Bracketed status totals after this edit: 11 `[x]`, 19 `[~]`, 47 `[ ]`, 3 `[latent]` as bullet items. In the
+fix order list, items 35, 37 and 38 moved to `[~]` in this edit and item 34 stays `[ ]` because the run
+that answers it has not happened yet.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
