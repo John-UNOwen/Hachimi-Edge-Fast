@@ -1494,7 +1494,9 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     against C44: the dump already costs 1.94 MB of log inside the loader lock window. `253458f` implements the allowlist and the
     reserved budget, and the dump's last line now reads `N classes (M from the allowlist), ...` so a run
     can say which budget was spent. It is `[~]` until a launch shows the classes.
-38. [~] Count calls, not changed values. Before any training cut number is scaled, put first hit and
+38. [~] Count calls, not changed values. The counting landed in `95bf6d1` and the probe report prints the
+    five training scaling counters, so what is left here is the run. Before any training cut number is
+    scaled, put first hit and
     periodic totals on `SingleModeUtils.GetTrainingCutTimeScale/1`,
     `SingleModeTrainingCutInHelper.GetTargetSpeed/0`, `SingleModeTrainingCutInHelper.IsHighSpeedMode/0`,
     `CutInTimelineController.SetSpeed/1` and `CutInTimelineController.UpdateSpeed/0`, and log a wall clock
@@ -1536,6 +1538,30 @@ What it adds:
 - Six unit tests over the peak merge, the millisecond conversion, the report gate, the totals line names
   and the label split. `cargo test --lib` is 65 passed, `cargo check --all-targets` clean, clippy clean on
   both legs.
+
+### Two upgrades landed after the release tag (`95bf6d1` and `e372502`)
+
+- `hit()` in `AnimationSpeed.rs` now counts every call to a scaling point and prints the first four even
+  when the value did not move, then one line every 1024 calls. That removes the measurement half of A21:
+  the five training hooks that printed install lines and no call line can now be read as reached or not
+  reached, instead of inferred. `hit_calls(slot)` exposes the counter and `TRAINING_HIT_SLOTS` names the
+  five training slots, which are the regular training path rather than the friendship one.
+- The probe attributes each cut run to the view it started on, from `SceneManager::GetCurrentViewId` plus
+  the scene id `AlterUpdate` already caches, so a training cut-in is separated from a race, gacha or story
+  one. Buckets: training screen (1100, 1101, 1200, 1300, 1301), story (3000), gacha (300), the race scene
+  family, and other. A run that opened in training stays attributed to training even if the cut-in that
+  closed it happened on another screen.
+- The probe report is three lines now: the per probe totals, `Cutt probe cut runs by screen:`, and
+  `Cutt probe training scaling points reached:` carrying the five training scaling counters.
+- Friendship training still cannot be told apart from regular training. `TagTraining`,
+  `TagTrainingCutInPlayer` and `SingleModeMainViewTagTrainingCutInPlayer` have no dumped signatures, so
+  nothing hooks them (A19), and both cases run through the same training cut-in classes, so they land in the
+  same bucket. Separating them is the next dump's job, not a guessed signature.
+- `cargo test --lib` is 68 passed, three new tests for the hit counter, the bucket attribution and the
+  bucket names, and both clippy legs are clean with `-D warnings`. The build `v0.32.0-e372502-dirty` is
+  staged in `target\release` and was not deployed because the game was running when it finished, so the
+  game root still holds the released `v0.32.0-d42b6d9`. It is `-dirty` because the README screenshot change
+  is uncommitted on purpose.
 
 What the next career run has to show before any training number is scaled, item 34:
 
