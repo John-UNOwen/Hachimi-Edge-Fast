@@ -135,6 +135,8 @@ config_editor:
   virtual_resolution_multiplier: "Số nhân độ phân giải ảo"
   ui_scale: "Tỷ lệ UI"
   gui_scale: "Tỷ lệ lớp phủ"
+  story_high_speed_mode: "Chuyển phát lại cốt truyện sang chế độ tốc độ cao của game"
+  story_skip_frame_scale: "Mở rộng khung hình bỏ qua của cốt truyện"
   gui_landscape_ratio: "Tỷ lệ thu phóng lớp phủ ngang"
   graphics_quality: "Chất lượng đồ họa"
   vsync: "VSync"

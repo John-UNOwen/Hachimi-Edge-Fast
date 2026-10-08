@@ -200,6 +200,8 @@ config_editor:
   gui_scale: "覆盖层缩放"
   gui_landscape_ratio: "横屏覆盖层缩放比例"
   ui_animation_scale: "UI 动画速度"
+  story_high_speed_mode: "将剧情播放切换为游戏自身的高速模式"
+  story_skip_frame_scale: "剧情跳过帧扩展倍率"
   graphics_quality: "图形质量"
   vsync: "垂直同步"
   auto_full_screen: "自动全屏"

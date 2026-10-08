@@ -217,6 +217,8 @@ config_editor:
   old_config_editor: "Usar editor de configurações antigo"
   gui_landscape_ratio: "Proporção da escala da sobreposição (paisagem)"
   ui_animation_scale: "Escala das animações da UI"
+  story_high_speed_mode: "Colocar a reprodução da história no modo de alta velocidade do próprio jogo"
+  story_skip_frame_scale: "Extensão de quadros de salto da história"
   graphics_quality: "Qualidade dos gráficos"
   vsync: "VSync"
   auto_full_screen: "Tela cheia automática"
