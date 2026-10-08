@@ -152,6 +152,27 @@ overload`, 0 `is not static`, 0 `passed by reference`.
   received the same frame counts, so the two move together. `IsHighSpeedMode` returned 0 in every
   logged call. See item 14.
 
+### Run 5, career story with the skip extension on, build `6826c8b`, from 12:15:44, story stalled
+
+`hachimi.log` 107 KB / 865 lines. 187 hooks armed in one pass in 0.053 s, `13 of 13 observe only
+probes installed`, 10 `_addr is null`, 5 class not found, 2 static rejections, 0 panics. The snapshot
+carried `story_high_speed true`, and the config file still holds `story_skip_frame_scale 1.5`.
+
+- The story froze. `get_WaitFrameCountUntilNextBlock` climbed 4, 12, 24, 36, 44, 48, 84 and then
+  stopped at 96 from 190 s onward. `UpdateTimeScaleByHispeedType` stopped at 49. `IsHighSpeedMode`
+  ran at a flat 3600 calls per 20 s interval, about 180 a second, with nothing advancing.
+- Every skip step hit the ceiling the option imposed: `SkipFrameCount 133 -> 733`, and the game then
+  handed that same 733 to `SkipMotionFrame`, which this fork raised again to 1333. All twelve logged
+  steps were exactly +600 frames, so the multiplier in effect was at least 5.5 while the recorded
+  setting was 1.5. The magnitude is not explained by the snapshot, and the option has been removed
+  rather than debugged. See C34.
+- The high speed mode engagement wrote nothing: no `asked the story timeline` line and no rejection
+  line, while the probe still reported `IsHighSpeedMode()` returning 0 in its six samples. It had
+  three exit paths that logged nothing at all, which is what made this run unreadable. Every exit now
+  logs a reason, and the config mirror logs the one line that proves the option reached that layer.
+- Recovery on the user side was to lower the value and change story speed, which re-ran the apply
+  path.
+
 - [x] **A10 `HighSpeedSetting` re-applied the same write at every scene change.** 50 lines read
   `story high speed 1 -> 2 via StoryManager::SaveHighSpeedType, read back 1`. `SaveHighSpeedType`
   moves StoryManager's own saved setting, the `saved story` value did go 1 to 2, but
@@ -196,7 +217,7 @@ overload`, 0 `is not static`, 0 `passed by reference`.
 - [ ] A7 `byref`
 - [ ] struct typed parameters still skipped in general; A5 shows which ones are actually safe
 
-## C. Safety review findings (31)
+## C. Safety review findings (34)
 
 - [~] **C1 Calls through address 0.** Closed for `def_method_wrapper_fn!`,
   `impl_addr_wrapper_fn!` and both field accessor macro families. Still open: `get_orig_fn!`
@@ -301,11 +322,21 @@ overload`, 0 `is not static`, 0 `passed by reference`.
   and result screens without a single related fault. Recorded as a known property, not a defect to
   chase: it only matters for a wrapper that would dereference method metadata, and none does.
 - [ ] **C33 `get_orig_fn!` is a `Mutex<HashMap>` lookup with `unwrap()` per call**
-  (`src/core/interceptor.rs:113-119`). Every detour pays it, and the observe only probes add fifteen
+  (`src/core/interceptor.rs:113-119`). Every detour pays it, and the observe only probes add thirteen
   more candidates on paths the story code walks per frame. Cost is tens of nanoseconds and is not
   what this fork is losing time to, but the `unwrap()` on a shared lock inside an `extern "C"` frame
   is the same shape C2 warns about. Cached trampoline handles are the fix if this ever lands on a
   measured hot path.
+- [ ] **C34 The story skip frame values are a chain, not a duration.** `SkipFrameCount` and
+  `SkipMotionFrame` receive the same number, and what the fork hands to the first is fed straight
+  into the second by the game, so a hook on both applies the factor twice along one request
+  (`133 -> 733`, then `733 -> 1333` in run 5). The values rise monotonically inside a scene
+  (133, 243, 161, 263, 691, 163, and 76, 182, 313, 448, 583 in run 4), which reads like a frame
+  target inside the timeline rather than a wait length, and pushing a target past the block the
+  timeline stands in stops advancement: the wait count froze at 96 and `IsHighSpeedMode` spun at
+  180 calls a second. Any future work on these paths has to scale at most one of them, has to know
+  which one the game forwards, and has to bound the result against the block length rather than a
+  multiplier. The scaling is removed; both hooks stay as counters.
 
 ## D. Fix order
 
@@ -386,27 +417,31 @@ overload`, 0 `is not static`, 0 `passed by reference`.
     that. Its detour only logs when scaling changes the value, so a call whose scaled value came out
     identical would be invisible, and the probe set has no plain counter for it or for
     `SetHighSpeedFrameCount`. Both paths now carry a plain counter that logs `Story step <name> call N`
-    for its first six calls and then every 4096, so the next run proves or disproves the calls.
-17. [ ] Story high speed mode is now a lever, and it is unverified. Run 4 showed that raising the High
-    Speed setting does not engage the mode the timeline consults, so `story_high_speed_mode` (default
-    off) calls the game's own `StoryTimelineController::SetHighSpeedType` with whatever value
+    for its first six calls and then every 4096. Run 5 produced twelve `Story step` lines and all
+    twelve were the two skip paths, so neither counter fired; that is evidence, not proof, because the
+    story in that run stalled.
+17. [~] Story high speed mode is a lever that has never written anything. Run 4 showed that raising the
+    High Speed setting does not engage the mode the timeline consults, so `story_high_speed_mode`
+    (default off) calls the game's own `StoryTimelineController::SetHighSpeedType` with whatever value
     `StoryManager::GetMaxHighSpeedType` reports. Nothing is written unless the game's own
     `IsHighSpeedMode(value)` predicate accepts that value first, so no enum value is invented, and the
     write only happens while the skip paths were reached within the last 10 s, at most once per 10 s,
-    from the game thread. At install the log says `story high speed helpers setter ..., value predicate
-    ..., state reader ...`, and an attempt ends as either `IsHighSpeedMode 0 -> 1` or `this client does
-    not read HighSpeedType N as a high speed mode`. No run has exercised it yet.
-18. [ ] Skip frame extension is an assumption with a guard on it. `story_skip_frame_scale` (default
-    1.0, does nothing) raises the frame value handed to `SkipFrameCount` and `SkipMotionFrame`. Run 4's
-    values read like frame targets rather than wait lengths, so the hook only ever raises the value and
-    never lowers it, and one call may add at most `MAX_SKIP_EXTENSION` 600 frames: a story block is a
-    few hundred frames long, and walking past the block the timeline is standing in is what C23 warns
-    about. Both hooks log `Story step <name> call N: raw -> scaled` for the first six calls, so the
-    direction is measurable with the option left at 1.0. Unverified, and the direction is the open
-    question.
+    from the game thread. Run 5 had the option on, all three helper addresses resolved, and produced no
+    attempt line and no rejection line, while its probe still sampled `IsHighSpeedMode()` returning 0.
+    Three exit paths were silent; each now names its reason, and the config mirror logs the state it
+    adopted (`ac2b1a5`). The lever needs one clean run with nothing else touching story timing before
+    it is trusted.
+18. [x] Skip frame extension was tried in run 5 and removed (`ac2b1a5`, `a2c5f67`, `30e1cb4`,
+    `8505cfa`). At any value above 1.0 it stalled story advancement: the extension landed on the ceiling
+    on every call, and the game forwarded the raised value from `SkipFrameCount` into `SkipMotionFrame`,
+    which raised it a second time. See C34 and the run 5 block. `SkipFrameCount` and `SkipMotionFrame`
+    stay hooked as counters that log the frame value they carry and pass every argument through
+    untouched.
 19. The probe set is 13 candidates now: `SkipFrameCount` and `SkipMotionFrame` moved from observation
     to real hooks, and the summary cadence went from 512 to 4096 after `IsHighSpeedMode` wrote 66 of
-    the 1026 lines in run 4 at the old cadence.
+    the 1026 lines in run 4 at the old cadence. Run 5 shows the cadence is still too tight for
+    `IsHighSpeedMode`, which wrote 14 chunk lines on its own while the story spun; that path is a
+    symptom reader, not a lever, and it is the first candidate to drop or to sample more sparsely.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
