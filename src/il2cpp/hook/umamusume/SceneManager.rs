@@ -58,6 +58,7 @@ fn ChangeViewCommon(next_view_id: i32) {
     // Gallop sets its own Time.timeScale around view changes, and the hook on
     // set_timeScale only scales what the game writes, so re-assert ours here.
     crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply();
+    crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
 }
 
 type ChangeViewJpfn = extern "C" fn(
@@ -70,6 +71,10 @@ extern "C" fn ChangeViewJp(
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool, is_fast_destroy: bool, fade_in_duration: f32
 ) {
+    // Applied before the original call: the game reads its fade constants while
+    // ChangeView runs, so a change saved in Config Editor has to be in place first.
+    crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
+
     get_orig_fn!(ChangeViewJp, ChangeViewJpfn)(
         this, next_view_id, view_info, callback_on_change_view_cancel,
         callback_on_change_view_accept, force_change, is_fast_destroy,
@@ -88,6 +93,8 @@ extern "C" fn ChangeViewOther(
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool
 ) {
+    crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
+
     get_orig_fn!(ChangeViewOther, ChangeViewOtherfn)(
         this, next_view_id, view_info, callback_on_change_view_cancel,
         callback_on_change_view_accept, force_change

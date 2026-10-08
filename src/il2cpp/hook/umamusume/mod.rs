@@ -80,6 +80,8 @@ pub mod CameraData;
 pub mod DialogManager;
 pub mod PartsCharaMessageBase;
 pub mod SceneManager;
+pub mod AnimationSpeed;
+pub mod SingleModeResultContentBase;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -349,4 +351,9 @@ pub fn init() {
     DownloadPathRegister::init(image);
     MasterDataManager::init(image);
     MasterItemExchangeTop::init(image);
+
+    // Resolved last: the duration constants are read straight out of the loaded
+    // metadata, and every module above may still be filling in class lookups.
+    AnimationSpeed::init(image);
+    SingleModeResultContentBase::init(image);
 }

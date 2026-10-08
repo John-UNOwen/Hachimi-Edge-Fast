@@ -5513,6 +5513,30 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            if should_show_option(search, &t!("config_editor.transition_speed")) {
+                ui.label(t!("config_editor.transition_speed"));
+                ui.add(egui::Slider::new(&mut config.transition_speed, 1.0..=20.0).step_by(0.5));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.result_screen_speed")) {
+                ui.label(t!("config_editor.result_screen_speed"));
+                ui.add(egui::Slider::new(&mut config.result_screen_speed, 1.0..=20.0).step_by(0.5));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.story_speed")) {
+                ui.label(t!("config_editor.story_speed"));
+                ui.add(egui::Slider::new(&mut config.story_speed, 1.0..=10.0).step_by(0.5));
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.auto_skip_result_screens")) {
+                ui.label(t!("config_editor.auto_skip_result_screens"));
+                ui.checkbox(&mut config.auto_skip_result_screens, "");
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.render_scale")) {
                 ui.label(t!("config_editor.render_scale"));
                 ui.add(egui::Slider::new(&mut config.render_scale, 0.1..=10.0).step_by(0.1));
@@ -6834,6 +6858,7 @@ fn save_and_reload_config(config: hachimi::Config) {
                 }
             }
             crate::il2cpp::hook::UnityEngine_CoreModule::Time::mark_dirty();
+            crate::il2cpp::hook::umamusume::AnimationSpeed::mark_dirty();
             t!("notification.config_saved").into_owned()
         },
         Err(e) => e.to_string()

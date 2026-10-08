@@ -879,6 +879,15 @@ pub struct Config {
     pub ui_animation_scale: f32,
     #[serde(default = "Config::default_time_scale")]
     pub time_scale: f32,
+    // Division factors for Gallop's own animation-duration constants.
+    #[serde(default = "Config::default_animation_speed")]
+    pub transition_speed: f32,
+    #[serde(default = "Config::default_animation_speed")]
+    pub result_screen_speed: f32,
+    #[serde(default = "Config::default_animation_speed")]
+    pub story_speed: f32,
+    #[serde(default)]
+    pub auto_skip_result_screens: bool,
     #[serde(default)]
     pub trainer_live_landscape: bool,
     #[serde(default)]
@@ -932,6 +941,7 @@ impl Config {
     fn default_meta_index_url() -> String { "https://gitlab.com/umatl/hachimi-meta/-/raw/main/meta.json".to_owned() }
     fn default_ui_animation_scale() -> f32 { 1.0 }
     fn default_time_scale() -> f32 { 1.0 }
+    fn default_animation_speed() -> f32 { 1.0 }
     fn default_live_vocals_swap() -> [i32; 6] { [0; 6] }
     fn default_champions_live_resource_id() -> i32 { 15 }
     fn default_champions_live_year() -> i32 { 2025 }

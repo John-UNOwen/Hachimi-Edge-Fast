@@ -28,12 +28,14 @@ const IMAGE_FILTERS: &[&str] = &[
 ];
 
 /// A class whose name matches one of these is dumped in full: every method with its
-/// parameter count, and every field. Kept narrow on purpose; breadth comes from the
-/// method and field scans below, which label every hit with its declaring class.
+/// parameter count, return type and parameter types, and every field with its type,
+/// static/const flags and current static value. Kept narrow on purpose; breadth comes
+/// from the method and field scans below, which label every hit with its declaring class.
 const CLASS_FILTERS: &[&str] = &[
     "uimanager", "scenemanager", "viewmanager", "viewcontroller", "nowloading", "connecting",
     "transition", "fade", "storyview", "storytext", "storytimeline", "trainingparam",
-    "trainingresult", "tapeffect", "anroot", "anmotion", "animotion", "director"
+    "trainingresult", "tapeffect", "anroot", "anmotion", "animotion", "director",
+    "result", "orientation", "reward", "countup"
 ];
 
 /// Every other class is scanned for method names that look like a duration knob, since
@@ -74,6 +76,142 @@ fn image_is_in_scope(name: &str) -> bool {
     matches_any(name, IMAGE_FILTERS)
 }
 
+const FIELD_ATTRIBUTE_STATIC: ::std::os::raw::c_int = 0x10;
+const FIELD_ATTRIBUTE_PUBLIC: ::std::os::raw::c_int = 0x06;
+const FIELD_ATTRIBUTE_INIT_ONLY: ::std::os::raw::c_int = 0x20;
+const FIELD_ATTRIBUTE_LITERAL: ::std::os::raw::c_int = 0x40;
+
+/// Readable name for a metadata type. The shape matters as much as the name: a wrapper
+/// that assumes `float` for a method which actually returns `int` hands garbage to every
+/// caller, so signatures are dumped rather than inferred from a method name.
+fn type_label(t: *const Il2CppType) -> String {
+    if t.is_null() {
+        return "?".to_owned();
+    }
+
+    let kind = unsafe { (*t).type_() };
+    let byref = unsafe { (*t).byref() } != 0;
+
+    let name = match kind {
+        Il2CppTypeEnum_IL2CPP_TYPE_VOID => "void",
+        Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN => "bool",
+        Il2CppTypeEnum_IL2CPP_TYPE_CHAR => "char",
+        Il2CppTypeEnum_IL2CPP_TYPE_I1 => "sbyte",
+        Il2CppTypeEnum_IL2CPP_TYPE_U1 => "byte",
+        Il2CppTypeEnum_IL2CPP_TYPE_I2 => "short",
+        Il2CppTypeEnum_IL2CPP_TYPE_U2 => "ushort",
+        Il2CppTypeEnum_IL2CPP_TYPE_I4 => "int",
+        Il2CppTypeEnum_IL2CPP_TYPE_U4 => "uint",
+        Il2CppTypeEnum_IL2CPP_TYPE_I8 => "long",
+        Il2CppTypeEnum_IL2CPP_TYPE_U8 => "ulong",
+        Il2CppTypeEnum_IL2CPP_TYPE_R4 => "float",
+        Il2CppTypeEnum_IL2CPP_TYPE_R8 => "double",
+        Il2CppTypeEnum_IL2CPP_TYPE_STRING => "string",
+        Il2CppTypeEnum_IL2CPP_TYPE_PTR => "ptr",
+        Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE => "struct",
+        Il2CppTypeEnum_IL2CPP_TYPE_CLASS => "class",
+        Il2CppTypeEnum_IL2CPP_TYPE_ARRAY => "array",
+        Il2CppTypeEnum_IL2CPP_TYPE_SZARRAY => "[]",
+        Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST => "generic",
+        Il2CppTypeEnum_IL2CPP_TYPE_ENUM => "enum",
+        Il2CppTypeEnum_IL2CPP_TYPE_OBJECT => "object",
+        _ => "other",
+    };
+
+    if byref { format!("{name}&") }
+    else { name.to_owned() }
+}
+
+fn method_signature(method: *const MethodInfo) -> String {
+    let return_type = type_label(il2cpp_method_get_return_type(method));
+    let count = unsafe { (*method).parameters_count } as u32;
+
+    let mut params = String::new();
+    for i in 0..count {
+        if i > 0 {
+            params.push_str(", ");
+        }
+        params.push_str(&type_label(il2cpp_method_get_param(method, i)));
+    }
+
+    format!("{return_type}({params})")
+}
+
+fn field_signature(field: *mut FieldInfo) -> String {
+    let flags = il2cpp_field_get_flags(field);
+    let mut out = String::new();
+
+    if flags & FIELD_ATTRIBUTE_PUBLIC != 0 {
+        out.push_str("public ");
+    }
+    if flags & FIELD_ATTRIBUTE_STATIC != 0 {
+        out.push_str("static ");
+    }
+    // `static readonly` is what a shipped duration constant normally is; a plain
+    // `static` is a variable the game itself assigns.
+    if flags & FIELD_ATTRIBUTE_INIT_ONLY != 0 {
+        out.push_str("readonly ");
+    }
+    if flags & FIELD_ATTRIBUTE_LITERAL != 0 || il2cpp_field_is_literal(field) {
+        out.push_str("const ");
+    }
+
+    out.push_str(&type_label(il2cpp_field_get_type(field)));
+    out
+}
+
+/// Current value of a static primitive field. A class whose static constructor has not
+/// run yet reads back as zero, which is itself the answer to "can I patch this now?".
+fn static_value(field: *mut FieldInfo) -> Option<String> {
+    if il2cpp_field_get_flags(field) & FIELD_ATTRIBUTE_STATIC == 0 {
+        return None;
+    }
+
+    // A `const` has no slot in the static data area, so reading through its FieldInfo
+    // would report unrelated memory as if it were this field's value.
+    if il2cpp_field_get_flags(field) & FIELD_ATTRIBUTE_LITERAL != 0 || il2cpp_field_is_literal(field) {
+        return None;
+    }
+
+    let field_type = il2cpp_field_get_type(field);
+    if field_type.is_null() {
+        return None;
+    }
+
+    match unsafe { (*field_type).type_() } {
+        Il2CppTypeEnum_IL2CPP_TYPE_R4 => {
+            let mut value: f32 = 0.0;
+            il2cpp_field_static_get_value(field, &mut value as *mut f32 as *mut c_void);
+            Some(format!("{value}"))
+        }
+        Il2CppTypeEnum_IL2CPP_TYPE_R8 => {
+            let mut value: f64 = 0.0;
+            il2cpp_field_static_get_value(field, &mut value as *mut f64 as *mut c_void);
+            Some(format!("{value}"))
+        }
+        Il2CppTypeEnum_IL2CPP_TYPE_I4 => {
+            let mut value: i32 = 0;
+            il2cpp_field_static_get_value(field, &mut value as *mut i32 as *mut c_void);
+            Some(format!("{value}"))
+        }
+        Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN => {
+            let mut value: u8 = 0;
+            il2cpp_field_static_get_value(field, &mut value as *mut u8 as *mut c_void);
+            Some(format!("{}", value != 0))
+        }
+        _ => None
+    }
+}
+
+fn field_label(field: *mut FieldInfo) -> String {
+    let value = match static_value(field) {
+        Some(value) => format!(" = {value}"),
+        None => String::new()
+    };
+
+    format!("[{}]{}", field_signature(field), value)
+}
+
 struct Counts {
     classes: usize,
     methods: usize,
@@ -97,7 +235,7 @@ fn dump_full_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, co
         let arity = unsafe { (*method).parameters_count };
         counts.methods += 1;
 
-        if writeln!(w, "  {name}/{arity}").is_err() {
+        if writeln!(w, "  {name}/{arity} -> {}", method_signature(method)).is_err() {
             return false;
         }
     }
@@ -112,7 +250,7 @@ fn dump_full_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, co
         let name = as_string(unsafe { (*field).name }).unwrap_or_default();
         counts.fields += 1;
 
-        if writeln!(w, "  field {name}").is_err() {
+        if writeln!(w, "  field {name} {}", field_label(field)).is_err() {
             return false;
         }
     }
@@ -143,7 +281,7 @@ fn scan_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, counts:
         counts.methods += 1;
 
         let arity = unsafe { (*method).parameters_count };
-        if writeln!(w, "{label}::{name}/{arity}").is_err() {
+        if writeln!(w, "{label}::{name}/{arity} -> {}", method_signature(method)).is_err() {
             return false;
         }
 
@@ -171,7 +309,7 @@ fn scan_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, counts:
         matched = true;
         counts.fields += 1;
 
-        if writeln!(w, "{label}::field {name}").is_err() {
+        if writeln!(w, "{label}::field {name} {}", field_label(field)).is_err() {
             return false;
         }
 
