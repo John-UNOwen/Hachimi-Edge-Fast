@@ -130,6 +130,28 @@ null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics
   `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` and `CountupModifier_getDuration 0.6 -> 0.03`
   prove story and result code did run. See item 13.
 
+### Run 4, partial career, build `6fdaac8` (with the observe only probes), 09:30:18 to 09:35:33, 315.1 s
+
+`hachimi.log` 133 KB / 1026 lines. 215 hook installs, 205 armed in one pass in 0.068 s, 10 `_addr is
+null`, 5 class not found, 2 static rejections, 0 panics, 0 arming failures, 0 `Attempted to get
+invalid hook`. `Frame probe: 15 of 15 observe only probes installed` with no unresolved candidate,
+which also confirms the hardened matcher rejected nothing that used to install: 0 `no matching
+overload`, 0 `is not static`, 0 `passed by reference`.
+
+- 8 wipe calls formed 4 in transition pairs: 1140, 598, 1091, 995 ms, total 3.8 s, which is 1.2% of
+  the session. 3 screen intervals: 73.3 s to 122.7 s, median 95.6 s, total 291.7 s, 92.6%.
+- `ActivateSkipButton` fired 0 times because this run never reached a result screen. `HighSpeedSetting`
+  logged 40 snapshots and 1 write, `story high speed 0 -> 2 ... saved now 2`, plus
+  `training high speed 0 -> 2, read back 2`.
+- Probe totals at the end of the session: `IsHighSpeedMode 34635`, `IsStoryEndFrameOrGrandLiveWaitFrameSkipped 8043`,
+  `SkipMotionFrame 714`, `SkipFrameCount 579`, `get_WaitFrameCountUntilNextBlock 404`,
+  `UpdateTimeScaleByHispeedType 211`, and zero for `SetFrameCountForWaiting`, `get_WaitFrameUntilNextBlock`,
+  `set_WaitFrameCountUntilNextBlock`, `set_WaitFrameUntilNextBlock`, `get_WaitingFrameCount`,
+  `get_TimeScale`, `set_TimeScale`, `IsSkipToTextClip` and `GetWaitFrameUntilNextBlockLocalize`.
+- `SkipFrameCount` carried 76, 182, 313, 448, 583 and 125 frames with both flags 0, and `SkipMotionFrame`
+  received the same frame counts, so the two move together. `IsHighSpeedMode` returned 0 in every
+  logged call. See item 14.
+
 - [x] **A10 `HighSpeedSetting` re-applied the same write at every scene change.** 50 lines read
   `story high speed 1 -> 2 via StoryManager::SaveHighSpeedType, read back 1`. `SaveHighSpeedType`
   moves StoryManager's own saved setting, the `saved story` value did go 1 to 2, but
@@ -148,12 +170,16 @@ null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics
   target on its own rather than leaving the build unarmed. Android keeps arming at create time, so
   the batch is a no-op there. The line to read in the next run is
   `Hooking finished: N hooks armed in one pass, S s`, and S is what has to beat 4.68.
-- [ ] **A13 The scaling direction of `GetNextFrameCount_HighSpeed` is not known yet.** The
+- [~] **A13 The scaling direction of `GetNextFrameCount_HighSpeed` is not known yet.** The
   signature `void(float&, int&)` does not say which half is the wait between story characters and
   which half is the step the timeline advances. The wrapper divides both and never multiplies, so a
   value that turns out to be an index into the game's readonly `_highSpeedFrameCountArray` cannot be
   pushed past the end of it. The first six calls log `frames a -> b, count c -> d (story xN)`. The
   next run has to show whether story screens get shorter before the direction is settled.
+  Runs 3 and 4 produced no such line at all, and the run 4 probes show the live stepping paths are
+  `SkipFrameCount` and `SkipMotionFrame` (item 14), so this method's direction is moot until a session
+  reaches the story high speed text path it belongs to. Item 16 records that the hook cannot yet prove
+  a call it did not scale.
 - [x] **A14 A run did not record the settings it ran with.** `hook::init` now writes one
   `Config snapshot:` line carrying transition, result, story, ui_animation, time_scale, story_tcps,
   choice_delay, target_fps, auto_skip_result, high_speed_settings, hide_now_loading and the physics
@@ -316,7 +342,8 @@ null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics
     `StoryTimelineTextClipData.TYPEWRITER_WAIT_FRAME`, `StoryTimelineController.FADE_TIME_FOR_HIGH_SPEED`,
     `TOUCH_BLOCK_INTERVAL` and `CONTINUOUS_TOUCH_INTERVAL` all logged as compile-time constants in run 2,
     and `resolved 0/61 duration fields` still holds. A13 is the first of those methods.
-13. The frame stepping path this client uses is still unidentified. `GetNextFrameCount_HighSpeed`
+13. [x] The frame stepping path this client uses is now measured. It was unknown because
+    `GetNextFrameCount_HighSpeed`
     and `SetHighSpeedFrameCount` are installed, signature verified, and never called in a 391 s
     career run that reached training turns, races and five result screens. [StoryFrameProbe.rs](src/il2cpp/hook/umamusume/StoryFrameProbe.rs)
     observes fifteen candidates with every argument handed to the original untouched:
@@ -333,7 +360,32 @@ null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics
     debug_mode, logs the first six calls of each probe, prints `Frame probe totals at N s:` every
     20 s while the totals grow, and lists any candidate that never resolved at install time. A probe
     that never appears is itself the answer, and A13 can only be pointed in a direction once those
-    totals exist.
+    totals exist. Run 4 below supplies them.
+14. [x] The stepping answer from the run 4 totals. `SkipFrameCount(int, bool, bool)` and
+    `SkipMotionFrame(int)` are the paths this client actually uses for story and career text, 579 and
+    714 calls, receiving the same frame values, and `UpdateTimeScaleByHispeedType` ran 211 times. The
+    wait frame properties are read 404 times and never written: both setters are 0,
+    `get_WaitFrameUntilNextBlock` and `get_WaitingFrameCount` are 0. The static `get_TimeScale` and
+    `set_TimeScale` pair is 0 even though `UpdateTimeScaleByHispeedType` ran, so the story scale lives
+    in instance state and not in that static property. `IsHighSpeedMode` was called 34635 times and
+    returned 0 in every logged call, `IsSkipToTextClip` and
+    `StoryTimelineTextClipData::GetWaitFrameUntilNextBlockLocalize` were never called at all. The 512
+    chunk cadence is too fine for a predicate called about 110 times a second and produced 66 of the
+    1026 lines, so hot probes want a 4096 cadence.
+15. Two candidate levers follow from item 14, neither attempted yet.
+    - `StoryTimelineController::SetHighSpeedType/1 -> static void(struct HighSpeedType:4B)` is the
+      game's own switch for its fast story path. `IsHighSpeedMode` returning 0 through a whole career
+      session says that path is not engaged even though the saved high speed setting is 2, and the two
+      counters that gate on it are the busiest thing in the log. Engaging it is a game owned setting
+      change in the same shape as `HighSpeedSetting`, and a 4 byte struct parameter is confirmed to
+      travel in a general register (A5).
+    - Scaling the `SkipFrameCount` and `SkipMotionFrame` frame arguments is the direct lever. Both are
+      single int arguments rather than read-modify-write state, but C23 (story block length
+      recomputation) has to be settled before multiplying a skip request.
+16. `GetNextFrameCount_HighSpeed` is still not proven uncalled, and the ledger should not paper over
+    that. Its detour only logs when scaling changes the value, so a call whose scaled value came out
+    identical would be invisible, and the probe set has no plain counter for it or for
+    `SetHighSpeedFrameCount`. Two extra counters cost nothing and would close the question.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
