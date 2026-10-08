@@ -29,16 +29,17 @@ and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
   around: `SingleModeResultContentBase.rs` resolves its three fades through
   `AnimationSpeed::resolve_method` with an explicit parameter type list, and those hooks fired 16
   times in the 07:53 run. The coarse matcher itself is still in place for every other caller.
-- [ ] **A3 Static helpers are currently not hooked.** The new static guard rejected two targets:
+- [~] **A3 Static helpers are hooked for measurement, not for scaling.** The new static guard
+  rejected two targets:
   `StoryTimelineController::GetTimeScaleByHighSpeedType/1 -> static float(bool)` and
   `GetTimeScaleHighSpeed/1 -> static float(bool)`. The guard prevented a wrapper that reserves a
   register for `this` from reading the `bool` from the wrong register. `StoryViewController::GetTimeScaleByHighSpeedType/0 -> static float()` confirms the existing
-  no-`this` wrapper in `StoryViewController.rs` is correct. Fix: add argument-only wrappers for
-  static targets. The matcher half is done: `AnimationSpeed::resolve_static_method` now matches the
-  dumped parameter types and return type and *requires* the static flag, and four probes in
-  `StoryFrameProbe.rs` are installed through it. What remains is rewriting these two as argument-only
-  wrappers, which is the cheapest remaining story scale lever because both return the scale the story
-  timeline then multiplies `deltaTime` by.
+  no-`this` wrapper in `StoryViewController.rs` is correct. Done in `781e3e1`: both resolve through
+  `resolve_static_method` behind argument only wrappers and log the value the game returns for each
+  flag, six calls then one line every 4096. What is still open is whether the game calls them at all
+  and what they return, which the next run has to answer before a factor is put on them. They remain
+  the cheapest remaining story scale lever because both return the scale the story timeline then
+  multiplies `deltaTime` by.
 - [ ] **A4 Only 2 of 13 installed scaling points were reached.** Fired:
   `CountupModifier_getDuration 0.16 -> 0.008` and
   `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5`. Installed with no call in this session:
@@ -172,6 +173,52 @@ carried `story_high_speed true`, and the config file still holds `story_skip_fra
   logs a reason, and the config mirror logs the one line that proves the option reached that layer.
 - Recovery on the user side was to lower the value and change story speed, which re-ran the apply
   path.
+
+### Run 6, career story with the skip extension removed, build `3565b49`, 12:32:51 to 12:35:19, 148 s
+
+`hachimi.log` 109 KB / 908 lines. 187 hooks armed in one pass in 0.052 s, `13 of 13 observe only
+probes installed`, 10 `_addr is null`, 5 class not found, 2 static rejections (A3), 0 panics. The
+snapshot carried `story_high_speed true` and no skip scale at all.
+
+- Story advanced normally. `get_WaitFrameCountUntilNextBlock` read 4, 12, 44, 72, 84, 116, 148
+  across the 20 s reports and `UpdateTimeScaleByHispeedType` read 0, 39, 77, 81, 93, 109. No
+  plateau and no spin, so removing the extension cleared the run 5 stall.
+- The skip paths read as the game's own values and carry the same number on both sides: 124, 189,
+  289, 502, 597, 693 in six pairs inside 30 ms. They fire in a burst when the timeline jumps
+  blocks, not on a steady cadence, which is what made the 10 s activity window miss.
+- The game's story high speed mode was off for the whole session: `IsHighSpeedMode` polled 19737
+  times, about 133 a second, and returned 0 in all six samples; `IsStoryEndFrameOrGrandLiveWaitFrameSkipped`
+  returned false in all six of its samples across 6086 calls; `get_WaitFrameCountUntilNextBlock`
+  returned 1 every time it was sampled.
+- The engagement still wrote nothing, and its six diagnostic lines were all spent at 12:32:52, six
+  seconds after install in the menu phase, so the attempt that mattered printed nothing and the run
+  cannot say which exit it took. Fixed with one log slot per reason plus an attempt line that
+  carries the max value, the mode read and the predicate result, and the activity window widened
+  from 10 s to 300 s.
+- This client's dump (27 657 lines) carries the game's whole auto high speed subsystem, which is a
+  better door into the mode than writing the timeline static by hand: `StoryManager::
+  ChangeAutoHighSpeedSettingAndSave/1`, `ChangeSavedAutoHighSpeedSetting/0`,
+  `ResetSavedAutoHighSpeedSetting/0`, `StoryManager::get_IsHighSpeedMode/0 -> static bool()`,
+  `StoryViewController::LoadAutoHighSpeedSetting/0`, `SwitchAutoHighSpeedSetting/0`,
+  `UpdateAutoHighSpeedSettings/1 -> void(bool)`, `ApplyAutoHighSpeedSettings/0`,
+  `PauseAutoHighSpeedSettings/0`, `ResumeAutoHighSpeedSettings/0`, and `StorySceneController::
+  ApplyAutoHighSpeedSettingsToAllCharacters/1 -> void(bool)` plus
+  `ApplyAutoHighSpeedSettingsToModel/2 -> static void(class<EventTimelineModelController>, bool)`.
+- The two A3 rejections are these `StoryTimelineController` statics, and the dump confirms their
+  shape: `GetTimeScaleByHighSpeedType/1 -> static float(bool)` and
+  `GetTimeScaleHighSpeed/1 -> static float(bool)`, a bool rather than the enum, which is why the
+  instance style wrapper kept being refused. Around them:
+  `field <TimeScale>k__BackingField [static float] = 0`, `get_TimeScale/0 -> static float()`,
+  `set_TimeScale/1 -> static void(float)`, `get_TimeScaleEventWipe`, `get_TimeScaleAfterEndStory`,
+  `UpdateTimeScaleByHispeedType/0 -> void()`. High speed mode is a first class feature with its own
+  fade and audio handling: `field FADE_TIME_FOR_HIGH_SPEED [public static const float]`,
+  `SetBgmClipEnabledOnSwitchHighSpeedMode/0`, `ForceStopBgmOnHighSpeed/0`.
+- Waiting and skip paths the ledger has not used yet, recorded here so the next search starts from
+  the dump rather than from guesses: `GotoBlockForSkip/2 -> void(int, bool)`,
+  `IsSkipOrBlockByWipe/1 -> bool(class<StoryTimelineBlockData>)`,
+  `NeedsCheckForWaiting/1 -> bool(int)`, `StopWaiting/0`, `StartWaitingForUserInput/1`,
+  `WaitInput/3`, `CheckGotoNextAndWaitInput/4 -> void(bool&, bool&, class<StoryTimelineTextClipData&>&, bool&)`,
+  `field _frameCountForWaiting [int]`, `field <IsWaiting>k__BackingField [bool]`.
 
 - [x] **A10 `HighSpeedSetting` re-applied the same write at every scene change.** 50 lines read
   `story high speed 1 -> 2 via StoryManager::SaveHighSpeedType, read back 1`. `SaveHighSpeedType`
@@ -437,11 +484,30 @@ carried `story_high_speed true`, and the config file still holds `story_skip_fra
     which raised it a second time. See C34 and the run 5 block. `SkipFrameCount` and `SkipMotionFrame`
     stay hooked as counters that log the frame value they carry and pass every argument through
     untouched.
-19. The probe set is 13 candidates now: `SkipFrameCount` and `SkipMotionFrame` moved from observation
-    to real hooks, and the summary cadence went from 512 to 4096 after `IsHighSpeedMode` wrote 66 of
-    the 1026 lines in run 4 at the old cadence. Run 5 shows the cadence is still too tight for
-    `IsHighSpeedMode`, which wrote 14 chunk lines on its own while the story spun; that path is a
-    symptom reader, not a lever, and it is the first candidate to drop or to sample more sparsely.
+19. The probe set is 13 candidates in the build that produced run 6: `SkipFrameCount` and
+    `SkipMotionFrame` moved from observation to real hooks, and the summary cadence went from 512 to
+    4096 after `IsHighSpeedMode` wrote 66 of the 1026 lines in run 4 at the old cadence. Run 6 shows
+    the cadence is still too tight for `IsHighSpeedMode`, which polled 19737 times in 148 s.
+20. [~] The `IsHighSpeedMode` probe is gone and the set is 12 (`1bef16b`, run 6 evidence, not yet
+    verified by a run). A hook on a path the game polls 133 times a second makes the mod pay a
+    `get_orig_fn!` map lookup on every poll, which is our cost, not the game's. The mode is now read
+    once per report through the guarded wrapper and printed as `story high speed mode 0/1` on the
+    totals line, which answers the same question for a fraction of the calls and of the log.
+21. [~] A3 is closed for the two story time scale helpers (`781e3e1`):
+    `GetTimeScaleByHighSpeedType/1` and `GetTimeScaleHighSpeed/1` are static and take a bool, so they
+    are now resolved with `resolve_static_method` behind argument only wrappers, and they are
+    installed as measurement. Each logs `Story scale <name>(flag) call N -> value` for its first six
+    calls and then every 4096. Nothing is scaled yet. The next run answers the two questions that have
+    to be answered first: whether the game calls them at all (they may be inlined into
+    `UpdateTimeScaleByHispeedType`, which is hooked and ran 109 times), and what the game returns for
+    each flag. Putting a factor on them without those numbers is run 5 all over again.
+22. [ ] The auto high speed subsystem is the better door into the mode than the timeline static. The
+    dump lists the game's own path (`StoryManager::ChangeAutoHighSpeedSettingAndSave`,
+    `StoryViewController::ApplyAutoHighSpeedSettings`, `StorySceneController::
+    ApplyAutoHighSpeedSettingsToModel`, and `StoryManager::get_IsHighSpeedMode` as the state the game
+    itself believes). Driving the mode through the feature the game already implements means the
+    game also runs its own fade and audio handling for high speed, which a raw `SetHighSpeedType`
+    write skips.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
