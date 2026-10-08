@@ -877,6 +877,8 @@ pub struct Config {
     pub cyspring_mono_uncap_frame_scale: bool,
     #[serde(default = "Config::default_ui_animation_scale")]
     pub ui_animation_scale: f32,
+    #[serde(default = "Config::default_time_scale")]
+    pub time_scale: f32,
     #[serde(default)]
     pub trainer_live_landscape: bool,
     #[serde(default)]
@@ -929,6 +931,7 @@ impl Config {
     fn default_story_tcps_multiplier() -> f32 { 3.0 }
     fn default_meta_index_url() -> String { "https://gitlab.com/umatl/hachimi-meta/-/raw/main/meta.json".to_owned() }
     fn default_ui_animation_scale() -> f32 { 1.0 }
+    fn default_time_scale() -> f32 { 1.0 }
     fn default_live_vocals_swap() -> [i32; 6] { [0; 6] }
     fn default_champions_live_resource_id() -> i32 { 15 }
     fn default_champions_live_year() -> i32 { 2025 }

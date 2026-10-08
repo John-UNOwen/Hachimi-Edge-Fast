@@ -30,6 +30,7 @@ pub mod QualitySettings;
 pub mod Screen;
 pub mod SceneManager;
 pub mod Scene;
+pub mod Time;
 
 pub const HideFlags_DontUnloadUnusedAsset: i32 = 32;
 
@@ -63,6 +64,7 @@ pub fn init() {
     Scene::init(image);
     Camera::init(image);
     Screen::init(image);
+    Time::init(image);
 
     #[cfg(target_os = "android")]
     {

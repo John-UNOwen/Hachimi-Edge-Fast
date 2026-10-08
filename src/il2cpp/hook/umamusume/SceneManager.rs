@@ -54,6 +54,10 @@ fn ChangeViewCommon(next_view_id: i32) {
         }
     }
     debug!("next_view_id = {}", next_view_id);
+
+    // Gallop sets its own Time.timeScale around view changes, and the hook on
+    // set_timeScale only scales what the game writes, so re-assert ours here.
+    crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply();
 }
 
 type ChangeViewJpfn = extern "C" fn(

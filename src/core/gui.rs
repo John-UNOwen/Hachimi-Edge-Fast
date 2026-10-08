@@ -5507,6 +5507,12 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            if should_show_option(search, &t!("config_editor.time_scale")) {
+                ui.label(t!("config_editor.time_scale"));
+                ui.add(egui::Slider::new(&mut config.time_scale, 0.1..=10.0).step_by(0.1));
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.render_scale")) {
                 ui.label(t!("config_editor.render_scale"));
                 ui.add(egui::Slider::new(&mut config.render_scale, 0.1..=10.0).step_by(0.1));
@@ -6827,6 +6833,7 @@ fn save_and_reload_config(config: hachimi::Config) {
                     free_camera::reload_runtime_config();
                 }
             }
+            crate::il2cpp::hook::UnityEngine_CoreModule::Time::mark_dirty();
             t!("notification.config_saved").into_owned()
         },
         Err(e) => e.to_string()

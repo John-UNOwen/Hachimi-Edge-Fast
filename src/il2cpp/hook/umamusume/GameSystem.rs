@@ -43,6 +43,7 @@ fn apply_free_camera_live_pause_request() {
 extern "C" fn GameSystem_Update(this: *mut Il2CppObject) {
     crate::core::gui::race_slider_drain();
     Hachimi::instance().drain_skill_data_desc_rebuild();
+    crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply_if_dirty();
 
     #[cfg(target_os = "windows")]
     {
@@ -91,6 +92,8 @@ pub fn on_game_initialized() {
     Hachimi::instance().init_skill_info();
     Hachimi::instance().init_skill_data_desc();
     init_game_opts();
+
+    crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply();
 
     #[cfg(target_os = "android")]
     crate::android::utils::set_audio_capture_policy_all();
