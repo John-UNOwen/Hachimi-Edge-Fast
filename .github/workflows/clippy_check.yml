@@ -1,4 +1,4 @@
-name: Clippy Check
+name: Clippy Check And Unit Tests
 
 on:
   push:
@@ -83,4 +83,42 @@ jobs:
 
       - name: Run Clippy (Android)
         if: steps.filter.outputs.code_changed == 'true' && matrix.target == 'aarch64-linux-android'
-        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+        # --all-targets: the android only modules and their #[cfg(test)] modules are behind
+        # cfg(target_os = "android"), so this is the only job that lints them at all (C42).
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+
+  # The hook tests in `src/il2cpp/hook/**/tests` are what the ledger cites as verification for
+  # C33 to C40, and nothing ran them: clippy compiling a `#[cfg(test)]` module is not running it.
+  # They are host tests, the crate only builds for Windows and Android, so they run on a Windows
+  # runner instead of cross compiling like the clippy jobs above.
+  unit_tests:
+    name: Unit tests (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check path changes
+        uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            code_changed:
+              - 'src/**'
+              - 'assets/locales/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+
+      - name: Install Rust
+        if: steps.filter.outputs.code_changed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.filter.outputs.code_changed == 'true'
+        with:
+          prefix-key: test
+
+      - name: Run unit tests
+        if: steps.filter.outputs.code_changed == 'true'
+        run: cargo test --lib
