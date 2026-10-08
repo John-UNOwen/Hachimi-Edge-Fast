@@ -18,6 +18,10 @@ use crate::{
 //
 // A 4 byte enum is returned in EAX and passed in ECX, so a plain i32 wrapper is correct for all
 // of them. StoryManager's are static and take no hidden `this`.
+//
+// The loader's own story setter is listed above but not wrapped: a run showed
+// SaveHighSpeedType moving StoryManager's saved setting while the loader getter kept reporting
+// the value last written to disk, so StoryManager is the path that actually changes behaviour.
 static mut GET_MAX_HIGH_SPEED_TYPE_ADDR: usize = 0;
 impl_addr_wrapper_fn!(GetMaxHighSpeedType, GET_MAX_HIGH_SPEED_TYPE_ADDR, i32,);
 
@@ -29,9 +33,6 @@ impl_addr_wrapper_fn!(SaveHighSpeedType, SAVE_HIGH_SPEED_TYPE_ADDR, (), value: i
 
 static mut GET_STORY_HIGH_SPEED_ADDR: usize = 0;
 impl_addr_wrapper_fn!(get_StoryHighSpeedType, GET_STORY_HIGH_SPEED_ADDR, i32, this: *mut Il2CppObject);
-
-static mut SET_STORY_HIGH_SPEED_ADDR: usize = 0;
-impl_addr_wrapper_fn!(set_StoryHighSpeedType, SET_STORY_HIGH_SPEED_ADDR, (), this: *mut Il2CppObject, value: i32);
 
 static mut GET_TRAINING_HIGH_SPEED_ADDR: usize = 0;
 impl_addr_wrapper_fn!(get_TrainingHighSpeedType, GET_TRAINING_HIGH_SPEED_ADDR, i32, this: *mut Il2CppObject);
@@ -49,7 +50,6 @@ pub fn init(umamusume: *const Il2CppImage) {
         SAVE_HIGH_SPEED_TYPE_ADDR = get_method_addr(StoryManager, c"SaveHighSpeedType", 1);
 
         GET_STORY_HIGH_SPEED_ADDR = get_method_addr(ApplicationSettingSaveLoader, c"get_StoryHighSpeedType", 0);
-        SET_STORY_HIGH_SPEED_ADDR = get_method_addr(ApplicationSettingSaveLoader, c"set_StoryHighSpeedType", 1);
         GET_TRAINING_HIGH_SPEED_ADDR = get_method_addr(ApplicationSettingSaveLoader, c"get_TrainingHighSpeedType", 0);
         SET_TRAINING_HIGH_SPEED_ADDR = get_method_addr(ApplicationSettingSaveLoader, c"set_TrainingHighSpeedType", 1);
     }
