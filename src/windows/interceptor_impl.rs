@@ -6,9 +6,24 @@ use minhook::MinHook;
 use windows::Win32::System::Memory::{VirtualProtect, PAGE_READWRITE};
 
 pub unsafe fn hook(orig_addr: usize, hook_addr: usize) -> Result<usize, Error> {
-    let trampoline_addr = MinHook::create_hook(orig_addr as *mut c_void, hook_addr as *mut c_void)? as usize;
+    let trampoline_addr = create_hook(orig_addr, hook_addr)?;
     MinHook::enable_hook(orig_addr as *mut c_void)?;
     Ok(trampoline_addr)
+}
+
+// MinHook splits installing a detour from arming it: MH_CreateHook builds the trampoline and
+// MH_EnableHook writes the jump into the target. Arming costs about 24 ms per target in the
+// run log, so creating everything first and arming in one pass is the cheaper order.
+pub unsafe fn create_hook(orig_addr: usize, hook_addr: usize) -> Result<usize, Error> {
+    Ok(MinHook::create_hook(orig_addr as *mut c_void, hook_addr as *mut c_void)? as usize)
+}
+
+pub unsafe fn enable_hook(orig_addr: usize) -> Result<(), Error> {
+    Ok(MinHook::enable_hook(orig_addr as *mut c_void)?)
+}
+
+pub unsafe fn enable_all_hooks() -> Result<(), Error> {
+    Ok(MinHook::enable_all_hooks()?)
 }
 
 impl From<minhook::MH_STATUS> for Error {

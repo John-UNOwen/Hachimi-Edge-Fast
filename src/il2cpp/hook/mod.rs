@@ -241,6 +241,36 @@ mod Cute_Core_Assembly;
 pub fn init() {
     info!("Initializing il2cpp hooks");
 
+    // One line naming every knob that changes timing. The mod rewrites config.json on
+    // exit, so a run has to carry the values it actually ran with or the log cannot be
+    // read against the settings.
+    {
+        let config = crate::core::Hachimi::instance().config.load();
+
+        info!(
+            "Config snapshot: transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {} auto_skip_result {} high_speed_settings {} hide_now_loading {} physics {:?}",
+            config.transition_speed,
+            config.result_screen_speed,
+            config.story_speed,
+            config.ui_animation_scale,
+            config.time_scale,
+            config.story_tcps_multiplier,
+            config.story_choice_auto_select_delay,
+            config.target_fps.unwrap_or(-1),
+            config.auto_skip_result_screens,
+            config.high_speed_settings,
+            config.hide_now_loading,
+            config.physics_update_mode
+        );
+    }
+
+    // Arming one hook at a time measured 24 ms per hook in the run log, which was most of
+    // the gap between these two lines. No module below calls through a hook it installs, so
+    // everything can be created first and armed in a single pass at the end.
+    let interceptor = &crate::core::Hachimi::instance().interceptor;
+    interceptor.begin_batch();
+    let hooking_started = std::time::Instant::now();
+
     // C# / .NET
     mscorlib::init();
 
@@ -273,7 +303,12 @@ pub fn init() {
     #[cfg(target_os = "android")]
     Cute_Core_Assembly::init();
 
-    info!("Hooking finished");
+    let armed = interceptor.finish_batch();
+    info!(
+        "Hooking finished: {} hooks armed in one pass, {:.3} s",
+        armed,
+        hooking_started.elapsed().as_secs_f32()
+    );
 
     // debug_mode only: writes the game's own method and field names to
     // <data dir>/introspect.log so hooks can be aimed at real names.

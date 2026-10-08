@@ -1,4 +1,4 @@
-use std::{collections::hash_map, sync::Mutex};
+use std::{collections::hash_map, sync::{atomic::{AtomicBool, Ordering}, Mutex}};
 
 use fnv::FnvHashMap;
 
@@ -8,7 +8,10 @@ use super::Error;
 
 #[derive(Default)]
 pub struct Interceptor {
-    hook_map: Mutex<FnvHashMap<usize, HookHandle>>
+    hook_map: Mutex<FnvHashMap<usize, HookHandle>>,
+    // Targets created while arming was batched, armed together by finish_batch.
+    queued: Mutex<Vec<usize>>,
+    batching: AtomicBool
 }
 
 pub struct HookHandle {
@@ -33,10 +36,24 @@ pub enum HookType {
 
 impl Interceptor {
     pub fn hook(&self, orig_addr: usize, hook_addr: usize) -> Result<usize, Error> {
+        let batched = self.batching.load(Ordering::Acquire);
+
         match self.hook_map.lock().unwrap().entry(hook_addr) {
             hash_map::Entry::Occupied(e) => Ok(e.get().trampoline_addr),
             hash_map::Entry::Vacant(e) => {
-                let trampoline_addr = unsafe { interceptor_impl::hook(orig_addr, hook_addr)? };
+                let trampoline_addr = unsafe {
+                    if batched {
+                        interceptor_impl::create_hook(orig_addr, hook_addr)?
+                    }
+                    else {
+                        interceptor_impl::hook(orig_addr, hook_addr)?
+                    }
+                };
+
+                if batched {
+                    self.queued.lock().unwrap().push(orig_addr);
+                }
+
                 e.insert(
                     HookHandle {
                         orig_addr,
@@ -47,6 +64,38 @@ impl Interceptor {
                 Ok(trampoline_addr)
             },
         }
+    }
+
+    // Arm everything created between this and finish_batch in one backend call instead of
+    // one per hook. Only safe where nothing calls through a trampoline in the meantime: the
+    // trampoline is built to step over the bytes the detour occupies, and those bytes are
+    // only written when the hook is armed. `il2cpp::hook::init` is the one place that
+    // qualifies, because its macros install and never call.
+    pub fn begin_batch(&self) {
+        self.batching.store(true, Ordering::Release);
+    }
+
+    // Returns how many hooks were armed. A failed batch arms each target on its own rather
+    // than leaving the build unarmed.
+    pub fn finish_batch(&self) -> usize {
+        self.batching.store(false, Ordering::Release);
+
+        let queued = std::mem::take(&mut *self.queued.lock().unwrap());
+        if queued.is_empty() {
+            return 0;
+        }
+
+        if let Err(e) = unsafe { interceptor_impl::enable_all_hooks() } {
+            error!("Batch arming failed: {e}, arming {} hooks one by one", queued.len());
+
+            for orig_addr in &queued {
+                if let Err(e) = unsafe { interceptor_impl::enable_hook(*orig_addr) } {
+                    error!("Failed to arm hook {orig_addr:#016x}: {e}");
+                }
+            }
+        }
+
+        queued.len()
     }
 
     pub fn hook_vtable(&self, vtable: *mut usize, vtable_index: usize, hook_addr: usize) -> Result<usize, Error> {

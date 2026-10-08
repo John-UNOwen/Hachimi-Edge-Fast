@@ -6,6 +6,20 @@ pub unsafe fn hook(orig_addr: usize, hook_addr: usize) -> Result<usize, Error> {
     Ok(dobby_rs::hook(orig_addr as *mut c_void, hook_addr as *mut c_void)? as usize)
 }
 
+// Dobby installs and arms in one call, so the batched arming path is a no-op here and the
+// caller keeps one code path for both platforms.
+pub unsafe fn create_hook(orig_addr: usize, hook_addr: usize) -> Result<usize, Error> {
+    hook(orig_addr, hook_addr)
+}
+
+pub unsafe fn enable_hook(_orig_addr: usize) -> Result<(), Error> {
+    Ok(())
+}
+
+pub unsafe fn enable_all_hooks() -> Result<(), Error> {
+    Ok(())
+}
+
 impl From<dobby_rs::DobbyHookError> for Error {
     fn from(e: dobby_rs::DobbyHookError) -> Self {
         Error::HookingError(e.to_string())
