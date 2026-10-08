@@ -395,6 +395,57 @@ is not static`, same as run 7), 0 panics. `introspect.log` written again, 1,941,
   It is our cost, it is avoidable at launch, and it is the largest single thing the mod writes per start.
   Not measured as a duration yet: the log has no timestamp pair around the dump.
 
+## A19 to A21, the training screen research (2026-10-08)
+
+Sources: a token index built from `UmamusumePrettyDerby_Data\il2cpp_data\Metadata\global-metadata.dat`
+(281,297 unique identifiers, written to `hachimi-global-recon\pc_metadata_tokens.txt`) and the mod's own
+`introspect.log` dump. Line numbers below are in `hachimi\introspect.log`.
+
+- [ ] **A19 The forced training animation is the game's own cut-in ("Cutt") subsystem, and it is a
+  timeline of motions, not a duration field.** The names are `TrainingCuttController` with scenario
+  variants `SingleModeMainTrainingCuttController`, `TrainingCuttLiveController`,
+  `TrainingCuttVenusController`, `TrainingCuttTeamRaceController`, `TimelineTrainingCuttController`, and for
+  the friendship case `TagTraining`, `TagTrainingCutInPlayer`, `SingleModeMainViewTagTrainingCutInPlayer`,
+  `LiveBonusTagTraining`, `IsTagTraining`, `IsTagTrainingGroupSupportCard`, `SetupTagTrainingEffect`. The
+  animation is assembled from paths: `TrainingCutInCuttPath`, `TrainingCutInBodyMotionPath`,
+  `TrainingCutInCameraMotionPath`, `TrainingCutInFacialMotionPath`, `TrainingCutInPositionMotionPath`,
+  `TrainingCutInEarMotionPath` (dump L22849-22854) and `GetTrainingCutInCuttPath/6`,
+  `GetTrainingCutInMotionSuffix/2`, `GetTrainingCutInBgPrefabPath/4` from the resource path class (dump
+  L20323-20331). Prefab names in the string literals: `pf_fl_singlemode_tagtraining_cutin00`,
+  `pfb_uieff_single_tagtraining_line_effect_00`, `pfb_uieff_single_start_tagtraining_particle_00`.
+- [ ] **A20 The game already has skip and speed doors for it, in its own code.** Signatures read off the
+  dump, verbatim:
+  `Gallop.SingleModeTrainingCutInHelper::SkipRuntime/0 -> void()` (L26839),
+  `Gallop.SingleModeTrainingCutInHelper::GetTargetSpeed/0 -> float()` (L26840),
+  `Gallop.SingleModeTrainingCutInHelper::IsHighSpeedMode/0 -> static bool()` (L26841),
+  `Gallop.SingleModeTrainingCutHelperExtension.ContextExtension::SkipRuntimeAll/1 -> static void(IList<SingleModeTrainingCutInHelper>)`
+  (L26933), `::FixedUpdateForHighSpeed/1` and `/2 -> static void(IList<...>, float)` (L26934-26935),
+  `::SetTimeAll/2 -> static void(IList<...>, float)` (L26936), `::SkipPause/1` (L26937),
+  `::GetCurrentTime/1 -> static float(IEnumerable<...>)` (L26938),
+  `Gallop.SingleModeUtils::GetTrainingCutTimeScale/1 -> static float(float)` and
+  `Gallop.SingleModeUtils::GetCutTimeScale/0 -> static float()` and
+  `Gallop.SingleModeUtils::GetHighSpeedPlayDuration/0 -> static float()` (L25950-25952),
+  `Gallop.CutIn.CutInBgModel::set_PlaySpeed/1 -> void(float)` and `::SetTime/1 -> void(float)`
+  (L26939-26941), `Gallop.TimelineTrainingCuttController::field DelayTime [public float]` (L26924),
+  `Gallop.StoryTimelineTrainingCuttClipData::field DelayFrame [public int]` (L26903). The cut-in helper
+  family uses the same shape elsewhere: `Gallop.TeamBuildingEndingCutInHelper::SkipFrame/0 -> void()` and
+  `::IsRunningSkip/0 -> bool()` (L26835-26836), and the cut-in event params include
+  `CuttEventParam_JumpFrame`, `CuttEventParam_SetTapJumpFrame`, `CuttEventParam_OnTapNextFrame`.
+  `Gallop.SingleModeMainTrainingCuttController::field _isPlayedFixedUpdateForHighSpeed [bool]` (L25508) and
+  `::WaitTapAsync/0 -> IEnumerator` (L25500) say the cut-in has a high speed path already and that part of
+  it waits for a tap.
+- [ ] **A21 The mod currently changes nothing on the training screen.** Four of the field specs in
+  `AnimationSpeed.rs:80-84` (`TrainingParamChangeA2U.ANIMATION_TIME_HIGH_SPEED`,
+  `TrainingParamChangePlate.TYPEWRITE_DURATION`, `TrainingParamChangePlate.NEXT_WAIT_DURATION`,
+  `SingleModeMainTrainingCuttController.FLASH_LABEL_SPEED_UP_SUCCESS_IN` and
+  `FLASH_LABEL_SPEED_UP_FAILURE_IN`) are refused as compile-time constants, and the one story-side attempt
+  `StoryTimelineTrainingCuttClipData.DelayFrame` is refused as "is not static" (run 7 and run 8 log lines)
+  because the dump says it is `public int`, an instance field. The three installed hooks
+  (`TrainingFooter_GetCloseAnimWaitTime`, `TrainingCuttClip_getDelayTime`,
+  `SingleModeMainViewTrainingFooter.GetItemAnimDuration`) and `SingleModeUtils_GetCutTimeScale` printed
+  install lines in run 8 and no call line for the whole career. `StoryTimelineTrainingCuttClipData.DelayFrame`
+  is therefore a getter-or-instance-field target, not a static write.
+
 ## B. Open items from the animation feature review
 
 - [x] duplicate detour on `StoryViewController::GetTimeScaleByHighSpeedType` removed
@@ -1313,6 +1364,28 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
 33. [ ] `SingleModeConfirmComplete` and `SingleModeResult` together are 26 s of a 362 s career. The auto skip
     path covers the result tween chains and printed nothing for the confirm screen. Read what the confirm
     screen spends its 13.4 s on in `hachimi.log` before writing a hook there.
+
+34. [ ] Measure the training cut-in before scaling anything in it. Run 8 recorded 104.7 s on
+    `SingleModeMainView` and 39.7 s on the paddock, but it proved nothing about the cut-in: none of the
+    installed training hooks printed a call line, and the log cannot say whether a friendship training even
+    happened. A probe in the shape of `StoryFrameProbe` is what closes this: first-hit and totals for
+    `IsTagTraining`, `PlayTrainingCutt`, `OnStartTrainingCutt`, `OnStopTrainingCutt`, `SkipRuntime`,
+    `GetTargetSpeed`, `SingleModeTrainingCutInHelper.IsHighSpeedMode`, and the three `SingleModeUtils`
+    getters in A20, plus the wall clock between the start and stop lines. Run 5 is the warning this item
+    exists for.
+35. [ ] The classes that matter are not in the dump yet. `CLASS_FILTERS` in
+    [src/il2cpp/introspect.rs](src/il2cpp/introspect.rs) has no match for `trainingcutt`, `tagtraining`,
+    `trainingcutin` or `cuttcontroller`, so `TrainingCuttController`, `SingleModeTrainingCutInHelper` and
+    `SingleModeMainViewTagTrainingCutInPlayer` appear only as name fragments in the metadata token index,
+    with no signature. Adding those filters is the cheap way to get the real parameter lists.
+36. [ ] Pick the door with the measurement in hand. The game offers two shapes: its own skip
+    (`SingleModeTrainingCutInHelper.SkipRuntime/0`, `ContextExtension.SkipRuntimeAll/1`,
+    `ContextExtension.SkipPause/1`) which removes the animation, and its own rate
+    (`GetTargetSpeed/0`, `SingleModeUtils.GetTrainingCutTimeScale/1`, `CutInBgModel.set_PlaySpeed/1`,
+    `ContextExtension.SetTimeAll/2`) which shortens it. The AGENTS section 5 getter rule applies to
+    `GetTargetSpeed`: check for a matching setter or a backing field before scaling a getter. Skipping
+    outright also has to answer what happens to the flash labels that report the training result
+    (`FLASH_LABEL_SPEED_UP_SUCCESS_IN`, `FLASH_LABEL_SPEED_UP_FAILURE_IN`) and to `WaitTapAsync`.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
