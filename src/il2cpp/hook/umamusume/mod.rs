@@ -89,6 +89,7 @@ pub mod AnimationSpeed;
 pub mod SingleModeResultContentBase;
 mod StoryFrameProbe;
 mod TrainingCuttProbe;
+mod StoryEventProbe;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -377,4 +378,8 @@ pub fn init() {
     // Also diagnostic only: the same shape of measurement for the training screen's cut-in, so a
     // friendship training animation has a number in front of any decision to speed it up.
     TrainingCuttProbe::init(image);
+
+    // And for the cut-in a story or story event screen drops into its text, which runs through
+    // `CutInHelper` and the static extension doors rather than the training cut controller.
+    StoryEventProbe::init(image);
 }
