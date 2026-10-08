@@ -87,6 +87,7 @@ pub mod PartsCharaMessageBase;
 pub mod SceneManager;
 pub mod AnimationSpeed;
 pub mod SingleModeResultContentBase;
+mod StoryFrameProbe;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -366,4 +367,9 @@ pub fn init() {
     // metadata, and every module above may still be filling in class lookups.
     AnimationSpeed::init(image);
     SingleModeResultContentBase::init(image);
+
+    // Diagnostic only, and only when debug_mode is on: records which frame stepping paths this
+    // client really calls. It has to run after the scaling modules so it observes the same class
+    // lookups they resolved.
+    StoryFrameProbe::init(image);
 }

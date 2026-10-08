@@ -105,6 +105,27 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
   `PlayOutNowLoading`, `SetupLoadingTips`, `getTimeScaleEventWipe`, `SetHighSpeedFrameCount` and
   `ActivateSkipButton` still appear only as install lines, never as calls.
 
+### Run 3, career run, build `6333285` (merged upstream v0.32.0), 08:29:44 to 08:36:15, 391.5 s
+
+`hachimi.log` 105 KB / 909 lines. 200 hook installs, 190 armed in one pass in 0.067 s, 10 `_addr is
+null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics, 0 arming failures.
+`time_scale` was 2 in this run, and the config snapshot recorded it.
+
+- 22 wipe calls formed 11 in transition pairs: gaps in ms 1056, 810, 1149, 937, 2374, 181, 966,
+  1012, 246, 1009, 927. min 181 ms, median 966 ms, max 2374 ms, total 10.7 s, which is 2.7% of the
+  session. Every call carried 0.3 s raw and every call had its counterpart.
+- 10 screen intervals: min 1.4 s, median 27.0 s, mean 37.4 s, max 115.1 s, total 373.7 s, which is
+  95% of the session. Three runs now agree that the wipe path is nearly exhausted and what is left
+  is time spent on screens.
+- `ActivateSkipButton (auto_skip_result_screens true)` fired 5 times with zero
+  `SkipFadeInTween unavailable`, so the automatic result screen skip is confirmed end to end. 15
+  `FadeInContentFromRight` calls carried 0.03, 0.033, 0.06, 0.066, 0.09, 0.099, 0.12 and 0.15 s raw.
+- `HighSpeedSetting` logged 73 read snapshots and exactly one write, `story high speed 0 -> 2 ...
+  saved now 2`, plus `training high speed 0 -> 2, read back 2`. A10 stays closed.
+- `GetNextFrameCount_HighSpeed` and `SetHighSpeedFrameCount` were installed and never called, while
+  `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` and `CountupModifier_getDuration 0.6 -> 0.03`
+  prove story and result code did run. See item 13.
+
 - [x] **A10 `HighSpeedSetting` re-applied the same write at every scene change.** 50 lines read
   `story high speed 1 -> 2 via StoryManager::SaveHighSpeedType, read back 1`. `SaveHighSpeedType`
   moves StoryManager's own saved setting, the `saved story` value did go 1 to 2, but
@@ -278,6 +299,19 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
     `StoryTimelineTextClipData.TYPEWRITER_WAIT_FRAME`, `StoryTimelineController.FADE_TIME_FOR_HIGH_SPEED`,
     `TOUCH_BLOCK_INTERVAL` and `CONTINUOUS_TOUCH_INTERVAL` all logged as compile-time constants in run 2,
     and `resolved 0/61 duration fields` still holds. A13 is the first of those methods.
+13. The frame stepping path this client uses is still unidentified. `GetNextFrameCount_HighSpeed`
+    and `SetHighSpeedFrameCount` are installed, signature verified, and never called in a 391 s
+    career run that reached training turns, races and five result screens. [StoryFrameProbe.rs](src/il2cpp/hook/umamusume/StoryFrameProbe.rs)
+    now observes eleven candidates (`SkipFrameCount`, `SetFrameCountForWaiting`,
+    `get_WaitFrameCountUntilNextBlock`, `get_WaitFrameUntilNextBlock`, `get_WaitingFrameCount`,
+    `UpdateTimeScaleByHispeedType`, `SkipMotionFrame`, `IsSkipToTextClip`, `IsHighSpeedMode`,
+    `IsStoryEndFrameOrGrandLiveWaitFrameSkipped` and `StoryTimelineTextClipData::GetWaitFrameUntilNextBlockLocalize`)
+    with every argument handed to the original untouched. Instance candidates are resolved through
+    the same parameter and return type check the scaling hooks use, static ones are matched by arity
+    and then confirmed static. It installs only under debug_mode, logs the first six calls of each
+    probe, and prints `Frame probe totals at N s:` every 20 s while the totals grow. A probe that
+    never appears is itself the answer, and A13 can only be pointed in a direction once those totals
+    exist.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
