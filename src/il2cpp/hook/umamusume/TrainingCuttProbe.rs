@@ -1,13 +1,13 @@
 use std::ffi::CString;
 use std::fmt::Write as _;
-use std::sync::atomic::{self, AtomicI64, AtomicU32, AtomicUsize};
+use std::sync::atomic::{self, AtomicI32, AtomicI64, AtomicU32, AtomicUsize};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::{
     core::Hachimi,
     il2cpp::{
-        hook::umamusume::AnimationSpeed,
+        hook::umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager},
         symbols::get_class,
         types::*,
     },
@@ -198,7 +198,68 @@ static PROBES: [&CutProbe; 19] = [
 // One cut-in run, opened by `ResetCurrentTime` and closed by the next one. The wall clock between the
 // two is what the player waits, and the peak of `get_CurrentTime` reached inside it is how long the
 // cut's own timeline ran, which is the number a rate hook has to shorten.
+// Which part of the game a cut run started in. `ResetCurrentTime` fires for every cut-in the client
+// plays, a race skill cut-in and a gacha reveal included, so an unattributed run count cannot tell a
+// training animation from any other one. A regular training turn and a friendship training turn both
+// run through the same training cut-in classes (A19), so separating those two needs the
+// `TagTrainingCutInPlayer` signatures the next dump has to provide. What this can separate today is
+// the screen, and that is what makes the number readable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ViewBucket { Training, Story, Gacha, Race, Other }
+
+const BUCKET_COUNT: usize = 5;
+const BUCKET_NAMES: [&str; BUCKET_COUNT] = ["training screen", "story", "gacha", "race scene", "other"];
+
+// Read from the game's own `ViewId` so a game update that moves a number shows up here as a compile
+// error rather than as a silent mislabel.
+const VIEW_TRAINING: [i32; 5] = [
+    ViewId::SingleModeMonthStart as i32, ViewId::SingleModeMain as i32, ViewId::SingleModePaddock as i32,
+    ViewId::SingleModeConfirmComplete as i32, ViewId::SingleModeResult as i32,
+];
+const VIEW_STORY: i32 = ViewId::Story as i32;
+const VIEW_GACHA: i32 = ViewId::GachaMain as i32;
+
+fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
+    // The scene check first: a skill cut-in inside a race reaches the same timeline controller this
+    // probe hooks, and it is not a training animation. It reads the scene id `SceneManager::AlterUpdate`
+    // already caches, so it costs no game call.
+    if in_race_scene {
+        return ViewBucket::Race;
+    }
+
+    if VIEW_TRAINING.contains(&view_id) {
+        ViewBucket::Training
+    }
+    else if view_id == VIEW_STORY {
+        ViewBucket::Story
+    }
+    else if view_id == VIEW_GACHA {
+        ViewBucket::Gacha
+    }
+    else {
+        ViewBucket::Other
+    }
+}
+
+// One view read per cut run, not per frame. `GetCurrentViewId` is the method the mod already resolves
+// for other features, and its wrapper refuses an unresolved address instead of jumping to 0 (C1).
+fn current_view_id() -> i32 {
+    let scene_manager = SceneManager::instance();
+
+    if scene_manager.is_null() {
+        return 0;
+    }
+
+    SceneManager::GetCurrentViewId(scene_manager)
+}
+
 static RUN_OPENED_MS: AtomicI64 = AtomicI64::new(-1);
+static RUN_VIEW_ID: AtomicI32 = AtomicI32::new(0);
+static RUN_BUCKET: AtomicUsize = AtomicUsize::new(BUCKET_COUNT - 1);
+static RUN_BUCKET_COUNT: [AtomicUsize; BUCKET_COUNT] = [const { AtomicUsize::new(0) }; BUCKET_COUNT];
+static RUN_BUCKET_VIEW: [AtomicI32; BUCKET_COUNT] = [const { AtomicI32::new(0) }; BUCKET_COUNT];
+static RUN_BUCKET_WALL_MS: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
+static RUN_BUCKET_PEAK_MS: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
 static RUN_PEAK_BITS: AtomicU32 = AtomicU32::new(0);
 static RUNS_CLOSED: AtomicUsize = AtomicUsize::new(0);
 static RUN_WALL_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
@@ -221,6 +282,11 @@ fn open_cut_run() {
         return;
     }
 
+    let view = current_view_id();
+    let bucket = bucket_for(view, SceneManager::is_race_scene_family());
+    let closed_bucket = RUN_BUCKET.swap(bucket as usize, atomic::Ordering::Relaxed);
+    let closed_view = RUN_VIEW_ID.swap(view, atomic::Ordering::Relaxed);
+
     let opened = RUN_OPENED_MS.swap(now, atomic::Ordering::Relaxed);
     let peak = RUN_PEAK_BITS.swap(0, atomic::Ordering::Relaxed);
 
@@ -231,10 +297,18 @@ fn open_cut_run() {
     let run_ms = now - opened;
     let runs = RUNS_CLOSED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
     RUN_WALL_MS_TOTAL.fetch_add(run_ms, atomic::Ordering::Relaxed);
-    RUN_PEAK_MS_TOTAL.fetch_add(peak_milliseconds(peak), atomic::Ordering::Relaxed);
+    let peak_ms = peak_milliseconds(peak);
+    RUN_PEAK_MS_TOTAL.fetch_add(peak_ms, atomic::Ordering::Relaxed);
+
+    // The bucket is the one captured when this run opened, so a cut-in that started in training and
+    // was closed by a cut-in on another screen is still attributed to training.
+    RUN_BUCKET_COUNT[closed_bucket].fetch_add(1, atomic::Ordering::Relaxed);
+    RUN_BUCKET_WALL_MS[closed_bucket].fetch_add(run_ms, atomic::Ordering::Relaxed);
+    RUN_BUCKET_PEAK_MS[closed_bucket].fetch_add(peak_ms, atomic::Ordering::Relaxed);
+    RUN_BUCKET_VIEW[closed_bucket].store(closed_view, atomic::Ordering::Relaxed);
 
     if runs <= PROBE_DETAIL_LIMIT {
-        info!("Cutt probe: cut run {} closed at {now} ms, timeline peak {} s, wall {run_ms} ms", runs, peak_seconds(peak));
+        info!("Cutt probe: cut run {} closed at {now} ms in view {closed_view} {}, timeline peak {} s, wall {run_ms} ms", runs, BUCKET_NAMES[closed_bucket], peak_seconds(peak));
     }
 }
 
@@ -501,7 +575,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(main_view, SingleModeMain_CoroutineDoTweenTimeScale, "CoroutineDoTweenTimeScale", NO_PARAMS, CLASS, "SingleModeMainViewController::CoroutineDoTweenTimeScale");
     probe!(main_view, SingleModeMain_WaitTap, "WaitTap", NO_PARAMS, CLASS, "SingleModeMainViewController::WaitTap");
 
-    info!("Cutt probe: {installed} of {} observe only probes installed, cut runs measured from ResetCurrentTime", PROBES.len());
+    info!("Cutt probe: {installed} of {} observe only probes installed, cut runs measured from ResetCurrentTime and attributed to the view they start on", PROBES.len());
 
     if !missing.is_empty() {
         info!("Cutt probe: not installed, no class or no matching overload: {}", missing.join(", "));
@@ -549,7 +623,39 @@ pub fn report_if_due() {
     let opened = RUN_OPENED_MS.load(atomic::Ordering::Relaxed);
     let open_for = if opened < 0 { 0 } else { elapsed_ms() - opened };
 
+    // Runs grouped by the screen they started on, which is the difference between "the training cut-in
+    // costs 3 s" and "some cut-ins cost 3 s".
+    let mut buckets = String::new();
+
+    for index in 0..BUCKET_COUNT {
+        let count = RUN_BUCKET_COUNT[index].load(atomic::Ordering::Relaxed);
+
+        if count == 0 {
+            continue;
+        }
+
+        let _ = write!(
+            buckets,
+            " {}(view {}) runs {count} wall {} ms timeline {} ms",
+            BUCKET_NAMES[index],
+            RUN_BUCKET_VIEW[index].load(atomic::Ordering::Relaxed),
+            RUN_BUCKET_WALL_MS[index].load(atomic::Ordering::Relaxed),
+            RUN_BUCKET_PEAK_MS[index].load(atomic::Ordering::Relaxed)
+        );
+    }
+
+    // The scaling points the mod already installs on the training screen. They printed install lines in
+    // run 8 and no call line, and this probe cannot hook those addresses a second time, so their own
+    // call counts ride along on this line (A21).
+    let mut doors = String::new();
+
+    for (slot, name) in AnimationSpeed::TRAINING_HIT_SLOTS.iter() {
+        let _ = write!(doors, " {name}={}", AnimationSpeed::hit_calls(*slot));
+    }
+
     info!("Cutt probe totals at {now_sec} s:{line} cut runs {runs} wall {wall_ms} ms timeline {peak_ms} ms open {open_for} ms");
+    info!("Cutt probe cut runs by screen:{buckets}");
+    info!("Cutt probe training scaling points reached:{doors}");
 }
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -599,6 +705,26 @@ mod tests {
     fn probe_names_in_the_totals_line_drop_their_argument_list() {
         assert_eq!(CUTT_SKIP_RUNTIME_FRAMES.short(), "CutInTimelineController::SkipRuntime");
         assert_eq!(CUTT_GET_CURRENT_TIME.short(), "CutInTimelineController::get_CurrentTime");
+    }
+
+    #[test]
+    fn a_cut_run_is_attributed_to_the_screen_it_started_on() {
+        assert_eq!(bucket_for(ViewId::SingleModeMain as i32, false), ViewBucket::Training);
+        assert_eq!(bucket_for(ViewId::SingleModePaddock as i32, false), ViewBucket::Training);
+        assert_eq!(bucket_for(ViewId::SingleModeResult as i32, false), ViewBucket::Training);
+        assert_eq!(bucket_for(ViewId::Story as i32, false), ViewBucket::Story);
+        assert_eq!(bucket_for(ViewId::GachaMain as i32, false), ViewBucket::Gacha);
+        assert_eq!(bucket_for(ViewId::Title as i32, false), ViewBucket::Other);
+
+        // A skill cut-in inside a race reaches the same timeline controller this probe hooks. It is not
+        // a training animation, and the scene check has to win over a view id the table does not name.
+        assert_eq!(bucket_for(7000, true), ViewBucket::Race);
+    }
+
+    #[test]
+    fn every_bucket_has_a_name_for_the_totals_line() {
+        assert_eq!(BUCKET_NAMES.len(), BUCKET_COUNT);
+        assert_eq!(BUCKET_NAMES[ViewBucket::Training as usize], "training screen");
     }
 
     #[test]
