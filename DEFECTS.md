@@ -34,7 +34,11 @@ and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
   `GetTimeScaleHighSpeed/1 -> static float(bool)`. The guard prevented a wrapper that reserves a
   register for `this` from reading the `bool` from the wrong register. `StoryViewController::GetTimeScaleByHighSpeedType/0 -> static float()` confirms the existing
   no-`this` wrapper in `StoryViewController.rs` is correct. Fix: add argument-only wrappers for
-  static targets.
+  static targets. The matcher half is done: `AnimationSpeed::resolve_static_method` now matches the
+  dumped parameter types and return type and *requires* the static flag, and four probes in
+  `StoryFrameProbe.rs` are installed through it. What remains is rewriting these two as argument-only
+  wrappers, which is the cheapest remaining story scale lever because both return the scale the story
+  timeline then multiplies `deltaTime` by.
 - [ ] **A4 Only 2 of 13 installed scaling points were reached.** Fired:
   `CountupModifier_getDuration 0.16 -> 0.008` and
   `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5`. Installed with no call in this session:
@@ -263,6 +267,19 @@ null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics
   (`Cute_Core_Assembly/Device.rs` `IsIllegalUser`, `SafetyNet.rs:16` passing the success callback
   as the failure callback). Not compiled into the Windows deliverable
   (`src/il2cpp/hook/mod.rs:198-199`), but they ship in this tree.
+- [latent] **C32 No wrapper in this tree declares the trailing `const MethodInfo*`** that IL2CPP
+  generates as the last parameter of every managed method, so a detour that calls its trampoline
+  leaves that slot holding whatever register value it had. Zero of the ~200 wrappers pass it
+  (`grep` for a `MethodInfo` parameter returns nothing), which is the convention across the whole
+  IL2CPP hooking ecosystem, and three logged sessions with 200 armed hooks reached training, races
+  and result screens without a single related fault. Recorded as a known property, not a defect to
+  chase: it only matters for a wrapper that would dereference method metadata, and none does.
+- [ ] **C33 `get_orig_fn!` is a `Mutex<HashMap>` lookup with `unwrap()` per call**
+  (`src/core/interceptor.rs:113-119`). Every detour pays it, and the observe only probes add fifteen
+  more candidates on paths the story code walks per frame. Cost is tens of nanoseconds and is not
+  what this fork is losing time to, but the `unwrap()` on a shared lock inside an `extern "C"` frame
+  is the same shape C2 warns about. Cached trampoline handles are the fix if this ever lands on a
+  measured hot path.
 
 ## D. Fix order
 
@@ -302,16 +319,21 @@ null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics
 13. The frame stepping path this client uses is still unidentified. `GetNextFrameCount_HighSpeed`
     and `SetHighSpeedFrameCount` are installed, signature verified, and never called in a 391 s
     career run that reached training turns, races and five result screens. [StoryFrameProbe.rs](src/il2cpp/hook/umamusume/StoryFrameProbe.rs)
-    now observes eleven candidates (`SkipFrameCount`, `SetFrameCountForWaiting`,
-    `get_WaitFrameCountUntilNextBlock`, `get_WaitFrameUntilNextBlock`, `get_WaitingFrameCount`,
-    `UpdateTimeScaleByHispeedType`, `SkipMotionFrame`, `IsSkipToTextClip`, `IsHighSpeedMode`,
-    `IsStoryEndFrameOrGrandLiveWaitFrameSkipped` and `StoryTimelineTextClipData::GetWaitFrameUntilNextBlockLocalize`)
-    with every argument handed to the original untouched. Instance candidates are resolved through
-    the same parameter and return type check the scaling hooks use, static ones are matched by arity
-    and then confirmed static. It installs only under debug_mode, logs the first six calls of each
-    probe, and prints `Frame probe totals at N s:` every 20 s while the totals grow. A probe that
-    never appears is itself the answer, and A13 can only be pointed in a direction once those totals
-    exist.
+    observes fifteen candidates with every argument handed to the original untouched:
+    `SkipFrameCount`, `SetFrameCountForWaiting`, `SkipMotionFrame`, `IsSkipToTextClip`,
+    `get_WaitFrameCountUntilNextBlock` and its setter, `get_WaitFrameUntilNextBlock` and its setter,
+    `get_WaitingFrameCount`, `UpdateTimeScaleByHispeedType`, `get_TimeScale` and `set_TimeScale`,
+    `IsHighSpeedMode`, `IsStoryEndFrameOrGrandLiveWaitFrameSkipped` and
+    `StoryTimelineTextClipData::GetWaitFrameUntilNextBlockLocalize`. The read half and the write half
+    are both probed because a busy getter measures polling while a busy setter measures advancement,
+    and the `TimeScale` pair is who writes the value C22 compounds. Nothing is matched on name plus
+    arity: every candidate goes through `AnimationSpeed::resolve_method` or the new
+    `resolve_static_method`, both of which check the dumped parameter types, the return type,
+    genericness, the static flag and whether each parameter is a reference. It installs only under
+    debug_mode, logs the first six calls of each probe, prints `Frame probe totals at N s:` every
+    20 s while the totals grow, and lists any candidate that never resolved at install time. A probe
+    that never appears is itself the answer, and A13 can only be pointed in a direction once those
+    totals exist.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
