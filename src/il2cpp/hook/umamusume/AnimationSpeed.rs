@@ -808,11 +808,57 @@ unsafe fn resolve_getter(class: *mut Il2CppClass, name: &str, ret: Il2CppTypeEnu
 const HIT_SLOTS: usize = 20;
 static FIRST_HIT: [AtomicBool; HIT_SLOTS] = [const { AtomicBool::new(false) }; HIT_SLOTS];
 
+// Counts as well as first changed value. `hit` used to print only when `raw != scaled`, so a getter
+// the game calls every frame with a duration of `0.0`, or a value the option cannot move, left no
+// trace at all and looked identical to a hook the game never reached. That is how five training hooks
+// stayed unreadable across two career runs (A21), and the training footer and plate getters are the
+// regular training path, not the friendship one. A slot is now counted on every call, the first
+// `HIT_DETAIL_LIMIT` calls print whether or not anything changed, and later ones only on a chunk
+// boundary so a per frame getter cannot fill the log.
+const HIT_DETAIL_LIMIT: usize = 4;
+const HIT_CHUNK: usize = 1024;
+static HIT_CALLS: [AtomicUsize; HIT_SLOTS] = [const { AtomicUsize::new(0) }; HIT_SLOTS];
+
 pub fn hit(slot: usize, name: &str, raw: f32, scaled: f32) {
-    if raw != scaled && slot < HIT_SLOTS && !FIRST_HIT[slot].swap(true, Ordering::AcqRel) {
-        debug!("AnimationSpeed: {name} {raw} -> {scaled}");
+    if slot >= HIT_SLOTS {
+        return;
+    }
+
+    let calls = HIT_CALLS[slot].fetch_add(1, Ordering::Relaxed) + 1;
+
+    if raw != scaled {
+        if !FIRST_HIT[slot].swap(true, Ordering::AcqRel) {
+            debug!("AnimationSpeed: {name} {raw} -> {scaled}");
+        }
+
+        return;
+    }
+
+    if calls <= HIT_DETAIL_LIMIT {
+        debug!("AnimationSpeed: {name} call {calls} {raw} -> {scaled} unchanged");
+    }
+    else if calls % HIT_CHUNK == 0 {
+        debug!("AnimationSpeed: {name} {calls} calls, none of them changed anything");
     }
 }
+
+// What a run reads: how many times the game actually reached a scaling point, read apart from whether
+// the value moved.
+pub fn hit_calls(slot: usize) -> usize {
+    HIT_CALLS.get(slot).map(|counter| counter.load(Ordering::Relaxed)).unwrap_or(0)
+}
+
+// The scaling points on the training screen, by slot and by the name a run reads. These installed in
+// run 8 and printed no call line, which is the open half of A21, and they are the regular training
+// path rather than the friendship one. The training cut-in probe prints their counts in its totals
+// line so a career run says whether the game reached them at all.
+pub const TRAINING_HIT_SLOTS: [(usize, &str); 5] = [
+    (7, "TrainingFooter.GetItemAnimDuration"),
+    (11, "TrainingFooter.GetCloseAnimWaitTime"),
+    (12, "TrainingCuttClip.get_DelayTime"),
+    (13, "SingleModeUtils.GetHighSpeedPlayDuration"),
+    (16, "SingleModeUtils.GetCutTimeScale"),
+];
 
 // These getters hand out a hardcoded duration or a playback scale, and are the only way
 // to reach a `const` duration that is not passed as an argument anywhere.
@@ -1422,6 +1468,27 @@ mod tests {
         finish_pass(rewrite, factors, no_baseline);
 
         rewrite.iter().any(|needed| *needed)
+    }
+
+    #[test]
+    fn a_scaling_point_the_game_reaches_without_changing_anything_is_still_counted() {
+        // The A21 blind spot. Five training hooks printed an install line and no call line across two
+        // career runs because `hit` only reported a value that moved, and a duration the option cannot
+        // move prints nothing. Slot 19 is a test slot: the installed hooks use 6 through 16.
+        let slot = HIT_SLOTS - 1;
+
+        hit(slot, "test scaling point", 0.0, 0.0);
+        hit(slot, "test scaling point", 0.0, 0.0);
+        assert_eq!(hit_calls(slot), 2);
+
+        // A call that does change the value counts on the same counter, so a run can add the two
+        // kinds of reach together.
+        hit(slot, "test scaling point", 0.6, 0.03);
+        assert_eq!(hit_calls(slot), 3);
+
+        // A slot outside the table is ignored rather than indexing past it.
+        hit(HIT_SLOTS, "test scaling point", 0.6, 0.03);
+        assert_eq!(hit_calls(HIT_SLOTS), 0);
     }
 
     #[test]
