@@ -5537,6 +5537,12 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            if should_show_option(search, &t!("config_editor.high_speed_settings")) {
+                ui.label(t!("config_editor.high_speed_settings"));
+                ui.checkbox(&mut config.high_speed_settings, "");
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.render_scale")) {
                 ui.label(t!("config_editor.render_scale"));
                 ui.add(egui::Slider::new(&mut config.render_scale, 0.1..=10.0).step_by(0.1));

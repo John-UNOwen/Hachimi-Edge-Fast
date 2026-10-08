@@ -206,6 +206,7 @@ config_editor:
   result_screen_speed: "Result screen animation speed"
   story_speed: "Story cutscene speed"
   auto_skip_result_screens: "Auto-skip result screen animations"
+  high_speed_settings: "Raise story and training High Speed settings to the game maximum"
   graphics_quality: "Graphics quality"
   vsync: "VSync"
   auto_full_screen: "Auto full screen"
