@@ -350,6 +350,51 @@ Ledger self check for this change set, measured against the diff it prints: 4 br
 (`A17` created at `[x]`, `C36`, `C37`, `C39`), 5 numbered closures awarded (items 20, 21, 26, 27, 28), 0
 taken away. Bracketed status totals after the edit: 11 `[x]`, 19 `[~]`, 36 `[ ]`, 3 `[latent]`.
 
+### Run 8, completed career on the same build (`51941ea-dirty`), 17:33:08 to 17:39:10, 362 s
+
+`hachimi.log` 141 KB / 1147 lines. 189 hooks armed in one pass in 0.059 s (528 log lines before that
+line), 10 `_addr is null`, 5 class not found, 1 static refusal (`StoryTimelineTrainingCuttClipData.DelayFrame
+is not static`, same as run 7), 0 panics. `introspect.log` written again, 1,941,603 bytes, because
+`debug_mode` is on.
+
+- New reading: the session split by `SceneManager: next_view_id` and the `ViewId` names in
+  `src/il2cpp/hook/umamusume/SceneDefine.rs`. Attributed dwell, 353.3 s of 362 s: Title 127.8,
+  SingleModeMain 104.7, SingleModePaddock 39.7, SingleModeConfirmComplete 13.4, Story 12.7,
+  SingleModeResult 12.6, HomeHub 11.7, Home 8.2, Mission 7.9, Splash 6.6, GachaMain 6.0,
+  SingleModeMonthStart 2.0. Launch to first training screen was 140 s, and the mod's own part of that is
+  0.059 s of hook arming.
+- Wipes: 15 pairs, 18 ms to 2242 ms, 15.4 s, 4.3% of the session. The transition lever is a rounding
+  error next to the buckets above.
+- Result screens were reached for the first time since the guard change: 5 `ActivateSkipButton
+  (auto_skip_result_screens true)` lines from 17:38:22 to 17:38:29, 24 `FadeInContent*` lines with the
+  durations scaled (`0`, `0.03`, `0.06`, `0.09`, `0.12`, `0.15`), no `skip guard busy` line and no
+  `SkipFadeInTween unavailable` line, so nothing was dropped and nothing failed to resolve. C38's open
+  question (one skip per result part) is still open: five entries and five parts matching is not proven by
+  these counts.
+- Story in this career was short: 8 `Story scale ... (0) -> 8` reads, three engage writes (states 36, 40,
+  44), one `story high speed type 2 already written for story state` line, one
+  `story high speed mode left alone, the game already ...` exit, and `SkipFrameCount`/`SkipMotionFrame`
+  again identical one to one (117, 193, 194, 114, 223, 328, 437). `StoryTimeline_getTimeScaleAfterEndStory
+  1 -> 5` printed once. `story high speed mode 0 writes 3` on the last totals line.
+- `Time::set_timeScale` was called once, `1 -> 1 (lever x2)`.
+- Three options that are configured and never reach the game in a whole career: `story_tcps_multiplier 1000`
+  (only its `story_tcps` name on the snapshot line), `ui_animation_scale 1000` (one `TweenManager` install
+  line, no call), `cyspring_mono_uncap_frame_scale true` (name on the snapshot line, no call). See A18.
+
+## A18 and C44, added from run 8
+
+- [ ] **A18 Three performance options are installed and never called on this client.** A whole career,
+  including result screens and eight story clips, produced one install line and no call line for the DOTween
+  `TweenManager` hooks (`ui_animation_scale`), none for the story typewriter path (`story_tcps_multiplier`),
+  and none for `cyspring_mono_uncap_frame_scale`. All three are offered in the Performance tab with values
+  1000, 1000 and true. That is the C14 condition: an option that does nothing here is being presented as if
+  it works. Either the hook is on the wrong method for this client or the option belongs behind a region or
+  feature gate; a decision, not a code guess.
+- [ ] **C44 `debug_mode` writes a 1.9 MB `introspect.log` on every launch.** 1,941,603 bytes at 17:33:08 in
+  run 8 and the same size in run 7, from inside the init window that C25 says sits under the loader lock.
+  It is our cost, it is avoidable at launch, and it is the largest single thing the mod writes per start.
+  Not measured as a duration yet: the log has no timestamp pair around the dump.
+
 ## B. Open items from the animation feature review
 
 - [x] duplicate detour on `StoryViewController::GetTimeScaleByHighSpeedType` removed
@@ -1258,6 +1303,16 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     once, and the host legs named above. A run still has to show the Config Editor drawing those six labels in
     the language `locale` selects (E3), and C27 records that the unique wrapper name only covers this fork's
     own new hook.
+
+31. [ ] Measure the launch and title bucket before touching anything else in it (run 8: Title 127.8 s of a
+    362 s career, launch to first training screen 140 s, our own hook arming 0.059 s of it). The mod's share
+    of that window is the init work C25 describes plus the C44 dump, and none of it has a duration recorded.
+32. [ ] Decide what happens to the three options A18 shows never being called on this client: gate them,
+    relabel them, or find the method this client actually uses. They are configured at 1000, 1000 and true
+    and changed nothing across a whole career.
+33. [ ] `SingleModeConfirmComplete` and `SingleModeResult` together are 26 s of a 362 s career. The auto skip
+    path covers the result tween chains and printed nothing for the confirm screen. Read what the confirm
+    screen spends its 13.4 s on in `hachimi.log` before writing a hook there.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
