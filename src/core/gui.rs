@@ -23,6 +23,7 @@ use crate::il2cpp::{
     ext::StringExt,
     hook::{
         umamusume::{
+            AnimationSpeed,
             CameraData::ShadowResolution,
             CySpringController::SpringUpdateMode,
             Director,
@@ -5892,8 +5893,12 @@ impl ConfigEditor {
             }
 
             if should_show_option(search, &t!("config_editor.time_scale")) {
+                // The range is the same ceiling the code enforces: AnimationSpeed clamps
+                // the lever to MIN_TIME_SCALE..=MAX_TIME_SCALE before any write reaches
+                // Time.timeScale, so the slider cannot offer more than the mod will honour.
+                // The floor is the neutral 1.0 because this lever only raises (C40).
                 ui.label(t!("config_editor.time_scale"));
-                ui.add(egui::Slider::new(&mut config.time_scale, 0.1..=10.0).step_by(0.1));
+                ui.add(egui::Slider::new(&mut config.time_scale, AnimationSpeed::MIN_TIME_SCALE..=AnimationSpeed::MAX_TIME_SCALE).step_by(0.1));
                 ui.end_row();
             }
 
@@ -5940,8 +5945,14 @@ impl ConfigEditor {
             }
 
             if should_show_option(search, &t!("config_editor.story_choice_auto_select_delay")) {
+                // The range is the floor the code honours: both sites that turn this delay into a
+                // multiplier read the clamped value out of AnimationSpeed's mirror, which floors the
+                // delay at MIN_STORY_CHOICE_AUTO_SELECT_DELAY and caps the result at
+                // MAX_STORY_CHOICE_AUTO_SELECT_MULTIPLIER on the wait time increment and at
+                // MAX_TIME_SCALE on the story time scale, so the slider cannot offer a step the mod
+                // would not clamp (C24).
                 ui.label(t!("config_editor.story_choice_auto_select_delay"));
-                ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, 0.0001..=10.0).step_by(0.05));
+                ui.add(egui::Slider::new(&mut config.story_choice_auto_select_delay, AnimationSpeed::MIN_STORY_CHOICE_AUTO_SELECT_DELAY..=10.0).step_by(0.05));
                 ui.end_row();
             }
 
