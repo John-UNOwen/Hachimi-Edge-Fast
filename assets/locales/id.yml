@@ -175,7 +175,6 @@ config_editor:
   gui_landscape_ratio: "Rasio GUI lanskap"
   ui_animation_scale: "Kecepatan animasi UI"
   story_high_speed_mode: "Masukkan pemutaran cerita ke mode kecepatan tinggi game"
-  story_skip_frame_scale: "Perluasan frame lompat cerita"
   graphics_quality: "Kualitas grafis"
   vsync: "VSync"
   auto_full_screen: "Otomatis Layar penuh"

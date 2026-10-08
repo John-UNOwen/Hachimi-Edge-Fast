@@ -201,7 +201,6 @@ config_editor:
   gui_landscape_ratio: "Relación de escala del overlay (apaisado)"
   ui_animation_scale: "Escala de animación de la UI"
   story_high_speed_mode: "Poner la reproducción de la historia en el modo de alta velocidad del juego"
-  story_skip_frame_scale: "Ampliación de fotogramas de salto de la historia"
   graphics_quality: "Calidad gráfica"
   vsync: "VSync"
   auto_full_screen: "Pantalla completa automática"

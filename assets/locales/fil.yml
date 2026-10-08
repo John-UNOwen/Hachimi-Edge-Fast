@@ -161,7 +161,6 @@ config_editor:
   gui_landscape_ratio: "Overlay scale ratio sa landscape"
   ui_animation_scale: "Bilis ng UI animation"
   story_high_speed_mode: "Ilagay ang story playback sa high speed mode ng game"
-  story_skip_frame_scale: "Pagpapalawak ng skip frame ng story"
   graphics_quality: "Kalidad ng graphics"
   full_screen_mode_exclusive: "Eksklusibo"
   block_minimize_in_full_screen: "I-block ang pag-minimize sa full screen"

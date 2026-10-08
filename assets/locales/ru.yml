@@ -202,7 +202,6 @@ config_editor:
   gui_landscape_ratio: "Масштаб оверлея в альбомном режиме"
   ui_animation_scale: "Масштаб анимаций интерфейса"
   story_high_speed_mode: "Перевести проигрывание сюжета в собственный быстрый режим игры"
-  story_skip_frame_scale: "Расширение пропуска кадров сюжета"
   graphics_quality: "Качество графики"
   vsync: "VSync"
   auto_full_screen: "Автоматический полный экран"
