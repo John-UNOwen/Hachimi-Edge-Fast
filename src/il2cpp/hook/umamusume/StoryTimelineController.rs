@@ -1,4 +1,4 @@
-use std::sync::{atomic::{self, AtomicI32}, Mutex};
+use std::sync::{atomic::{self, AtomicBool, AtomicI32, AtomicUsize}, Mutex};
 
 use crate::{
     core::Hachimi,
@@ -75,6 +75,54 @@ extern "C" fn SetHighSpeedFrameCount(this: *mut Il2CppObject, frames: i32) {
     get_orig_fn!(SetHighSpeedFrameCount, SetHighSpeedFrameCountFn)(this, scaled);
 }
 
+// The high speed story path reports its next step through two reference parameters, so both
+// values only exist once the original has filled the caller's storage, and the byref flag has
+// been confirmed on the resolved overload before anything is written back.
+//
+// Which half is the wait and which half is the step is not visible from the signature, so
+// both are divided and never multiplied. The pair comes out of the game's own readonly
+// `_highSpeedFrameCountArray`, and a value that turns out to be an index into that array
+// stays inside it when it only ever gets smaller, while multiplying could walk it off the
+// end. The raw pair is logged for the first few calls so a run can measure what the two
+// numbers actually control.
+const REF_LOG_LIMIT: usize = 6;
+static REF_LOGGED: AtomicUsize = AtomicUsize::new(0);
+static NULL_REF_WARNED: AtomicBool = AtomicBool::new(false);
+
+type GetNextFrameCountHighSpeedFn = extern "C" fn(this: *mut Il2CppObject, frames: *mut f32, count: *mut i32);
+extern "C" fn GetNextFrameCount_HighSpeed(this: *mut Il2CppObject, frames: *mut f32, count: *mut i32) {
+    get_orig_fn!(GetNextFrameCount_HighSpeed, GetNextFrameCountHighSpeedFn)(this, frames, count);
+
+    if frames.is_null() || count.is_null() {
+        if !NULL_REF_WARNED.swap(true, atomic::Ordering::AcqRel) {
+            warn!("StoryTimelineController::GetNextFrameCount_HighSpeed returned a null reference, leaving the path alone");
+        }
+
+        return;
+    }
+
+    let (raw_frames, raw_count) = unsafe { (*frames, *count) };
+
+    let scaled_frames = AnimationSpeed::scale_duration(raw_frames, STORY);
+    let scaled_count = AnimationSpeed::scale_frame_count(raw_count, STORY);
+
+    if scaled_frames != raw_frames || scaled_count != raw_count {
+        let seen = REF_LOGGED.fetch_add(1, atomic::Ordering::Relaxed);
+
+        if seen < REF_LOG_LIMIT {
+            debug!(
+                "StoryTimelineController::GetNextFrameCount_HighSpeed frames {raw_frames} -> {scaled_frames}, count {raw_count} -> {scaled_count} (story x{})",
+                AnimationSpeed::factor(STORY)
+            );
+        }
+    }
+
+    unsafe {
+        *frames = scaled_frames;
+        *count = scaled_count;
+    }
+}
+
 pub fn init(umamusume: *const Il2CppImage) {
     get_class_or_return!(umamusume, Gallop, StoryTimelineController);
 
@@ -104,4 +152,12 @@ pub fn init(umamusume: *const Il2CppImage) {
         &[Il2CppTypeEnum_IL2CPP_TYPE_I4], Il2CppTypeEnum_IL2CPP_TYPE_VOID,
     ) };
     if set_frames_addr != 0 { new_hook!(set_frames_addr, SetHighSpeedFrameCount); }
+
+    // Dumped as `GetNextFrameCount_HighSpeed/2 -> void(float&, int&)`, one overload, and the
+    // element types stay R4 and I4 with the reference marked by the byref bit.
+    let next_frames_addr = unsafe { AnimationSpeed::resolve_ref_method(
+        StoryTimelineController, "GetNextFrameCount_HighSpeed",
+        &[Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_I4], Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+    ) };
+    if next_frames_addr != 0 { new_hook!(next_frames_addr, GetNextFrameCount_HighSpeed); }
 }
