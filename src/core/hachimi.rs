@@ -906,6 +906,14 @@ pub struct Config {
     // expose, using StoryManager's own max and save path.
     #[serde(default)]
     pub high_speed_settings: bool,
+    // Asks the story timeline to run in the game's own high speed mode through
+    // StoryTimelineController::SetHighSpeedType. Off never touches it.
+    #[serde(default)]
+    pub story_high_speed_mode: bool,
+    // Extends the frame value the story timeline hands to its own skip calls. Off means the
+    // value is passed through untouched, and the extension is capped in code.
+    #[serde(default = "Config::default_animation_speed")]
+    pub story_skip_frame_scale: f32,
     #[serde(default)]
     pub trainer_live_landscape: bool,
     #[serde(default)]
