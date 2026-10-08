@@ -87,7 +87,22 @@ pub fn get_method(class: *mut Il2CppClass, name: &CStr, args_count: i32) -> Resu
     }
 }
 
-pub fn get_method_overload(class: *mut Il2CppClass, name: &str, params: &[Il2CppTypeEnum]) -> Result<*const MethodInfo, Error> {
+// Whether one dumped parameter answers what a wrapper declared. A generic instantiation such as
+// `List<SupportCardData>` reports `GENERICINST` in its parameter record, not `CLASS`, so the exact
+// walk refuses a method that really exists (C48). A caller whose wrapper declares a pointer in that
+// slot may ask for the wider answer, because a generic instantiation of a class is a managed object
+// and the ABI moves it as an address.
+pub fn param_type_accepts(requested: Il2CppTypeEnum, actual: Il2CppTypeEnum, generic_slots: bool) -> bool {
+    if actual == requested {
+        return true;
+    }
+
+    generic_slots
+        && actual == Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST
+        && matches!(requested, Il2CppTypeEnum_IL2CPP_TYPE_CLASS | Il2CppTypeEnum_IL2CPP_TYPE_OBJECT)
+}
+
+fn find_method_overload(class: *mut Il2CppClass, name: &str, params: &[Il2CppTypeEnum], generic_slots: bool) -> Result<*const MethodInfo, Error> {
     let mut iter: *mut c_void = null_mut();
     
     loop {
@@ -111,7 +126,7 @@ pub fn get_method_overload(class: *mut Il2CppClass, name: &str, params: &[Il2Cpp
         let mut ok = true;
         for i in 0u32..param_count {
             let param = il2cpp_method_get_param(method, i);
-            if unsafe { (*param).type_() } != params[i as usize] {
+            if !param_type_accepts(params[i as usize], unsafe { (*param).type_() }, generic_slots) {
                 ok = false;
                 break;
             }
@@ -123,6 +138,19 @@ pub fn get_method_overload(class: *mut Il2CppClass, name: &str, params: &[Il2Cpp
     }
     
     Err(Error::MethodNotFound(name.to_owned()))
+}
+
+pub fn get_method_overload(class: *mut Il2CppClass, name: &str, params: &[Il2CppTypeEnum]) -> Result<*const MethodInfo, Error> {
+    find_method_overload(class, name, params, false)
+}
+
+// The wider walk, for a wrapper that declares a pointer where the dump spells a generic. The exact
+// walk still runs first, so an overload that resolved before keeps resolving to the same method.
+pub fn get_method_overload_generic_ref(class: *mut Il2CppClass, name: &str, params: &[Il2CppTypeEnum]) -> Result<*const MethodInfo, Error> {
+    match find_method_overload(class, name, params, false) {
+        Ok(method) => Ok(method),
+        Err(_) => find_method_overload(class, name, params, true),
+    }
 }
 
 pub fn get_method_addr(class: *mut Il2CppClass, name: &CStr, args_count: i32) -> usize {
@@ -850,8 +878,7 @@ pub fn get_enum_int(e: *mut Il2CppObject) -> i32 {
     unsafe { *(il2cpp_object_unbox(result) as *const u64) as i32 }
 }
 
-pub fn get_type_object_for_class(klass: *mut Il2CppClass) -> *mut Il2CppObject {
-    if klass.is_null() { return null_mut(); }
+pub fn get_type_object_for_class(klass: *mut Il2CppClass) -> *mut Il2CppObject {    if klass.is_null() { return null_mut(); }
     let t = il2cpp_class_get_type(klass);
     if t.is_null() { return null_mut(); }
     il2cpp_type_get_object(t) as *mut Il2CppObject
@@ -873,4 +900,26 @@ pub fn invoke_object_method(
         &mut exc
     );
     if !exc.is_null() { None } else { Some(result as *mut Il2CppObject) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_declared_pointer_slot_answers_a_generic_instantiation_only_when_asked() {
+        // The exact walk a scaling hook uses: a generic is not a plain class reference.
+        assert!(param_type_accepts(Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_CLASS, false));
+        assert!(!param_type_accepts(Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST, false));
+
+        // The wider walk, for a wrapper that declares a pointer where the dump spells a generic.
+        assert!(param_type_accepts(Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST, true));
+        assert!(param_type_accepts(Il2CppTypeEnum_IL2CPP_TYPE_OBJECT, Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST, true));
+
+        // A slot that declared a value never has a reference handed to it, and a widening never
+        // turns a value request into a pointer one.
+        assert!(!param_type_accepts(Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE, Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST, true));
+        assert!(!param_type_accepts(Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_CLASS, true));
+        assert!(!param_type_accepts(Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE, true));
+    }
 }

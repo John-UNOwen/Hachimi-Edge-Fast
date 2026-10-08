@@ -447,6 +447,10 @@ struct MethodMatch {
     // Every parameter and the result has to be a value this wrapper can hold in the position it
     // declared. A reference type in that position would be handed the number the wrapper wrote.
     values_only: bool,
+    // Set only by a wrapper that declares a pointer where the dump spells a generic instantiation,
+    // which is how `List<SupportCardData>` becomes resolvable at all (C48). No scaling wrapper sets
+    // it: they resolve against signatures that already matched exactly.
+    generic_slots: bool,
 }
 
 // A 4 byte enum travels in a general purpose register (A5). A value type bigger than this is
@@ -459,17 +463,23 @@ const MAX_INLINE_VALUE_BYTES: u32 = 4;
 const OBJECT_HEADER_BYTES: u32 = 16;
 
 // A wrapper with a `this` parameter and plain value arguments.
-const MATCH_INSTANCE_VALUE: MethodMatch = MethodMatch { allow_static: false, require_static: false, require_ref: false, forbid_ref: true, values_only: false };
+const MATCH_INSTANCE_VALUE: MethodMatch = MethodMatch { allow_static: false, require_static: false, require_ref: false, forbid_ref: true, values_only: false, generic_slots: false };
 // A zero argument getter: a static one simply ignores the `this` register it is handed.
-const MATCH_GETTER_EITHER: MethodMatch = MethodMatch { allow_static: true, require_static: false, require_ref: false, forbid_ref: true, values_only: false };
+const MATCH_GETTER_EITHER: MethodMatch = MethodMatch { allow_static: true, require_static: false, require_ref: false, forbid_ref: true, values_only: false, generic_slots: false };
 // A wrapper that writes through reference parameters.
-const MATCH_REFERENCE: MethodMatch = MethodMatch { allow_static: false, require_static: false, require_ref: true, forbid_ref: false, values_only: false };
+const MATCH_REFERENCE: MethodMatch = MethodMatch { allow_static: false, require_static: false, require_ref: true, forbid_ref: false, values_only: false, generic_slots: false };
 // A wrapper that declares only the real arguments, so the target has to be static.
-const MATCH_STATIC_VALUE: MethodMatch = MethodMatch { allow_static: true, require_static: true, require_ref: false, forbid_ref: true, values_only: false };
+const MATCH_STATIC_VALUE: MethodMatch = MethodMatch { allow_static: true, require_static: true, require_ref: false, forbid_ref: true, values_only: false, generic_slots: false };
 // A static wrapper whose arguments and result are all values sized like the ones it declares,
 // which is the shape of a 4 byte enum setting. A reference candidate is refused by name instead
 // of bound: the enum value would land in the register the target expects a pointer in.
-const MATCH_STATIC_VALUES_ONLY: MethodMatch = MethodMatch { allow_static: true, require_static: true, require_ref: false, forbid_ref: true, values_only: true };
+const MATCH_STATIC_VALUES_ONLY: MethodMatch = MethodMatch { allow_static: true, require_static: true, require_ref: false, forbid_ref: true, values_only: true, generic_slots: false };
+// A wrapper that declares a pointer where the dump spells a generic instantiation. One of a class is
+// a managed object and the ABI moves it as an address, so a pointer is what belongs in the slot, and
+// what is unknown is the element type. Nothing that reads or writes an argument may resolve this way;
+// it exists so an observe only probe can reach `List<...>` signatures at all (C48).
+const MATCH_GENERIC_REF: MethodMatch = MethodMatch { allow_static: false, require_static: false, require_ref: false, forbid_ref: true, values_only: false, generic_slots: true };
+const MATCH_STATIC_GENERIC_REF: MethodMatch = MethodMatch { allow_static: true, require_static: true, require_ref: false, forbid_ref: true, values_only: false, generic_slots: true };
 
 pub unsafe fn resolve_method(
     class: *mut Il2CppClass,
@@ -516,6 +526,30 @@ pub unsafe fn resolve_static_value_method(
     ret: Il2CppTypeEnum,
 ) -> usize {
     resolve_method_any(class, name, params, ret, MATCH_STATIC_VALUES_ONLY)
+}
+
+// A dumped `generic<System.Collections.Generic.List<...>>` parameter reports `GENERICINST` in its
+// parameter record, never `CLASS`, so every exact walk this file has run simply reported the method as
+// missing (C48). These two resolvers are for a wrapper that declares a pointer in that slot, and the
+// exact overload walk still runs first, so a signature that resolved before binds the same method it
+// always did. No scaling hook uses them: a wrapper that reads or writes an argument cannot be written
+// against a type whose element layout is unknown here.
+pub unsafe fn resolve_generic_ref_method(
+    class: *mut Il2CppClass,
+    name: &str,
+    params: &[Il2CppTypeEnum],
+    ret: Il2CppTypeEnum,
+) -> usize {
+    resolve_method_any(class, name, params, ret, MATCH_GENERIC_REF)
+}
+
+pub unsafe fn resolve_static_generic_ref_method(
+    class: *mut Il2CppClass,
+    name: &str,
+    params: &[Il2CppTypeEnum],
+    ret: Il2CppTypeEnum,
+) -> usize {
+    resolve_method_any(class, name, params, ret, MATCH_STATIC_GENERIC_REF)
 }
 
 // The word `introspect.rs` prints for one spelling of a type, so an install line can name the
@@ -660,6 +694,16 @@ unsafe fn prove_value_shape(type_: *const Il2CppType, name: &str, index: Option<
         None => "result".to_owned(),
     };
 
+    // A generic instantiation has no shape provable from the enum, and the only resolver that can get
+    // here with `generic_slots` set is one whose wrapper declared a pointer. That is what the ABI moves
+    // for an instantiated class, so the slot is answered as a reference and the value proof still has
+    // to hold for everything else (C48).
+    if required.generic_slots && (*type_).type_() == Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST {
+        debug!("AnimationSpeed: {name} {position} is a generic instantiation, bound as the pointer this wrapper declares");
+
+        return true;
+    }
+
     let (shape, payload) = measure_value_shape(type_);
 
     if shape_is_allowed(shape, required.values_only) {
@@ -692,7 +736,12 @@ unsafe fn resolve_method_any(
     ret: Il2CppTypeEnum,
     required: MethodMatch,
 ) -> usize {
-    let method = match crate::il2cpp::symbols::get_method_overload(class, name, params) {
+    let method = match if required.generic_slots {
+        crate::il2cpp::symbols::get_method_overload_generic_ref(class, name, params)
+    }
+    else {
+        crate::il2cpp::symbols::get_method_overload(class, name, params)
+    } {
         Ok(method) => method,
         Err(_) => {
             debug!("AnimationSpeed: {} has no overload with the expected signature", name);
@@ -1468,6 +1517,26 @@ mod tests {
         finish_pass(rewrite, factors, no_baseline);
 
         rewrite.iter().any(|needed| *needed)
+    }
+
+    #[test]
+    fn only_the_generic_resolvers_widen_a_reference_slot() {
+        // The scaling hooks resolve through the exact profiles. Widening is what let a probe reach a
+        // `List<...>` signature, and a scaling wrapper must never get one (C48).
+        assert!(!MATCH_INSTANCE_VALUE.generic_slots);
+        assert!(!MATCH_GETTER_EITHER.generic_slots);
+        assert!(!MATCH_REFERENCE.generic_slots);
+        assert!(!MATCH_STATIC_VALUE.generic_slots);
+        assert!(!MATCH_STATIC_VALUES_ONLY.generic_slots);
+        assert!(MATCH_GENERIC_REF.generic_slots);
+        assert!(MATCH_STATIC_GENERIC_REF.generic_slots);
+
+        // A wrapper that declares only the real arguments still has to be told its target is static,
+        // or it misreads every argument of an instance method.
+        assert!(MATCH_STATIC_VALUE.require_static);
+        assert!(MATCH_STATIC_GENERIC_REF.require_static);
+        assert!(!MATCH_GENERIC_REF.require_static);
+        assert!(!MATCH_GENERIC_REF.allow_static);
     }
 
     #[test]
