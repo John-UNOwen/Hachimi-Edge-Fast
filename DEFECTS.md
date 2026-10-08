@@ -1558,10 +1558,12 @@ What it adds:
   nothing hooks them (A19), and both cases run through the same training cut-in classes, so they land in the
   same bucket. Separating them is the next dump's job, not a guessed signature.
 - `cargo test --lib` is 68 passed, three new tests for the hit counter, the bucket attribution and the
-  bucket names, and both clippy legs are clean with `-D warnings`. The build `v0.32.0-e372502-dirty` is
-  staged in `target\release` and was not deployed because the game was running when it finished, so the
-  game root still holds the released `v0.32.0-d42b6d9`. It is `-dirty` because the README screenshot change
-  is uncommitted on purpose.
+  bucket names, and both clippy legs are clean with `-D warnings`.
+- Deployed for the next run. The staged build `v0.32.0-e372502-dirty` was built while the README change was
+  still uncommitted, so it was rebuilt from the clean tree and reports `v0.32.0-974da9c`, 29,357,056 bytes,
+  SHA256 `FCA6E48B0C8800EA6A1FF396FDC8CB9F340AD2952BFFAF3A86C42993CD169463`, replacing the release build at
+  the game root. The game was not running when the copy happened and `hachimi\config.json` was left alone.
+  `debug_mode` is already true, so the probe arms with no config change.
 
 What the next career run has to show before any training number is scaled, item 34:
 
@@ -1680,8 +1682,12 @@ before it. The 51 tags in the local clone, `v0.14.1` through `v0.32.0`, are upst
   `INSTALL.txt`.
 - The DLL reports `v0.32.0-d42b6d9`. That is `build.rs:28-62` writing `v{CARGO_PKG_VERSION}` plus
   `git rev-parse --short HEAD`, with no `-dirty` because the tree was clean at build time.
-- The same binary is deployed at the game root, so the next career run measures the released build rather
-  than a different one.
+- The same binary was deployed at the game root, and is no longer: the tree moved on with the probe
+  upgrades, so the game root now holds `v0.32.0-974da9c`. The release asset stays the build above, and a
+  `v0.32.0-fork.2` tag waits until the training cut-in work closes.
+- The English README now shows `assets/screenshot-performance.png`, committed in `d3f2c42`.
+  `assets/screenshot-1.png` and `screenshot-2.png` are kept because `README-zh_cn.md` and `README-zh_tw.md`
+  still reference them.
 - Built on this machine after the checks the release text claims: `cargo test --lib` 65 passed,
   `cargo check --all-targets` clean, clippy clean on `x86_64-pc-windows-msvc --all-targets` and
   `aarch64-linux-android --all-targets` with `-D warnings`, `cargo build --release` 2 m 15 s.
