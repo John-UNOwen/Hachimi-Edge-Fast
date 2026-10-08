@@ -2,7 +2,7 @@
 
 Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code,
 then read [DEFECTS.md](DEFECTS.md), which is the fork's working memory: measured baselines, open
-items with IDs (A1..A14, C1..C31, E1..E2) and the fix order.
+items with IDs (A1..A14, C1..C43, E1..E3) and the fix order.
 
 ## 1. What this fork is for
 
@@ -71,17 +71,45 @@ where performance work is measured.
 cargo check
 cargo build --release
 cargo clippy --target x86_64-pc-windows-msvc -- -D warnings
+cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
+cargo test --lib
 ```
 
 - Release profile is `opt-level=3`, fat LTO, `codegen-units=1`, stripped. Don't loosen it.
 - Clippy: everything is allowed except `clippy::perf`, which is **deny**. Treat a perf lint as a
-  real bug, never `#[allow]` it away.
+  real bug, never `#[allow]` it away. clippy is installed for the stable toolchain here
+  (`cargo clippy --version`), so run both legs locally instead of recording them as unrunnable.
 - CI (`.github/workflows/clippy_check.yml`) runs clippy with `-D warnings` for both Windows and
-  `aarch64-linux-android`. Platform specific code must sit behind `#[cfg(target_os = ...)]`.
-- Android builds use `tools/android/build.sh` (needs `ANDROID_NDK_ROOT`).
+  `aarch64-linux-android`, and `cargo test --lib` on a Windows runner. Platform specific code must
+  sit behind `#[cfg(target_os = ...)]`. `src/android/` is linted only by the Android leg, and
+  `slot_table` / `slot_table_generated` are gated `cfg(any(target_os = "android", test))`: a Windows
+  `--all-targets` run lints them and `cargo test --lib` runs their tests, while Windows `check`,
+  `clippy` without `--all-targets`, and `build --release` never compile them (C43).
+- Android builds use `tools/android/build.sh` (needs `ANDROID_NDK_ROOT`). For the Android clippy leg on
+  a Windows host, the tool names CI writes into the environment are the *Linux* ones: in a Windows NDK
+  copy `aarch64-linux-android24-clang` and `llvm-ar` are bash wrapper scripts Windows cannot exec, and
+  cc-rs dies in `ring` and `blake3` with `os error 193` before the crate is reached. Use the runnable
+  names from `toolchains/llvm/prebuilt/windows-x86_64/bin`, either
+  `CC/CXX_aarch64_linux_android = aarch64-linux-android24-clang(.cmd)`, `AR_aarch64_linux_android =
+  llvm-ar.exe`, `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` the same, or `clang.exe` with
+  `CFLAGS_aarch64_linux_android = --target=aarch64-linux-android24`. Keep `TMP`/`TEMP`/`TMPDIR` on a
+  writable path inside the workspace (`ring` preprocesses its `.S` files through a temp file). clippy
+  emits metadata only, so the ELF link args never run there. `cargo build --target aarch64-linux-android`
+  does link on this Windows host once `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` names a runnable clang
+  wrapper, and writes a real AArch64 `libhachimi.so`; with no linker named it stops at `error: linker
+  ``cc`` not found`, and CI's `-static-libstdc++` link args only draw a clang "argument unused" warning
+  (C42).
 - Do not commit build output or scratch captures (`cargo_check_out.txt` is an example of one).
 
-There are no unit tests for hook code; verification is a game run plus the log (section 7).
+The hook modules carry unit tests (`#[cfg(test)] mod tests` in `Time.rs`, `AnimationSpeed.rs`,
+`HighSpeedSetting.rs`, `StoryTimelineController.rs`, and in `slot_table.rs`, whose modules are gated
+`cfg(any(target_os = "android", test))` so the host run compiles them and the shipped Windows build
+does not). They drive the functions
+the shipped hooks call: the plan a pass makes, its applied markers, the clamps, the counters and
+their log lines. They cannot reach the game, so they prove a decision and never a cost - no il2cpp
+field read or write, no trampoline, and no `Hachimi::instance()`, which ends the process when it is
+asked for before init. Whether a hook the game actually reached, and what the mod costs, comes from
+a game run and the log (section 7). Cite the test *and* the run line when you close an item.
 
 ## 5. How a hook is built here
 
@@ -161,6 +189,9 @@ Hot paths run every frame or every tween tick. In them:
    - Per hook first hit lines (`X 0.16 -> 0.008`): which hooks the game actually reached.
      **Installed is not the same as called** (A4); a hook with no call line did nothing.
    - `NowLoading::PlayFadeNowLoading` pairs: transition gaps; compare min/median/max/total.
+   - `AnimationSpeed apply pass N: a config reads, b entry locks, c table passes, d field reads,
+     e field writes`: what the speed pass cost the run, counted by the pass itself (C36, C41).
+     Field reads stay 0 while `init` resolves no duration field (C13).
    - `Frame probe totals at N s:` for the story stepping search (item D13).
 4. Record the run in DEFECTS.md in the existing format: build hash, duration, numbers, what
    moved, what didn't.
@@ -177,7 +208,9 @@ of a session is time on screens**. Work that can still move the numbers, roughly
 3. **Game owned settings** (`HighSpeedSetting.rs`): raising the game's own skip/high speed
    settings is safer than scaling time. `GetMaxHighSpeedType` is context dependent (A11).
 4. **Auto skip** of result screens through the game's own `SkipFadeInTween` path, which is
-   confirmed end to end. Extend to other screens only through the game's own skip buttons.
+   confirmed called; one skip per result part is not yet proven, because one flag serialises the
+   parts and C38 now counts the requests it drops. Extend to other screens only through the game's
+   own skip buttons.
 5. **Loading**: asset bundle load latency between scenes (0.3–3.2 s per transition).
 6. **Mod overhead** (section 6) and **startup** (C25).
 
@@ -203,7 +236,10 @@ A new speed or performance option touches, in one change:
 - Code style follows the surrounding file: hook files use the game's PascalCase names
   (`src/lib.rs` allows `non_snake_case` crate wide), comments explain *why* a value is safe, not what the line does.
 - DEFECTS.md status marks: `[x]` fixed and verified, `[~]` partial, `[ ]` open, `[latent]` inert
-  on this client. Cite the commit hash when closing an item, and never mark `[x]` without a run.
+  on this client. Cite the commit hash when closing an item, and never mark `[x]` without a run. An
+  item whose own text says the run is missing is `[~]`, not `[x]`. A ledger self check must match the
+  shape a diff prints: `^\+- \[x\]` is a closure the change set awards and `^-- \[x\]` one it takes
+  away, while `^- \[x\]` matches the file only.
 - Upstream merges: keep our `introspect`/speed modules, take upstream's everything else, rebuild
   with zero warnings, and record the merge in section E.
 - Upstream's PR template forbids untested AI generated code. Anything heading upstream must be

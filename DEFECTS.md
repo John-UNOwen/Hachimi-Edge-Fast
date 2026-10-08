@@ -40,6 +40,9 @@ and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
   and what they return, which the next run has to answer before a factor is put on them. They remain
   the cheapest remaining story scale lever because both return the scale the story timeline then
   multiplies `deltaTime` by.
+  C39 is the caution attached to that lever: the rule C35 put on the three installed story getters left
+  a game value of 1.0 exactly as it was, so a factor on a getter that answers 1.0 changed nothing. A
+  getter now scales on the read half, which raises 1.0 and protects only a value under it.
 - [ ] **A4 Only 2 of 13 installed scaling points were reached.** Fired:
   `CountupModifier_getDuration 0.16 -> 0.008` and
   `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5`. Installed with no call in this session:
@@ -52,6 +55,12 @@ and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
   Run 2 retires part of this list: `FadeInContentFromRight` reached the game 16 times.
   `ActivateSkipButton` now logs every call (`b138a9b`), so a run can tell an installed hook from one
   the game actually used.
+  C39: both `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` lines above stopped reproducing on the
+  build C35 produced. Its rule left a value at or below 1.0 exactly as it was, the hook became `1 -> 1`,
+  and `AnimationSpeed::hit` writes no line when the value did not change, so the log said nothing at
+  all. With C13 (0 of 61 duration fields resolve) and the two Story duration getters in the list above
+  (installed, never called), nothing in `Group::Story` had a measured effect on that build while
+  `story_speed` was still a slider on the Performance tab and a key in all ten locales.
 - [ ] **A5 `PlayFadeFrontCanvas` is now hookable.** The dump resolves the blocked value type:
   `Gallop.NowLoading::PlayFadeFrontCanvas/5 -> void(float, float, float, class<System.Action>, struct<DG.Tweening.Ease:4B>)`.
   A 4 byte enum travels in a general purpose register, not XMM, so it can be passed through.
@@ -123,7 +132,10 @@ null`, 5 class not found, 23 `= NULL` resolutions, 2 static rejections, 0 panics
   95% of the session. Three runs now agree that the wipe path is nearly exhausted and what is left
   is time spent on screens.
 - `ActivateSkipButton (auto_skip_result_screens true)` fired 5 times with zero
-  `SkipFadeInTween unavailable`, so the automatic result screen skip is confirmed end to end. 15
+  `SkipFadeInTween unavailable`, which was read as the automatic result screen skip being confirmed
+  end to end. That inference is not sound (C38): the exit that drops a skip request logged nothing,
+  so 5 entry lines and 0 warnings describe 5 finished chains exactly as well as they describe a
+  swallowed request. Run 7 can tell them apart. 15
   `FadeInContentFromRight` calls carried 0.03, 0.033, 0.06, 0.066, 0.09, 0.099, 0.12 and 0.15 s raw.
 - `HighSpeedSetting` logged 73 read snapshots and exactly one write, `story high speed 0 -> 2 ...
   saved now 2`, plus `training high speed 0 -> 2, read back 2`. A10 stays closed.
@@ -240,14 +252,17 @@ snapshot carried `story_high_speed true` and no skip scale at all.
   `Hooking finished: N hooks armed in one pass, S s`, and S is what has to beat 4.68.
 - [~] **A13 The scaling direction of `GetNextFrameCount_HighSpeed` is not known yet.** The
   signature `void(float&, int&)` does not say which half is the wait between story characters and
-  which half is the step the timeline advances. The wrapper divides both and never multiplies, so a
-  value that turns out to be an index into the game's readonly `_highSpeedFrameCountArray` cannot be
-  pushed past the end of it. The first six calls log `frames a -> b, count c -> d (story xN)`. The
-  next run has to show whether story screens get shorter before the direction is settled.
-  Runs 3 and 4 produced no such line at all, and the run 4 probes show the live stepping paths are
-  `SkipFrameCount` and `SkipMotionFrame` (item 14), so this method's direction is moot until a session
-  reaches the story high speed text path it belongs to. Item 16 records that the hook cannot yet prove
-  a call it did not scale.
+  which half is the step the timeline advances. The pair comes out of the game's readonly
+  `_highSpeedFrameCountArray`, so the int is a candidate index into that array rather than a wait
+  length, and dividing an index shortens nothing: `AnimationSpeed::scale_frame_count` floors a
+  positive result at 1, so a divided index selects a different entry, and that entry can hold a
+  longer frame count than the one the game chose. Both scalings on this path are now removed.
+  `GetNextFrameCount_HighSpeed` reads the pair out of the caller's storage, logs it for its first
+  six calls behind a plain counter, and writes nothing back; `SetHighSpeedFrameCount` logs the value
+  it receives and hands it on untouched - the decision already taken for the two skip hooks after
+  run 5 (C34). Runs 3 and 4 produced no scaling line for either path, and run 5's twelve `Story step`
+  lines were all skip paths, so no run has read a single value off this pair yet. Item 16 keeps that
+  gap on the record.
 - [x] **A14 A run did not record the settings it ran with.** `hook::init` now writes one
   `Config snapshot:` line carrying transition, result, story, ui_animation, time_scale, story_tcps,
   choice_delay, target_fps, auto_skip_result, high_speed_settings, hide_now_loading and the physics
@@ -258,13 +273,16 @@ snapshot carried `story_high_speed true` and no skip scale at all.
 
 - [x] duplicate detour on `StoryViewController::GetTimeScaleByHighSpeedType` removed
 - [x] static targets rejected in `AnimationSpeed::resolve_method`
-- [x] `scale_frame_count` put to use by `SetHighSpeedFrameCount`
+- [~] `scale_frame_count` was put to use by `SetHighSpeedFrameCount`; that scaling is now removed with
+  the rest of the story frame count path (A13, C34), so the helper has no caller left in this tree
 - [ ] A2 overload matching
 - [ ] A6 `Show` / `Hide` arity
 - [ ] A7 `byref`
-- [ ] struct typed parameters still skipped in general; A5 shows which ones are actually safe
+- [~] struct typed parameters still skipped in general; A5 shows which ones are actually safe. The
+  bound is enforced by code now: `value_shape_for` refuses a `struct<...>` whose payload is over
+  `MAX_INLINE_VALUE_BYTES = 4` in front of any value-shaped wrapper (item 25).
 
-## C. Safety review findings (34)
+## C. Safety review findings (43)
 
 - [~] **C1 Calls through address 0.** Closed for `def_method_wrapper_fn!`,
   `impl_addr_wrapper_fn!` and both field accessor macro families. Still open: `get_orig_fn!`
@@ -285,16 +303,27 @@ snapshot carried `story_high_speed true` and no skip scale at all.
   shipped CRI codec at `UmamusumePrettyDerby_Data\Plugins\x86_64\cri_mana_vpx.dll`, which never
   loads. No export forwarding, and Steam integrity verification does not remove a root file the
   game never shipped.
-- [ ] **C5 Unclamped speed layers.** `ui_animation_scale` allows 0.1..=1000.0 in the GUI
-  (`src/core/gui.rs:5506`) with a code default of 1.0, and `DOTween/TweenManager.rs:3-10`
-  multiplies both `delta_time` and `independent_time` with no clamp. `independent_time` is the
+- [~] **C5 Unclamped speed layers.** `ui_animation_scale` allows 0.1..=1000.0 in the GUI - the
+  Performance tab (`src/core/gui.rs:5891`) and the first time setup wizard, the only place a new
+  user touches it and the range this delta widened from 0.1..=10.0 (`src/core/gui.rs:7337`) - with
+  a code default of 1.0. Clamped in code now: `AnimationSpeed::refresh_config_mirrors` mirrors it
+  through `normalize_ui_animation_scale` into `UI_ANIMATION_SCALE`, bounded by
+  `MIN_UI_ANIMATION_SCALE..=MAX_UI_ANIMATION_SCALE` (0.1..=MAX_FACTOR = 20.0, non numeric input
+  falls back to the neutral 1.0), and `DOTween/TweenManager.rs` reads that atomic instead of
+  loading the config every tween tick. The wizard maximum therefore reaches DOTween as x20 -
+  0.33 s of tween clock per 60 fps frame - instead of x1000 - 16.7 s. Verified by the new
+  `cargo test --lib` case plus clippy clean for `x86_64-pc-windows-msvc`; no game run yet, and the
+  sliders still offer more than the code honours (`Config snapshot:` reports the configured value,
+  not the clamped one). Still open: `independent_time` is multiplied as well, although it is the
   channel DOTween leaves unscaled so UI keeps animating while the game is paused.
 - [ ] **C6 Purchase path.** `PaymentUtility.rs:11-27` shows a Yes/No dialog that only queues,
   then calls the original `StartPurchase` unconditionally, and the Yes branch posts
   `PostMessageW(None, WM_CLOSE, 0, 0)` and sets `disable_gui_once`. Installed whenever the Steam
   overlay conflicts, which is the ordinary case.
-- [ ] **C7 Resolution by name plus argument count** outside `AnimationSpeed`, with hand written
-  wrapper signatures at each site.
+- [~] **C7 Resolution by name plus argument count** outside `AnimationSpeed`, with hand written
+  wrapper signatures at each site. Closed for the three `StoryManager` statics `HighSpeedSetting`
+  calls through (`resolve_static_method`, item 25, committed in `75f2147`); the roughly 250 other sites
+  still use it, which is why the item stays `[~]` and not `[x]`.
 - [ ] **C8 Mod state keyed on raw object addresses** while IL2CPP recycles freed addresses
   (`Sqlite3/Connection.rs:97,102-115` and others).
 - [ ] **C9 Unchecked dereferences of game returned values** (`AssetBundle.rs:79-80` and others).
@@ -302,10 +331,28 @@ snapshot carried `story_high_speed true` and no skip scale at all.
   `AssetBundle.LoadAsset_Internal` is hooked for every asset load.
 - [ ] **C11 Check then use race** in the live translation apply path
   (`Text.rs:96-117`, `TextMesh.rs:38`).
-- [ ] **C12 `Time::set_timeScale` overwrite** is a simulation lever rather than an animation lever.
+- [~] **C12 `Time::set_timeScale` overwrite** is a simulation lever rather than an animation lever.
+  `Time::apply()` wrote the configured `time_scale` straight into Unity, and `SceneManager`
+  called it from `ChangeViewCommon` after every view change, so a `time_scale` of 2 replaced a
+  game pause (0) or a game fast forward (4 became 2) and did it once per view change: the
+  pre-fix reproduction ends with `timeScale` 2 and 6 writes after one pause plus five view
+  changes, and 20 writes for 20 view changes of an unchanged config. `apply()` now runs once
+  per config value behind an `APPLIED_LEVER` marker, derives its single write from
+  `GAME_REQUESTED` (the value the game last asked for, recorded by the write hook) through the
+  same `apply_time_scale`, and returns `None` - no write at all - for a game value at or below
+  1.0, so pauses, slow motion and the game's neutral 1.0 are never overwritten; dropping the
+  lever back to 1.0 writes the game's own value once. `ChangeView` no longer calls it. Verified
+  by the reproduction in `Time.rs` (`cargo test --lib UnityEngine_CoreModule::Time`, 8 passing)
+  against the pre-fix scratch reproduction; that reproduction stood on the test module's `Sim` copy of
+   the hook (C41), and the same cases now run `scale_game_write`, `claim_lever` and `plan_write`, the
+   functions the detour and `apply()` call. No game run yet, so it stays `[~]`. Consequence:
+  the option is now purely a multiplier on the game's own values above 1.0 and writes nothing
+  by itself, which is the C12 safety line; a run has to confirm the log line
+  `Time::apply: game <v> x lever <l> -> <w>` appears at most once per config change.
 - [latent] **C13 Static duration constant re-assertion** in `AnimationSpeed` writes
   `static readonly` constants every `apply()` and adopts values the game wrote. Inert on this
-  client: 0 of 61 fields resolve, all 61 rejected as literal or non static.
+  client: 0 of 61 fields resolve, all 61 rejected as literal or non static. C36 re-gated the
+  re-assertion to one pass per factor change.
 - [ ] **C14 Options that do nothing on this client** while still offered in the GUI:
   `hide_now_loading` (A6) and `ui_loading_show_orientation_guide`.
 - [ ] **C15 Coroutine aborts are class wide** because `symbols.rs:266-299` patches `MoveNext` on
@@ -334,11 +381,39 @@ snapshot carried `story_high_speed true` and no skip scale at all.
 - [ ] **C23 Story block length recomputation can shorten a block** (
   `StoryTimelineData.rs:340-341` writes `StartFrame + newClipLength + 1` with no
   `max(originalBlockLength, ...)`), cutting trailing frames of longer non text tracks.
-- [ ] **C24 Story choice auto select applies the same factor twice.**
-  `StoryChoiceController.rs:23-44` and `StoryViewController.rs:8-14` both multiply by
-  `0.75 / story_choice_auto_select_delay` (live delay 0.0001, so 7500x), the constant 0.75 is
-  assumed rather than read from the client, `IS_CHECKING_CHOICE_AUTO_TAP.swap(false)` consumes the
-  flag on the first nested getter call, and only `/0` of the two live overloads is hooked.
+- [~] **C24 Story choice auto select applies the same factor twice.**
+  `StoryChoiceController.rs:41-51` and `StoryViewController.rs:17-18` both apply a number derived
+  from `0.75 / story_choice_auto_select_delay`, and the getter is only scaled while the flag
+  `CheckChoiceAutoTap` raises is up, so the second site scales the scale the first site's
+  accumulator is measured against: one auto tap request carries the factor twice. That double
+  application is the item's root cause and it is still open. What is fixed here is the clamp and the
+  record of the live numbers. Both sites now read one clamped mirror (`STORY_CHOICE_AUTO_SELECT_MULT`,
+  written by `refresh_config_mirrors`, NAN for inert) instead of loading the config on a story path,
+  the delay keeps its code floor of 0.1, and each half is capped by the quantity it touches:
+  `MAX_STORY_CHOICE_AUTO_SELECT_MULTIPLIER` = MAX_FACTOR = 20 on the accumulator increment, which is
+  seconds, and `MAX_STORY_CHOICE_AUTO_SELECT_TIME_SCALE` = MAX_TIME_SCALE = 5.0 on the value the
+  getter hands the story timeline, through `scale_read_time_scale`. The single ceiling the earlier
+  clamp put on both halves was itself a defect: MAX_FACTOR on a time scale left the story clock at 7.5
+  for a game scale of 1.0 at the Config Editor's left end, and 20 with a hand edited config, against
+  the 5.0 every layer that reaches that scale must enforce. Live numbers now, at
+  delay 0.1: increment x7.5, story time scale 1.0 -> 5.0, so at most 37.5 along one request. The
+  pre-fix `0.75 / 0.0001` = 7500 is reachable from neither the slider nor config.json (0, -1.0, NAN,
+  1e-8, 1e6 all come out inert or bounded). Verified against the reproduction in `AnimationSpeed.rs`
+  (`cargo test --lib`: `story_choice_auto_select_multiplier_is_bounded_at_both_sites` and
+  `the_story_choice_getter_half_is_bounded_by_the_time_scale_ceiling`): a game 0.0 and 0.5 pass
+  through, a scale the game holds at 8.0 is not pulled down, 2.0 x 7.5 tops out at 5.0, a delay at or
+  above the game's own 0.75 leaves the story clock at 1.0, and an unwritten mirror is inert on both
+  halves. No game run yet, so it stays `[~]`; the lines a run has to read are `AnimationSpeed:
+  StoryViewController::GetTimeScaleByHighSpeedType 1 -> 5` and `AnimationSpeed:
+  StoryChoiceController::CheckChoiceAutoTap <increment> -> <scaled>`, and installed is not the same as
+  called (A4). Still open: whether the two paths compound in the live client depends on whether
+  `_choiceAutoSelectWaitTime` accumulates the game's scaled delta, which only a run can answer; the
+  0.75 trigger constant is assumed rather than read from the client (`AnimationSpeed.rs:210-213`);
+  `IS_CHECKING_CHOICE_AUTO_TAP.swap(false)` consumes the flag on the first nested getter call; only
+  `StoryViewController::GetTimeScaleByHighSpeedType/0` is hooked and its `/1 -> static
+  float(struct<StoryTimelineController.HighSpeedType:4B>)` overload is not (A5); and
+  `StoryTimelineController::GetTimeScaleByHighSpeedType/1 -> static float(bool)` is hooked as
+  measurement only (item 21).
 - [ ] **C25 About 5.5 s of work runs inside `DllMain` under the loader lock**: 198 hook install
   requests, a 1.9 MB dump written into Program Files, native sqlite hooking, window subclassing
   plus a CBT hook, a Discord IPC pipe connect that fails, and `TerminateProcess` of another
@@ -346,10 +421,14 @@ snapshot carried `story_high_speed true` and no skip scale at all.
   from this list but not the dump, the sqlite hooking, or the window work.
 - [ ] **C26 Outbound update check plus unsigned installer execution path**, live by default,
   from inside the game process (`src/core/hachimi.rs:560-571`, `src/core/updater.rs:151-192`).
-- [ ] **C27 `disabled_hooks` matches bare wrapper names** that are not unique across modules
+- [~] **C27 `disabled_hooks` matches bare wrapper names** that are not unique across modules
   (`Hide` appears in 4 files, `Update` in 3), `new_hook!` logs an install line before the null
   check, and `Interceptor::hook` keys on the hook function address so a reused wrapper would call
-  the first target's trampoline.
+  the first target's trampoline. Repaired for this fork's own new hook in `75f2147`: the story time
+  scale hook is `StoryTimelineController_GetTimeScaleByHighSpeedType`, so one `disabled_hooks` entry no
+  longer silences upstream's `StoryViewController` hook that carries the same bare name. The `Hide` and
+  `Update` collisions, the install line logged before the null check and the key on the wrapper address
+  are untouched.
 - [ ] **C28 Race replay seeking in Global leaves used-skill state unrepaired** because the resync
   stage returns early unless region is Japan (`RaceManagerReplayBase.rs:71-72,110-112`).
 - [ ] **C29 All mod state lives inside the Steam managed install tree** (`hachimi\config.json`,
@@ -383,7 +462,467 @@ snapshot carried `story_high_speed true` and no skip scale at all.
   timeline stands in stops advancement: the wait count froze at 96 and `IsHighSpeedMode` spun at
   180 calls a second. Any future work on these paths has to scale at most one of them, has to know
   which one the game forwards, and has to bound the result against the block length rather than a
-  multiplier. The scaling is removed; both hooks stay as counters.
+  multiplier. The scaling is removed; both hooks stay as counters. The same decision now covers the
+  two story group scalings left on this path, `StoryTimelineController::SetHighSpeedFrameCount` and
+  `GetNextFrameCount_HighSpeed`: the int either one handles is a candidate index into the readonly
+  `_highSpeedFrameCountArray`, and `scale_frame_count` floors a positive result at 1, so dividing
+  that index replaces the entry the game selected instead of shortening a wait: at 1.5 the mapping
+  is 1Ã¢â€ â€™1, 2Ã¢â€ â€™1, 3Ã¢â€ â€™2, 4Ã¢â€ â€™3, 5Ã¢â€ â€™3, 6Ã¢â€ â€™4, so neighbouring requests land on the same slot, and at the
+  >= 5.5 magnitude run 5 produced every index from 1 to 6 collapses onto slot 1. Both paths now hand
+  their values through untouched and only count and log them.
+- [~] **C35 The `time_scale` layer had no ceiling, multiplied the same quantity twice, and inverted
+  the game's own sub-1 writes.** `Time.rs` did `value *= config.time_scale` on every value the game
+  wrote while nothing on that path consulted `MAX_TIME_SCALE`: a slow motion write of 0.5 came out
+  1.5 at lever 3.0, the story group's `scale_time_scale` (capped at 5) and that hook multiplied the
+  same quantity twice so the logged `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` followed by a
+  game write reached 25, and a read-modify-write loop climbed 4, 10, 20 Ã¢â‚¬Â¦ 640 in eight frames.
+  `config.json` is deserialized unbounded and `apply()` passed the raw value through the icall.
+  Now `AnimationSpeed::apply_time_scale` is the one arithmetic every layer shares: a value at or
+  below 1.0 (the game's 0 pauses and its slow motion) is never multiplied, a value above it is raised
+  and clamped to `MAX_TIME_SCALE`, the lever itself is clamped by `normalize_time_scale` to
+  `MIN_TIME_SCALE..=MAX_TIME_SCALE` and mirrored in `TIME_SCALE`, and the Config Editor slider offers
+  no more than the ceiling. Verified by arithmetic against the reproduction (0.5 stays 0.5, story 5
+  then lever 5 stays 5, config 1000 writes 5, the loop saturates at 5, the neutral lever changes
+  nothing); no game run yet, so it stays `[~]`. Known consequence: with the option on, the game's own
+  writes of 1.0 pass through untouched, so `time_scale` acts on values above 1.0 only; the mod's own
+  absolute write that used to complete the picture is gone (see C12).
+  The consequence was wider than this line said, and it is why C39 exists: `scale_time_scale` delegated
+  to the same rule, so the three story getters stopped raising the game's 1.0 as well. The arithmetic is
+  split now, `apply_time_scale` is the write half described above and `scale_read_time_scale` is the read
+  half a getter uses.
+- [~] **C36 `AnimationSpeed::apply_if_dirty` re-ran the whole `apply()` every game frame.**
+  `WAS_SCALED` latched on the first non-neutral write, so `GameSystem_Update` paid 61
+  `il2cpp_field_static_get_value` reads plus 61 writes, three `config.load()` (`factors()`,
+  `HighSpeedSetting::apply`, `StoryTimelineController::apply_config`), an `ENTRIES` lock taken *before*
+  the empty bail out, and the whole `HighSpeedSetting` getter chain with its log line, every frame, for
+  values that had already been written. Now `APPLIED_FACTORS` holds the factor each group's fields were
+  last written at (NAN means never written, which is the state a neutral factor asks for), `plan_group`
+  compares it with the configured factor, a group is rewritten once per factor change, the bail out runs
+  before the lock, `factors()` became `refresh_config_mirrors` plus `mirrored_factors` so the write loop
+  reads the mirrors, and `apply_if_dirty` returns before any of it when nothing is dirty. A group whose
+  fields had no baseline in a pass keeps its marker unset so the next pass retries it - one pass per view
+  change or config change, not per frame. Verified at the time against a reproduction in
+  `AnimationSpeed.rs` that was a copy of the pass rather than the pass: the test module's `Sim` ran its
+  own `apply`, its own write loop and its own `reads += 1` and `writes += 1`, so the number it printed,
+  300 ticks at transition x2 going from 18300 static reads + 18300 writes to 13 + 13, is that model's
+  arithmetic (300 ticks over all 61 fields against 300 ticks over one group) and not a measurement of
+  `apply`, and the model held none of what a view change really pays: `HighSpeedSetting::apply` and
+  `StoryTimelineController::apply_config`, each a `config.load()`, `refresh_config_mirrors`'s own read,
+  and the `ENTRIES` lock. C41 removed the model. The claim now rests on the functions the shipped pass
+  runs (`mirror_config`, `plan_pass` and `finish_pass`, driven by `cargo test --lib`: 300 ticks ask for
+  one rewrite pass, a neutral config asks for none, only the group whose factor changed is ever due, a
+  factor back to 1.0 asks for the restore once, a second factor still scales the game's baseline and not
+  our own write through `baseline` and `scale_value`) and on the counters `apply` charges itself. No
+  game run yet, so it stays `[~]`. What a run has to read is the `AnimationSpeed apply pass N: a config
+  reads, b entry locks, c table passes, d field reads, e field writes` line; on this client `d` and `e`
+  stay 0 until the duration fields resolve (C13), so the per field half of the old headline has never
+  been measured anywhere. Known consequence: a group at an unchanged factor is no longer looked at, so
+  a class whose static constructor runs mid scene, or a value the game reassigns at runtime, keeps its
+  own number until the factor changes or the option is turned off. The way to hold such a field without
+  paying per frame is a detour on the method that writes it, not a re-assertion loop - the tradeoff C13
+  describes.
+
+- [~] **C37 `AnimationSpeed::init` applied the speed options from inside the batch window.** Its
+  last statement was `apply()`, and `init` runs between `Interceptor::begin_batch` and
+  `finish_batch` (`src/il2cpp/hook/mod.rs:272`, `:297`, `:307`, reached through
+  `src/il2cpp/hook/umamusume/mod.rs:368`), which sits under `DllMain` and the `LoadLibraryW`
+  wrapper (`src/windows/main.rs:62-73`, `src/windows/hook.rs:64-71`) with the loader lock held,
+  before the game finished initialising and while no hook is armed. `apply()` reaches game code
+  through `HighSpeedSetting::apply`: `StoryManager::GetMaxHighSpeedType`,
+  `GetSavedHighSpeedSetting` and `SaveHighSpeedType` (the persisting one), plus
+  `SaveDataManager::instance`, `SaveDataManager::get_SaveLoader` and
+  `ApplicationSettingSaveLoader::get_TrainingHighSpeedType` / `set_TrainingHighSpeedType`. The
+  field write loop itself was inert on this client (C13: 0 of 61 fields resolve), so the game calls
+  under the loader lock were that getter chain and the saving write. `init` now ends with
+  `refresh_config_mirrors` - atomics and one `config.load()`, no game state - plus `mark_dirty()`,
+  so the first write is the one the first `GameSystem_Update` tick performs through
+  `apply_if_dirty` (`GameSystem.rs:49`), the deferred shape `Time::init` already uses.
+  `SceneManager::ChangeView` still runs the apply before the first view change reads its fade
+  constants, and the `HighSpeedSetting` raise retries at the next view change if `SaveDataManager`
+  had no instance on that first tick. Verified by `cargo check` for `x86_64-pc-windows-msvc` plus
+  `the_game_tick_path_reaches_the_pass_once_per_config_change` (300 calls through the shipped
+  `mark_dirty` / `apply_if_dirty` pair reach `apply` once), and by the `AnimationSpeed apply pass N:`
+  totals `apply` now charges itself (C41). The test that used to stand here,
+  `the_install_window_writes_no_field_and_the_first_game_tick_does`, was the test module's `Sim`
+  counting its own copy of the pass and it is gone. `cargo clippy` for `x86_64-pc-windows-msvc` could
+  not be run from this machine; clippy 0.1.98 is installed for this toolchain and `cargo clippy --target
+  x86_64-pc-windows-msvc --all-targets -- -D warnings` is clean in this tree (C42 corrects this claim); no
+  game run yet, so it stays
+  `[~]`. A run has to show `AnimationSpeed:` and `HighSpeedSetting:` lines landing after
+  `Hooking finished:` instead of inside the batch window.
+
+- [~] **C38 The result screen auto skip serialises every result part behind one process-wide flag,
+  and the exit that drops a request logged nothing.** `SingleModeResultContentBase.rs:25` holds one
+  `static IN_SKIP: AtomicBool` for the whole process, while the call it guards is per instance:
+  `skip_fn(this)` finishes the tween chain of the result part that asked. So while one part is inside
+  `SkipFadeInTween`, `SkipGuard::try_enter` refuses every other part on the same screen and the hook
+  returned without writing a line. The only two signals a run had were the entry line and the
+  `SkipFadeInTween unavailable` warning, and a dropped request writes both of them exactly the way a
+  finished chain does - which is how run 3 read "5 entries, 0 unavailable" as proof the skip worked
+  end to end. Reproduced against a mock game: a run where a second part loses its request and a run
+  where both parts are skipped write byte identical logs, and the ledger's arithmetic reports 2
+  finished chains for a run that finished 1.
+  Now `SKIP_GUARD_CONTENDED` counts every dropped request and each one gets its own line,
+  `auto_skip_result_screens: skip guard busy, request N dropped (asked by <ptr>, held for <ptr>)`,
+  first six then a totals line every 4096 like the story counters, and `IN_SKIP_OWNER` records which
+  instance holds the guard, so the pointers say whether a contention is the completion callback
+  re-entering the same part (expected, harmless) or a different part that lost its skip. The count
+  turns the log into an equation: `entries - unavailable - contended` is the number of chains this
+  hook finished. Verified by the reproduction (the two identical logs became different, the arithmetic
+  matches the ground truth in both runs, 5000 contended requests cost 7 log lines and count 5000, a
+  panic inside the guarded call still releases the guard) plus `cargo test --lib` (48 pass) and clippy
+  clean for `x86_64-pc-windows-msvc`; the `aarch64-linux-android` leg has since run clean here too (C42)
+  and nothing added is platform specific. No game run yet, so it stays `[~]`. What it does not change is the
+  serialisation itself: one chain at a time stays the conservative choice until a run shows how often
+  real result screens contend, because a per instance guard admits the two-part ping-pong the guard
+  exists to stop. The line a run reads is the contention count beside the entry count.
+
+- [~] **C39 The rule C35 introduced disabled `story_speed` on the story path and no record said so.**
+  `apply_time_scale` leaves a value at or below 1.0 exactly as it is, `scale_time_scale` delegated to it,
+  and `scale_time_scale` is what the three installed Story getters scale by
+  (`StoryTimeline_getTimeScaleEventWipe`, `StoryTimeline_getTimeScaleAfterEndStory`,
+  `SingleModeUtils_GetCutTimeScale`, `AnimationSpeed.rs:998-1000`). That is the only story scaling this
+  fork measured live: `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` in runs 1 and 2 (A4 and the Run 2
+  and again in run 3, and the rule turned it into `1 -> 1`, which `hit` does not even log because
+  the value did not change. With C13 (0 of 61 duration fields resolve) and the two Story duration getters
+  installed with no call (A4), nothing in `Group::Story` had a measured effect, while `story_speed`
+  stayed a slider (`gui.rs:5916-5919`), a name on the `Config snapshot:` line and a key in all ten
+  locales, which is what AGENTS section 9.5 and C14 forbid. C35's own consequence note named `time_scale`
+  only. Reproduced on the fork's own arithmetic before the fix: with the story mirror at 5.0,
+  `scale_time_scale(1.0, Group::Story)` returned 1.0.
+
+  The reason for the rule is a value the game is writing: 0 is a pause, a value under 1 is slow motion and
+  1.0 is the speed the game chose to run at, and C12 forbids the mod raising any of them. A getter is the
+  other direction: it hands back the scale the timeline steps its own clips by, and the 1.0 there is the
+  neutral playback speed a speed up option exists to raise. The committed build before C35 scaled it
+  (`(value * factor).min(MAX_TIME_SCALE).max(value)`) and measured 5 out of it in three runs, so this is a
+  regression being restored rather than a new lever.
+
+  Fix: the two directions are two functions. `apply_time_scale` keeps `value <= 1.0` and is documented as
+  the write half; `Time.rs`'s detour, its `plan_write` and its tests are untouched. The new
+  `scale_read_time_scale` (`AnimationSpeed.rs:309-315`) protects only a value under 1.0, passes a scale
+  the game already holds above `MAX_TIME_SCALE` through instead of pulling it down (AGENTS section 5: time
+  scales only go up), and caps the raise at `MAX_TIME_SCALE`. `scale_time_scale` (:319-321) calls it, and
+  that is the whole change to the hook path. The one ceiling still reconciles both levers: a getter
+  raising 1.0 to 5 and a `time_scale` lever of 2 on the game write stop at 5.
+
+  Verified here: the reproduction now returns 5.0, a stored 0.0 and 0.5 still pass through, a scale the
+  game holds at 8.0 stays 8.0, `MAX_FACTOR` on a 1.0 scale comes out at `MAX_TIME_SCALE`, the neutral
+  factor still changes nothing, and the write half still refuses 1.0 and 0.5 and still pulls 8.0 down to
+  5.0 (`cargo test --lib`, 47 pass; `cargo check --all-targets` and `cargo build --release` clean). No
+  game run yet, so it stays `[~]`. What only a run can answer: whether a `story_speed` above 1.0 prints
+  `AnimationSpeed: StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` (or the EventWipe or GetCutTimeScale
+  spelling) on this client, and whether raising that story scale removes wall clock time without
+  disturbing story advancement, the run 5 shape this ledger is careful about. The other reading of this
+  item, that the option stays off the story path and gets a C14 note like `hide_now_loading`, is one line
+  away: point `scale_time_scale` back at `apply_time_scale` and `story_speed` is inert again.
+
+  Correction, found in the scoped checkup of this change set: the sentence above that the write half
+  "still pulls 8.0 down to 5.0" recorded a defect as expected behaviour, and the split is what dropped
+  it. HEAD's one shared helper ended `(value * factor).min(MAX_TIME_SCALE).max(value)`; the new write
+  half ended at `.min(MAX_TIME_SCALE)`, so at any lever above 1.0 `apply_time_scale(8.0, 2.0)` came out
+  5.0 and both writers of `Time.timeScale` take that arithmetic, the `set_timeScale` detour through
+  `scale_game_write` and the deferred config write through `plan_write`. The mod therefore wrote 5.0
+  over a game value of 8.0, the thing the `plan_write` docstring says the design avoids and what the
+  read half refuses, so the two halves of one helper disagreed with each other and with AGENTS
+  section 5. Fix: the never lower floor is back on the write half (`AnimationSpeed.rs:401` is
+  `.min(MAX_TIME_SCALE).max(value)` again), its comment now states the floor instead of the opposite,
+  the test that baked the lowering in asserts a game scale above the ceiling passes through, and
+  `Time.rs` gained `a_game_scale_above_the_ceiling_is_not_pulled_down`, which runs both writers. The
+  ceiling still binds every raise the mod makes, so nothing compounds: a game 4.0 at lever 2.0 is 5.0,
+  a second raise from 5.0 stays 5.0, `scale_game_write(5.0, 5.0)` is 5.0, and a value at or below the
+  ceiling can never come out above it. The only scale above `MAX_TIME_SCALE` that can reach Unity
+  through these paths is one the game itself asked for. Verified here: `cargo test --lib`, 59 pass,
+  0 warnings, and the reproduction fails without the floor (`left: 5.0, right: 8.0`). No game run yet,
+  so this stays `[~]`.
+  What only a run can answer: whether this client ever holds `Time.timeScale` above `MAX_TIME_SCALE`
+  (the mod's own raise cannot put it there), which a `Time::set_timeScale call` line shows, and whether
+  leaving such a value alone changes the wall clock numbers this ledger measures.
+
+- [~] **C40 `apply_time_scale` scaled downward too, and the Config Editor offered the range that reaches it.**
+  C35's clamp floors the lever at `MIN_TIME_SCALE = 0.1`, `normalize_time_scale` kept it there and the
+  Performance slider used those same constants as its left end (`gui.rs:5900`), so the option could be
+  set below 1.0. The ceiling arithmetic only caps upward, `(value * factor).min(MAX_TIME_SCALE)`, so a
+  sub 1.0 lever multiplied a value the game had put above 1.0 back under it: `apply_time_scale(4.0,
+  0.1)` came out 0.4, and both paths that reach Unity take that arithmetic, the `set_timeScale` detour
+  and the deferred config write through `plan_write`. That is the inversion C35 exists to refuse,
+  against AGENTS section 5 (time scales only go up, and are capped) and against the note in `Time.rs`
+  saying the design avoids a lever that slows the game's own fast forward down. Nothing in the tree
+  asked the question: the `Time.rs` state machine tests exercised levers 1.0, 1.05, 1.2, 2.0 and 3.0
+  only, and no test covered `normalize_time_scale` at all.
+
+  Fix: the lever's floor is its neutral value. `MIN_TIME_SCALE` is 1.0, so the clamp every consumer of
+  the lever reads the config through (`refresh_time_scale`, `refresh_config_mirrors`) and the slider
+  range that reuses those constants both land on an inert 1.0 for anything below it, a hand edited 0
+  included. The arithmetic refuses a factor at or below 1.0 on both halves, `apply_time_scale` and
+  `scale_read_time_scale`, which is the floor `story_choice_time_scale_factor` already applied to the
+  story choice lever.
+
+  Verified here: the reproduction stops at the game's own number, 0.4 became 4.0 at a lever of 0.1 on
+  the hook path and on `plan_write`, the slider's left end lands on 1.0 and `normalize_time_scale(0.0)`
+  is 1.0, while everything the earlier fixes established still holds (a game 1.0 is not pushed, a 4.0 at
+  lever 2.0 is 5.0, a stored 0.0 and 0.5 pass through, a scale the game holds at 8.0 is not pulled down,
+  the neutral lever writes nothing): `cargo test --lib`, 50 pass, including the two new cases
+  `a_time_scale_lever_below_one_never_lowers_a_time_scale` and
+  `a_lever_below_one_does_not_slow_the_games_fast_forward`. No game run yet, so it stays `[~]`. What
+  only a run can answer: whether a player config left holding a lever below 1.0 had been slowing a real
+  Gallop write above 1.0 before this narrowed the range; `Config snapshot:` prints `time_scale`, so a
+  run reads that directly.
+
+- [~] **C41 The C36 verification numbers came from a hand written simulator, and the tests the ledger
+  cites never ran.** One root cause, two breaks. `AnimationSpeed::apply` logs only what it changes
+  (`AnimationSpeed: Class.Field a -> b (xN)` and `shortened N animation duration fields`), and on this
+  client neither line fires because `init` resolves 0 of 61 duration fields (C13), so nothing in the
+  tree printed what a pass *costs*. The cost C36 removed was therefore measured in the test module:
+  `AnimationSpeed.rs` kept a `Sim` with its own `apply`, its own plan array, its own write loop and its
+  own `self.reads += 1 // il2cpp_field_static_get_value` and `self.writes += 1`, and `Time.rs` kept a
+  `Sim` whose `game_write` restated the detour and whose `apply` restated the marker check. The
+  headline (18300 static reads + 18300 writes down to 13 + 13) is that copy's arithmetic over 300
+  ticks, and the copy holds none of what a view change actually pays: `HighSpeedSetting::apply` and
+  `StoryTimelineController::apply_config`, each a `config.load()`, `refresh_config_mirrors`'s own read,
+  and the `ENTRIES` lock. Alongside it, `.github/workflows/clippy_check.yml` had no test step at all,
+  so clippy compiled the `#[cfg(test)]` modules and never ran them, while AGENTS.md still stated that
+  no unit tests for hook code exist.
+
+  Fix, three parts. (1) The pass counts itself: `APPLY_PASSES`, `APPLY_TABLE_PASSES`,
+  `APPLY_CONFIG_READS`, `APPLY_ENTRY_LOCKS`, `APPLY_FIELD_READS` and `APPLY_FIELD_WRITES`, charged at
+  the sites that do the work (the top of `apply`, the entry lock, `refresh_config_mirrors`,
+  `read_static`, `write_static`, and the two game setting halves through `AnimationSpeed::note_config_read`),
+  printed by `report_pass` on every exit path with the fork's first 6 then every 64 pattern. They sit
+  inside `apply`, which `apply_if_dirty` reaches once per config change, so a quiet game tick still
+  pays one atomic swap and nothing else. (2) The sequencing the copy duplicated is now code the pass
+  runs and the tests call: `mirror_config(&Config)` split out of `refresh_config_mirrors`,
+  `plan_pass(factors)` for the three group decisions and `finish_pass(rewrite, factors, no_baseline)`
+  for the markers, and in `Time.rs` `scale_game_write(value, lever)` for what the detour does with one
+  game write and `claim_lever(lever)` for `apply`'s marker gate. Both `Sim` structs are gone. What a
+  test process still cannot reach is written down where it stands: an il2cpp field read or write, the
+  `ENTRIES` table, the `set_timeScale` icall read and write, and `Hachimi::instance()`, which ends the
+  process when it is asked for before init, so `apply` now stops at a `Hachimi::is_initialized()` guard
+  instead of walking into a config read with no singleton behind it. (3) CI gained a `unit_tests` job
+  on `windows-latest` running `cargo test --lib`: the crate builds only for Windows and Android, so
+  these are host tests and cannot ride the cross compiling clippy jobs. AGENTS.md section 4 now states
+  what the tests drive and what they cannot prove, and section 7 lists the apply totals line.
+
+  Verified here: `cargo test --lib`, 50 passed / 0 failed, with the eight `AnimationSpeed` cases that
+  replaced the `Sim` tests and `claim_lever_holds_one_pass_per_lever_value` in `Time.rs` driving
+  `mirror_config`, `plan_pass`, `finish_pass`, `mark_dirty` and `apply_if_dirty`, `scale_game_write`
+  and `claim_lever` directly; no test module copy of either pass is left to agree with itself.
+  `cargo check --all-targets` and `cargo build --release` finished with no warnings. The neutral
+  default asks for no rewrite at all, 300 game tick calls reach `apply` once, only the group whose
+  factor changed is ever due, a factor back to 1.0 asks for the restore once, a group whose fields had
+  no baseline is asked again, and the apply line prints 6 detail lines for a short run then one every
+  64 passes.
+
+  What is still a model, said so the next reader does not over read it: `HighSpeedSetting.rs` and
+  `StoryTimelineController.rs` keep a `Sim` in their test modules. Both stand in for the il2cpp half
+  only - `StoryManager`'s getter and setter chain, `SaveDataManager` and `ApplicationSettingSaveLoader`,
+  `StoryTimelineController`'s static field - all of which need a live `this` or a resolved class, and
+  `StoryTimelineController`'s `reads_as_high_speed` is the test's own guess at what the game's
+  `IsHighSpeedMode` answers. Their decisions do run through shipped functions (`plan_pass`,
+  `raise_value`, `restore_value`, `observe`, `already_written_for_state`) and both modules already
+  count their own writes in the shipped code (`HighSpeedSetting` totals what a restore put back,
+  `StoryTimelineController` has `HIGH_SPEED_WRITES`), so the write lists in those tests are a model's
+  counts and the lines those counters print are a run's. The remaining work on this item is to put
+  those two write halves on the same footing as `plan_pass`, which needs the game's own objects.
+
+  What only a run can answer: the `d field reads, e field writes` half of the apply line, so any per
+  field cost number at all. The 13, 39 and 9 fields are counts read off `FIELDS`, not measurements, and
+  on this client the table is empty (C13), so a run is expected to read the pass as config reads plus
+  one lock per due group and no field call. Whether the `Hachimi::is_initialized()` guard ever fires in
+  game is a run question too. And the lint gate on the new code: clippy 0.1.98 is installed for this
+  toolchain, so the gate ran here rather than waiting on CI. Both CI legs, `cargo check --all-targets` and
+  `cargo build --release` finished clean on 2026-10-08, the Android leg included (C42). A game run is still
+  what the cost half of this item needs.
+
+- [~] **C42 The `aarch64-linux-android` leg was never compiled for the real crate, and the reason every
+  entry gave for it was false.** AGENTS section 1 and 4 and `.github/workflows/clippy_check.yml:39-48` gate
+  the fork on clippy `-D warnings` for `aarch64-linux-android`, and this series' most platform sensitive
+  change is exactly the surface only that leg compiles: `src/il2cpp/mod.rs:14-17` put `pub mod slot_table`
+  and `mod slot_table_generated` behind `#[cfg(target_os = "android")]` and dropped the
+  `#![allow(dead_code)]` the module carried. Entries 24 and 25, and C37, C38 and C41 above, all recorded
+  that Android clippy or clippy itself could not run on this machine. Both claims are wrong: the NDK is at
+  `C:\Users\<user>\Documents\hachimi-global-recon\android-ndk-r27c`, whose
+  `toolchains\llvm\prebuilt\windows-x86_64\bin` holds `clang.exe` (18.0.3), the
+  `aarch64-linux-androidNN-clang` wrappers and `llvm-ar.exe`; `rustup target list --installed` lists
+  `aarch64-linux-android`; `cargo clippy --version` is 0.1.98 against rustc 1.98.1, and clippy is in the
+  stable toolchain's component manifests.
+
+  The real blocker is host wiring, three details deep. (1) CI writes
+  `$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang` into
+  `CC_aarch64_linux_android`. In a Windows NDK copy that extension-less name is a 209 byte bash wrapper
+  (`"$bin_dir/clang.exe" --target=aarch64-linux-android24 "$@"`), `llvm-ar` likewise, and Windows cannot
+  exec either, so cc-rs failed with `ToolExecError ... %1 is not a valid Win32 application. (os error 193)`
+  inside `ring` and `blake3`. Those are third party build scripts, so `cargo clippy` stopped there and
+  `hachimi` was never reached: that is what read as "no NDK clang". (2) `AR_aarch64_linux_android` needs the
+  `.exe`. (3) `ring` preprocesses its `.S` asm through a clang temp file, so `TMP`/`TEMP`/`TMPDIR` must sit
+  on a path the shell may write to; a temp dir outside the workspace gave `clang: error: unable to make
+  temporary file: Permission denied` in `ring` with everything else wired correctly.
+
+  Run on 2026-10-08 15:42 with `ANDROID_NDK_ROOT`, `CC/CXX_aarch64_linux_android` and
+  `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` on `aarch64-linux-android24-clang(.cmd)` plus
+  `AR_aarch64_linux_android=llvm-ar.exe` (and, equivalently, `clang.exe` with
+  `CFLAGS_aarch64_linux_android=--target=aarch64-linux-android24`), CI's
+  `RUSTFLAGS=-C link-args=-static-libstdc++ -C link-args=-lc++abi`, and a workspace temp dir:
+  `cargo clippy --target aarch64-linux-android -- -D warnings` and the same with `--all-targets` both
+  finished with **zero diagnostics**, under both tool spellings, after `ring` (24 objects plus its archive),
+  `blake3` and `dobby-sys` (its prebuilt `dobby_static/android/arm64` archive) built for the target. So the
+  android only surface of this series compiles and lints clean; nothing had to be changed in it.
+  `cargo clippy --target aarch64-linux-android --all-targets -v` names the two units that were linted:
+  `clippy-driver ... --crate-name hachimi src\lib.rs --crate-type cdylib --target aarch64-linux-android`
+  and the `--test` unit, which is what compiles the `#[cfg(test)]` modules of the android only modules.
+  Compiling them is not running them: `slot_table.rs`'s own tests (`failed_validation_is_cached_not_re_walked_per_lookup`,
+  `retry_budget_is_bounded`) sat behind that cfg when this entry was first written: the cross target
+  compiled them, the Windows `unit_tests` job could not compile them, and a cross target test binary cannot run
+  on a Windows host, so nothing executed them. The 50 host tests recorded below were the count of that moment, and
+  C43's cfg line has since moved those two into the host run. CI's Android step now runs clippy with `--all-targets` too
+  (`.github/workflows/clippy_check.yml`), so that surface is linted on every push and not only when a
+  human remembers to ask for it. The
+  Windows leg (`cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings`), `cargo check
+  --all-targets`, `cargo build --release` (2 m 15 s) and `cargo test --lib` (50 passed, 0 failed at that
+  moment; the tree this change set delivers measures 59, re-measured below) are clean.
+
+  Proof that the leg reaches the gated code instead of passing by skipping it: a probe put into
+  `src/il2cpp/slot_table.rs` (an unused private function, a `Vec::new()` followed by `resize`, and a
+  `v.len() == 0` as the control) made the Android leg fail with `error: function leg_probe_unused is never
+  used` at `slot_table.rs:68` and `error: slow zero-filling initialization` at `slot_table.rs:74`, noted
+  `-D clippy::slow-vector-initialization implied by -D clippy::perf`, in both the `lib` and the `lib test`
+  unit, while the Windows leg stayed clean over the same tree. That is the cfg gate working, the dropped
+  `#![allow(dead_code)]` being enforced, and `perf = "deny"` live on the cross target; the control printed
+  nothing, matching `all = "allow"`. The probe is gone and both legs are clean again.
+
+  What this does not close: clippy emits metadata only, so nothing in the runs above linked. That gap was
+  then filled with a claim that does not hold: `cargo build --target aarch64-linux-android` was recorded as
+  failing at the link on this Windows host because `build.rs:69-70` and CI's `RUSTFLAGS` hand ELF options to
+  lld (`lld: error: unknown argument: -z` five times, from `-z relro,-z,now` and `-z max-page-size=16384`,
+  plus `--version-script`, `--no-undefined-version` and `--eh-frame-hdr`). Re-run 2026-10-08 16:57 in the
+  delivered tree with the wiring above, it exited 0 after 25.25 s and wrote
+  `target\aarch64-linux-android\debug\libhachimi.so`, 149,394,040 bytes, so build.rs's own
+  `-Wl,-z,max-page-size=16384` and `-Wl,-z,common-page-size=16384` are accepted by the clang named as the
+  target linker. Adding CI's `RUSTFLAGS=-C link-args=-static-libstdc++ -C link-args=-lc++abi` still exits 0,
+  with one diagnostic, `linker stderr: clang: argument unused during compilation: '-static-libstdc++'`. No
+  `-z` error appeared under either spelling here. What does fail is naming no linker at all: `CC/CXX` on
+  `clang.exe` with `CFLAGS_aarch64_linux_android=--target=aarch64-linux-android24` and no
+  `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER` ends at `error: ``cc`` not found`, exit 101. The host linker
+  gap sentence is withdrawn. `tools/android/build.sh` stays the device path because it also packages the
+  module for a device, not because this host cannot produce an AArch64 shared object.
+  Closing gate, and it is not met, so this item stays `[~]`. The run is what this item is about and it
+  reproduces in the delivered tree, re-measured 2026-10-08 against `51941ea` plus this dirty working tree:
+  `cargo clippy --target aarch64-linux-android --all-targets -- -D warnings` exited 0 with 0 diagnostics, the
+  Windows `cargo clippy --all-targets -- -D warnings`, `cargo check --all-targets` and `cargo test --lib`
+  exited 0, 0 warnings, 59 tests passed 0 failed, the 8 `il2cpp::slot_table::tests` included, which is
+  C43's cfg change and supersedes the 50 recorded above. 58 was the count one round earlier; the delivered
+  tree runs 59, `cargo test --lib -- --list` grouping them as 21 `AnimationSpeed`, 13 `Time`, 12
+  `StoryTimelineController`, 8 `slot_table`, 5 `HighSpeedSetting`. The probe control was re-run here rather than
+  remembered: a `#[cfg(target_os = "android")] fn leg_probe_unused` holding a `Vec::new()` followed by
+  `resize` made the Android leg exit 101 with `function leg_probe_unused is never used` and `slow
+  zero-filling initialization`, noted `-D clippy::slow-vector-initialization` implied by
+  `-D clippy::perf`, in both its `lib` and its `lib test` unit, while the Windows `--all-targets` leg stayed
+  at 0 diagnostics over the same tree. The probe is out of the tree and every leg is clean again, so the
+  claim that this leg reaches the gated code instead of passing by skipping it is measured here, not
+  asserted. Two things keep the item open: the commit hash section 10 wants now exists (`88837f7` carries
+  the cfg gate, `4c8ff25` the generator, `a6f0adb` the two CI legs), and no Android game run exists, so
+  nothing in this fork claims an Android hook was reached.
+
+- [~] **C43 The android only cfg gate put the slot table reproductions where no test run could reach
+  them.** The gate that keeps the 234 pinned offsets out of the Windows deliverable (the two
+  `#[cfg(target_os = "android")]` lines over `slot_table` and `slot_table_generated` in
+  `src/il2cpp/mod.rs`) also gates the module's
+  `#[cfg(test)] mod tests`, so `cargo test --lib` here stopped compiling them: 50 host tests ran and not one
+  of them was `il2cpp::slot_table::tests`. The two most recent slot table fixes lost their only executable
+  coverage and no CI job had any either: the Android leg compiles `#[cfg(test)]` code with `--all-targets` but
+  cannot run a cross target test binary, and the Windows `unit_tests` job cannot compile a module its target
+  does not build.
+
+  Fix, one line of cfg: both modules are gated `#[cfg(any(target_os = "android", test))]`. `check`, `clippy`
+  without `--all-targets` and `build --release` on Windows never set `test`, so the deliverable and its lint
+  scope are unchanged. A test build compiles the module, so its 8 tests, including
+  `counts_alone_cannot_tell_a_mispinned_table_from_a_good_one` (the per name mismatch counter) and
+  `failed_validation_is_cached_not_re_walked_per_lookup` (the never re-walk a rejected table regression), run in
+  `cargo test --lib` here and in CI's `unit_tests` job on every push. Off Android the module stays inert:
+  `find_libunity_base` under `cfg(not(unix))` returns None, so the probe reads no address and every lookup
+  answers 0 (`resolve_is_inert_without_libunity`).
+
+  Controls that show the gate moved only where intended, with a probe in `slot_table.rs` (an unused private
+  function, a `Vec::new()` plus `resize`, the C42 shape): `cargo check` and `cargo clippy -- -D warnings` on
+  Windows finished clean with the probe in place, so a non-test Windows build still does not compile the
+  module; the same tree made `cargo test --lib` report `function leg_probe_unused is never used` against
+  `hachimi (lib test)`, made `cargo clippy --all-targets -- -D warnings` fail with that error plus
+  `-D clippy::slow-vector-initialization` implied by `-D clippy::perf`, and made
+  `cargo clippy --target aarch64-linux-android --all-targets -- -D warnings` fail in both its `lib` and
+  `lib test` units, so the Android half of the gate is untouched. The probe is gone and every leg is clean
+  again. AGENTS section 4 now describes the gate as it is.
+
+  What this does not verify: the host run reaches `validate()` through the `cfg(not(unix))` stub, which answers
+  "libunity.so is not loaded", so the host tests prove the cached verdict and the bounded budget (no full probe
+  after a cached failure, at most `MAX_VALIDATE_ATTEMPTS` per process) and the pure tally arithmetic, not a
+  rejection by a fingerprint or a sampled name against a real libunity, and never a `dl_iterate_phdr` walk.
+  Whether a device adopts the table, what `diag[post-load]` reports there and what the bounded retries cost is
+  a device run, and no Android run exists.
+
+  Closing gate, and it is not met either, so this item stays `[~]`. The cfg line reproduces in the delivered
+  tree, re-measured 2026-10-08 against `51941ea` plus this dirty working tree: `cargo test --lib` ran 59
+  tests, 0 failed, and 8 of them were `il2cpp::slot_table::tests`, the two named above included. `cargo
+  check --all-targets`, `cargo clippy --all-targets -- -D warnings` and `cargo clippy --target
+  aarch64-linux-android --all-targets -- -D warnings` all exited 0, the last one with the 234 offsets and
+  the test unit compiled for the target, and the C42 probe control, a `leg_probe_unused` inside a
+  `#[cfg(target_os = "android")]` block, made that leg exit 101 while the Windows `--all-targets` leg stayed
+  clean over the same tree, so the gate moved only where intended. What section 10 wants on a closed item,
+  the commit hash carrying the cfg line, does not exist: the change set is left uncommitted by instruction,
+  and a device run is still the only answer to whether a device adopts the table.
+
+### Ledger gate check for this change set, measured against `51941ea` and the dirty tree
+
+Two numbers this change set recorded about itself do not hold on the tree it delivered, and the second is
+not what the command it names produces there. What was recorded: no `[x]` awarded anywhere in the change
+set, count 0, and the ledger's remaining `[x]` items are 7 pre-existing run-backed ones. What the delivered
+tree measured, before this block was written:
+
+- `git diff -- DEFECTS.md | Select-String '^\+- \[x\]'` -> 2 added items, not 0. They were `- [x] **C42`
+  and `- [x] **C43`, and a third added line carried the word `[x]` in prose. `git show HEAD:DEFECTS.md` has
+  0 matches for `C42` or `C43`, so both closures are new in this change set.
+- `Select-String '^- \[x\]'` -> 0 over `git diff` and 9 over the file. No reading of this file or of this
+  diff produces 7.
+- Top level `- [x]` items: 8 at HEAD, 9 in the tree. The two extra were C42 and C43; one HEAD item,
+  `scale_frame_count` put to use by `SetHighSpeedFrameCount`, had been demoted to `[~]` in the same diff.
+  Nested `- [x]` items: 1 at HEAD and 1 in the tree. Numbered `[x]` items in section D: 5 at HEAD and 5 in
+  the tree. None of those were added or removed.
+- Item counts: 15 top level items added (13 `[~]`, 2 `[x]`), 5 removed (4 `[ ]` promoted to `[~]`, 1 `[x]`
+  demoted), 7 numbered `[~]` items added in D. The change set is 28 modified files, 0 staged, 0 untracked;
+  line totals move every time the ledger is edited, so only the marks are quoted here.
+- The round's own DEFECTS.md citations do not point at what it delivered either: the lines it named, 757,
+  762, 766 to 773 and 768, sit inside the C42 entry, and the entry it actually edited is the one headed
+  "E3 This fork's own Performance labels were English-only in nine locales" in section E. A ledger that is
+  still being edited moves its own line numbers, so cite an entry by ID and heading, not by line.
+
+The commands as written could not have measured what they claimed. Git prefixes every diff line with `+`,
+`-` or a space, so an added top level ledger item prints as `+- [x] **C42 ...` and a removed one as
+`-- [x] ...`, and a pattern anchored on `^- \[x\]` matches neither shape. A check that cannot match what it
+looks for returns a clean number on any tree, which is how an unclean gate gets reported as passing. The
+shapes that do measure a ledger are `^\+- \[x\]` for a closure awarded by the change set, `^-- \[x\]` for a
+closure taken away, `^\+- \[~\]` for an item opened or demoted, and `^- \[x\]` only against the file, never
+against a diff.
+
+Why the gate matters here: `[x]` is this fork's terminal mark, section 10 backs it with a commit hash and
+"never mark `[x]` without a run", and the round written to take an `[x]` away from an item that had no run
+shipped two new `[x]` closures. C42 and C43 now sit at `[~]`, each naming the runs that do back it and the
+gate it still lacks. Measured again after that correction: `^\+- \[x\]` -> 0, `^-- \[x\]` -> 1, and the
+ledger reads 7 `[x]`, 22 `[~]`, 36 `[ ]` and 3 `[latent]` at top level, C items C1 to C43, which is why the
+section heading above read 34 and now reads 43. The tree carries one top level closure fewer than the tree
+this change set started from: it awarded none and retired one. `C7` and `C27` moved from `[ ]` to `[~]` in
+the same pass, each naming the part repaired and the part left open.
+The correction is not only the two marks. C42's body also claimed that no job here or in CI executed
+`slot_table.rs`'s two tests, which was true while that module sat behind `#[cfg(target_os = "android")]`
+alone and is false in the delivered tree, where `cargo test --lib` runs 8 `il2cpp::slot_table::tests`; the
+entry now says which count belongs to which moment, and AGENTS section 10 states the mark rule plus the
+diff shapes a ledger self check has to match.
+
+Counts quoted inside single entries (45, 48, 50) are snapshots of the moment that entry was written, not of
+the delivered tree. The delivered tree was measured once, against `4e40dbf`: `cargo test --lib` ran 59 tests
+with 0 failed, `cargo check --all-targets` and `cargo clippy --target x86_64-pc-windows-msvc --all-targets
+-- -D warnings` exited 0 with no diagnostics, `cargo clippy --target aarch64-linux-android --all-targets
+-- -D warnings` exited 0 with the 234 offsets and the test unit compiled for the target, and `cargo build
+--release` finished in 2 m 30 s with no warnings. That closes the two problems the fix series ended on: the
+android link claim C42 repeated is withdrawn above, and 59 is the count every entry now quotes for this tree.
 
 ## D. Fix order
 
@@ -393,8 +932,12 @@ snapshot carried `story_high_speed true` and no skip scale at all.
 4. A5 hook `PlayFadeFrontCanvas` and the `HighSpeedType` enum overload.
 5. C2 unwind and SEH barrier at hook entry, `unwrap_or_else` on shared mutexes, bypass instead of
    `process::exit`.
-6. C5 clamp `ui_animation_scale` in code and leave `independent_time` alone.
-7. C22 and C24, the two compounding multipliers that are live in the current config.
+6. [~] C5 clamp `ui_animation_scale` in code (`AnimationSpeed` mirror, 0.1..=MAX_FACTOR) and
+   leave `independent_time` alone: the clamp landed, the `independent_time` half is still open.
+7. [~] C22 and C24, the two compounding multipliers that are live in the current config. C24's two
+   sites now read one clamped mirror and each half is capped by the quantity it touches (MAX_FACTOR on
+   the wait time increment, MAX_TIME_SCALE on the story time scale); the same factor is still applied
+   on both paths, which is the item's root cause, and C22 is untouched.
 8. C1 remaining `get_orig_fn!` audit and the proxy export stubs.
 9. A6 `Show/7` and `Hide/3` still open. A7 is `[~]`: the reference bit is verified before a wrapper
    writes back and one method is hooked through it (`be41b21`), the matcher itself is unchanged.
@@ -412,10 +955,13 @@ snapshot carried `story_high_speed true` and no skip scale at all.
       and `/1 -> void(class<StoryTimelineTextClipData>)` are not hooked; only the `(int)` overload is
     - [x] `high_speed_settings` is in the Config Editor, on the Performance tab (`e705585`, `3adb2bf`)
 
-11. Read the next run before choosing the direction of A13: the line
-    `Hooking finished: N hooks armed in one pass, S s` against the measured 4.68 s, the six
-    `GetNextFrameCount_HighSpeed frames a -> b, count c -> d` lines, and whether the 428.6 s of screen
-    time in run 2 moved.
+11. Read the next run before choosing which single link on the story frame count path is safe to
+    scale: the line `Hooking finished: N hooks armed in one pass, S s` against the measured 4.68 s,
+    the `Story step StoryTimelineController::SetHighSpeedFrameCount call N: value` lines, the
+    `Story step StoryTimelineController::GetNextFrameCount_HighSpeed call N` counters and the six
+    `GetNextFrameCount_HighSpeed frames a, count b (story xN, both passed through)` value lines, and
+    whether the 428.6 s of screen time in run 2 moved. A scale on one link only is the next step;
+    which link, and against what bound, is what those lines have to say.
 12. The story text path is only reachable through the methods that read its constants.
     `StoryTimelineTextClipData.TYPEWRITER_WAIT_FRAME`, `StoryTimelineController.FADE_TIME_FOR_HIGH_SPEED`,
     `TOUCH_BLOCK_INTERVAL` and `CONTINUOUS_TOUCH_INTERVAL` all logged as compile-time constants in run 2,
@@ -461,19 +1007,22 @@ snapshot carried `story_high_speed true` and no skip scale at all.
       single int arguments rather than read-modify-write state, but C23 (story block length
       recomputation) has to be settled before multiplying a skip request.
 16. [~] `GetNextFrameCount_HighSpeed` is still not proven uncalled, and the ledger should not paper over
-    that. Its detour only logs when scaling changes the value, so a call whose scaled value came out
-    identical would be invisible, and the probe set has no plain counter for it or for
+    that. Its detour used to log only when scaling changed the value, so a call whose scaled value came
+    out identical would be invisible, and the probe set had no plain counter for it or for
     `SetHighSpeedFrameCount`. Both paths now carry a plain counter that logs `Story step <name> call N`
-    for its first six calls and then every 4096. Run 5 produced twelve `Story step` lines and all
-    twelve were the two skip paths, so neither counter fired; that is evidence, not proof, because the
-    story in that run stalled.
+    for its first six calls and then every 4096, and both log the value the game actually produced:
+    `SetHighSpeedFrameCount call N: value` for the setter, and `frames a, count b` for the reference
+    pair. Run 5 produced twelve `Story step` lines and all twelve were the two skip paths, so neither
+    counter fired; that is evidence, not proof, because the story in that run stalled. With the
+    scalings off these two paths (A13, C34) the counters and the value lines are the whole hook.
 17. [~] Story high speed mode is a lever that has never written anything. Run 4 showed that raising the
     High Speed setting does not engage the mode the timeline consults, so `story_high_speed_mode`
     (default off) calls the game's own `StoryTimelineController::SetHighSpeedType` with whatever value
     `StoryManager::GetMaxHighSpeedType` reports. Nothing is written unless the game's own
     `IsHighSpeedMode(value)` predicate accepts that value first, so no enum value is invented, and the
     write only happens while the skip paths were reached within the last 10 s, at most once per 10 s,
-    from the game thread. Run 5 had the option on, all three helper addresses resolved, and produced no
+    from the game thread, and only for a story state this module has not already written for
+    (item 24). Run 5 had the option on, all three helper addresses resolved, and produced no
     attempt line and no rejection line, while its probe still sampled `IsHighSpeedMode()` returning 0.
     Three exit paths were silent; each now names its reason, and the config mirror logs the state it
     adopted (`ac2b1a5`). The lever needs one clean run with nothing else touching story timing before
@@ -508,6 +1057,124 @@ snapshot carried `story_high_speed true` and no skip scale at all.
     itself believes). Driving the mode through the feature the game already implements means the
     game also runs its own fade and audio handling for high speed, which a raw `SetHighSpeedType`
     write skips.
+23. [~] Neither game owned write had a restore path: `HighSpeedSetting::apply` returned early the
+    moment `high_speed_settings` went false, so StoryManager's saved setting and the save loader's
+    training value stayed at the number the mod wrote and the game went on saving them, and the
+    static `StoryTimelineController::SetHighSpeedType` set stayed set because `apply_config` only
+    mirrored the option. Both now remember what the game had before the first write and put it back
+    once when the option is turned off, gated on a `WAS_RAISED` / `HIGH_SPEED_WAS_SET` marker in the
+    shape `WAS_SCALED` uses. The settings read their baseline from the game's own getters,
+    re-observed whenever the current value differs from what the mod last wrote. The static has no
+    value getter, so its baseline is recorded by a pass-through detour on `SetHighSpeedType`,
+    installed only while the option is on (the StoryFrameProbe rule: at the neutral default this
+    module adds no detour to a game path), with our own writes excluded by a guard flag the way
+    Time.rs's `APPLYING` does. With no game write on record the only value offered is one this
+    client's own `IsHighSpeedMode(0)` reads as no high speed mode, because the engage path only ever
+    wrote when the game reported the mode as off; when even 0 reads as high speed, nothing is
+    written. Unit tests cover the baseline choice and the once-only pass; no run has yet. The next
+    run must show `story high speed N -> M restored ...` and `restored story high speed type M`, and
+    whether the recorder resolved (`story high speed helpers setter 1, value predicate 1, state
+    reader 1, baseline recorder 1`).
+
+24. [~] `engage_high_speed_mode` had no applied marker, so it re-applied the mode switch on its
+    timer. The pass read `IsHighSpeedMode()` and wrote `SetHighSpeedType` whenever that read
+    answered off, so a scene whose blocks or clips clear the mode paid the write once per 10 s gate
+    inside one scene, and every one of those writes is a call into the game's own high speed mode
+    switch - `FADE_TIME_FOR_HIGH_SPEED`, `SetBgmClipEnabledOnSwitchHighSpeedMode`,
+    `ForceStopBgmOnHighSpeed`. A10's shape again: an idempotency test asking the wrong question.
+    The gate is now an applied marker. The pass through detour on `SetHighSpeedType` ticks a state
+    version per write the game made itself, engage remembers the value and the version it wrote, and
+    a write is due only when the game moved that state (`already_written_for_state`, the shape
+    Time.rs's `APPLIED_LEVER` and `AnimationSpeed`'s `APPLIED_FACTORS` use). The mode read stays
+    as the guard against overwriting a mode the game engaged on its own, and the 10 s interval stays
+    a rate cap. `HIGH_SPEED_WRITES` counts every value this module put on the static: each write
+    line reads `write N`, the already written exit prints the running total, and the probe totals
+    line ends `story high speed mode 0/1 writes N`. The restore pass clears the marker so a later
+    scene can ask again, engage records nothing when the setter did not resolve, and turning the
+    option on with no recorder armed says so on the option line. 45 unit tests pass and clippy is
+    clean for the Windows target and for `aarch64-linux-android` (C42) and nothing added
+    is platform specific. Two questions keep this `[~]` until a run answers them: with no recorder
+    armed the state version never moves, so the static is asked for once per session, and if the
+    game clears the mode through a store the recorder does not watch the fix chooses one write over
+    re-asserting, which is why item 22's game owned auto high speed path is still the better door.
+    The line to read is `asked the story timeline ... (write 1, story state N)` with no further
+    write line for the rest of that scene.
+
+25. [~] The hardened matcher never proved that a value type actually travels by value.
+    `resolve_method_any` checked the name, the arity, the parameter enums, genericness, the static
+    flag, the reference bit and the return enum, but never the class behind a `VALUETYPE`, so
+    `struct<SomeStruct:24B>` and `struct<Gallop.StoryTimelineController.HighSpeedType:4B>` were the
+    same answer to a wrapper declaring an `i32` (A5 says only the 4 byte one travels in a general
+    register). `StoryTimelineController`'s two enum candidate loops compounded it: `CLASS` was a
+    candidate, so a client spelling the parameter as a reference would have bound it behind
+    `SetStoryHighSpeedType`/`IsHighSpeedModeValue` and received the enum value in the register the
+    game expects an object pointer in, and the only install line printed three booleans that could
+    not tell a `class` install from a `struct` one. `value_shape_for` and `shape_is_allowed` measure
+    the payload now (`il2cpp_class_instance_size` minus the 16 byte object header, the same
+    subtraction `introspect.rs:135` prints) and refuse anything over `MAX_INLINE_VALUE_BYTES = 4`,
+    every reference sitting in front of a value-shaped wrapper, and any type the matcher cannot
+    classify; the shape it accepted and the one it refused are both printed with the concrete type
+    name and size. The new `resolve_static_value_method` carries that rule for the two enum helpers,
+    and the install line names the candidate each one bound to, so the line item 24 asks a run to
+    read is now `story high speed helpers setter 1 (struct), value predicate 1 (struct), state
+    reader 1, baseline recorder 1`. The three StoryManager statics in `HighSpeedSetting` came off
+    `get_method_addr` (C7) onto `resolve_static_method`, the matcher written for a static with no
+    `this`, with the value proof applied to their `struct<HighSpeedType:4B>` results and parameter;
+    their line names the spellings too (`HighSpeedSetting: StoryManager statics max struct, saved
+    struct, setter struct`). The decision functions are unit tested (48 pass, the three new ones
+    cover the 4 byte enum, an 8 and a 24 byte struct, an unreadable class, a `class` parameter and
+    a `generic` one) and clippy is clean for the Windows target and for
+    `aarch64-linux-android` (C42), and nothing added is platform specific. A run has to confirm the three proof
+    lines land (`... travels by value: Gallop.StoryTimelineController.HighSpeedType:4B`), that all
+    five addresses still resolve, and that no existing hook that takes a `class<...>` argument went
+    inert - `resolve_getter`, the fades and the frame probes keep the permissive match rule.
+
+26. [~] The story time scale lever is back on the path that measured it (C39): the three Story getter
+    hooks scale through `scale_read_time_scale`, which raises the game's 1.0 and leaves a stored pause or
+    slow motion as the game stored it. The line a run has to read is
+    `AnimationSpeed: StoryTimeline_getTimeScaleAfterEndStory 1 -> 5`, or the `getTimeScaleEventWipe` or
+    `GetCutTimeScale` spelling, with `story_speed` above 1.0 on the `Config snapshot:` line, plus the
+    `Time::set_timeScale call` lines for what the game finally holds, the mod's own raise capped at 5
+    and a scale the game already holds above 5 left where the game put it. Until that line exists
+    no screen time claim is made for this lever.
+
+27. [~] Read the apply pass totals the next run produces (C41). `AnimationSpeed apply pass N: a config
+    reads, b entry locks, c table passes, d field reads, e field writes` is what C36's cost claim rests
+    on now, printed for the first 6 passes and then every 64th. Expect three config reads per pass that
+    ran and one entry lock per pass that found a group due; on this client `d` and `e` stay 0 while 0 of
+    61 duration fields resolve (C13). `cargo test --lib` runs in CI on a Windows job from this change
+    on, so the shipped decisions are checked on every push; no number in this ledger may quote a per
+    field cost without one of these lines in front of it.
+
+28. [~] The two BOOLEAN story predicates were read through `i32` wrappers (`75f2147`). IL2CPP delivers a
+    `bool` result in `AL` alone, so `before` and `accepted` in `engage_high_speed_mode` branched on the 24
+    bits above it, and that branch is the gate deciding whether this module writes
+    `StoryTimelineController::SetHighSpeedType` at all: a mode the game reported off could read as already
+    on, and a value the predicate refused could read as accepted. `IsStoryHighSpeedMode` and
+    `IsHighSpeedModeValue` now declare `bool`, which is the shape the matcher already proved of those
+    addresses, `resolve_static_method` only handing back a candidate whose `il2cpp_method_get_return_type`
+    is `IL2CPP_TYPE_BOOLEAN`, and `StoryFrameProbe` reads the same method through the same shape for its
+    totals line. This is the one ABI claim here that was reproduced instead of argued: one address called
+    through both signatures under MSVC x64 `/O2`, a genuine `false` reading back as `0x000aae00` through
+    four bytes. A run has to show `story high speed mode 0/1 writes N` and no write line for a mode the game
+    left on.
+
+29. [~] `SetHighSpeedFrameCount` and `GetNextFrameCount_HighSpeed` are measurement only now (`75f2147`), the
+    same decision C34 forced on `SkipFrameCount` and `SkipMotionFrame`. The number being scaled is an index
+    into the readonly `_highSpeedFrameCountArray` on one reading and a count on the other, `scale_frame_count`
+    floors at 1 so a scaled index can select a different, longer entry, and run 5 showed the game feeding one
+    hooked step's output into the next. Both keep their counters and their value logs, so the next run says
+    what the chain carries before anything on it is scaled again.
+
+30. [~] Labels, log lines and scratch state in the delta (`3b24a75`, `922e2ff`, `4e40dbf`, `51941ea`):
+    `ko.yml` is a Korean file again, the `ows:` section no reader asks for is gone and `hachimi:` and
+    `windows:` are back; the six Performance labels this fork added sit once in each of the ten locales; the
+    `Config snapshot:` line names `target_fps_unfocused` on Windows and `cyspring_mono_uncap_frame_scale`;
+    the `time_scale` and `story_choice_auto_select_delay` sliders offer no range the code would clamp;
+    `cargo_check_out.txt` is out of the tree and ignored. Verified by parsing the ten files, counting each key
+    once, and the host legs named above. A run still has to show the Config Editor drawing those six labels in
+    the language `locale` selects (E3), and C27 records that the unique wrapper name only covers this fork's
+    own new hook.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
@@ -541,10 +1208,50 @@ What arrived:
 - [ ] **E1 Upstream locale duplicates.** `ko.yml` defines `shadow_depth_bias` and `shadow_normal_bias`
   twice inside `config_editor`, `zh-cn.yml` defines `custom_font_file` and `custom_font_none_found`
   twice. The earlier definition is never read.
-- [ ] **E2 The new option labels are untranslated in the locales this fork maintains.** `es`, `id` and
-  `vi` carry none of the nine new keys, `fil` is missing four shadow keys and `zh-tw` is missing
-  `custom_font_file_warning`. They fall back to English. `performance_tab` is present in all ten. The
-  two later keys `story_high_speed_mode` and `story_skip_frame_scale` are present in all ten, in English
-  for `en` and in new machine translations for the rest, which nobody has proofread.
+- [ ] **E2 The new option labels are untranslated in the locales this fork maintains.** The nine here
+  are upstream's labels: `shadow_distance`, `soft_shadows`, `soft_shadow_quality`, `shadow_depth_bias`,
+  `shadow_normal_bias`, `force_chara_shadows`, `story_shadow_type`, `custom_font_file` and
+  `custom_font_none_found`, plus the `custom_font_file_warning` text block. They are still absent, and
+  fall back to English, in `es`, `id` and `vi` (none of the nine), in `fil` (`soft_shadows`,
+  `soft_shadow_quality`, `shadow_depth_bias`, `shadow_normal_bias`; what fil has instead is
+  `soft_shadows_quality` at `fil.yml:248`, a key no code asks for) and in `zh-tw` (all seven shadow
+  keys and `custom_font_file_warning`). `performance_tab` is present in all ten. `story_high_speed_mode`
+  is present in all ten, in English for `en` and in new machine translations for the rest, which nobody
+  has proofread.
+  Corrected against the tree this change set produced. The earlier version of this entry said `es`, `id`
+  and `vi` carry none of the new keys, and that no longer describes the locales: the six labels this fork
+  added, `time_scale`, `transition_speed`, `result_screen_speed`, `story_speed`, `auto_skip_result_screens`
+  and `high_speed_settings`, are now in all ten, one definition each under `config_editor`
+  (`en.yml:218-223`, `es.yml:203-208`, `id.yml:177-182`, `vi.yml:139-144`), written by the E3 fix. Do not
+  add those six again. A second definition is what E1 reports for `ko.yml`'s `shadow_depth_bias` and
+  `shadow_normal_bias`, and the earlier one is never read. The stale half of this entry also named
+  `story_skip_frame_scale` as present in all ten. It is in none of them: the option, its row and its label
+  were dropped in `a2c5f67`, `30e1cb4` and `8505cfa`, and the only mention left in this ledger is the
+  value a config snapshot quoted in the run 5 note in section A. Checked by counting every key at its own
+  line in each of the ten files, not by a run. Still open here: the upstream list above, and the fork
+  labels E3 records as not touched, `target_fps_unfocused` in `es`, `id`, `ko`, `vi` and `zh-tw`,
+  `cyspring_mono_uncap_frame_scale` in `fil`, `vi` and `zh-tw`, and `ui_animation_scale` in `vi`. Closing
+  it needs translations somebody has proofread and a run that shows the Config Editor drawing them in the
+  language `locale` selects.
+- [~] **E3 This fork's own Performance labels were English-only in nine locales.** `time_scale`,
+  `transition_speed`, `result_screen_speed`, `story_speed`, `auto_skip_result_screens` and
+  `high_speed_settings` were defined only in `en.yml:218-223`, while the Performance tab in
+  `src/core/gui.rs` renders all six, so with `fallback = "en"` (`src/lib.rs:6`) every non-English
+  client showed English for the options this fork added. E2 above is a separate gap: it covers
+  upstream's shadow and font keys. Fix applied in source, not verified by a run: the six keys are now
+  in `es`, `fil`, `id`, `ko`, `pt-br`, `ru`, `vi`, `zh-cn` and `zh-tw`, written between
+  `ui_animation_scale` and `story_high_speed_mode` in the order the tab renders them (`vi.yml` has no
+  `ui_animation_scale`, so it is anchored on `story_high_speed_mode`). Machine translations, nobody
+  has proofread them. Verified so far: the ten locale files parse as YAML, each of the six keys sits
+  once under `config_editor` and none of the nine is identical to its `en` text, and the six
+  `t!("config_editor.<key>")` labels the tab draws are at `src/core/gui.rs:5895-5929`. A scratch
+  `rust-i18n` probe crate resolved the keys and `cargo check` was clean; the probe is not in the tree,
+  so that part is not reproducible here. No game run yet, so it stays `[~]`. What a run has to show is
+  the Config Editor Performance tab drawing these six labels in the language set by `locale` rather
+  than falling back to English. Closing the item also needs the `l10n` commit hash that carries this
+  change, and none exists yet: the nine locale edits are still uncommitted in the working tree. Not
+  touched here: `target_fps_unfocused` is still missing from `es`, `id`, `ko`, `vi` and `zh-tw`,
+  `cyspring_mono_uncap_frame_scale` from `fil`, `vi` and `zh-tw`, `ui_animation_scale` from `vi`, and
+  `ko.yml` and `zh-cn.yml` still carry the E1 duplicate keys.
 - A6, A13, C22, C23 and C24 are untouched by this merge. Upstream changed nothing in `NowLoading.rs`,
   and its `StoryTimelineData.rs` edit is the JP `rewrite_story_shadow_types` path.
