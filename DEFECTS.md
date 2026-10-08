@@ -16,18 +16,19 @@ Client: Umamusume Pretty Derby, Global region, Steam, Unity 2022.3.62f2 IL2CPP.
 Evidence: `hachimi.log` 114.3 KB / 1136 lines, session 03:10:10 to 03:16:04 local,
 and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
 
-- [ ] **A1 `NowLoading::PlayFadeNowLoading` scales the wrong arguments.** 31 calls were logged
+- [x] **A1 `NowLoading::PlayFadeNowLoading` scales the wrong arguments.** 31 calls were logged
   as `NowLoading::PlayFadeNowLoading(0, 1, 0.3)` x15 and `(1, 0, 0.3)` x16. Arguments 0 and 1
   are the fade endpoints (alpha to and alpha from), argument 2 is the duration. The hook in
-  `src/il2cpp/hook/umamusume/NowLoading.rs` scales every float it receives, so at factor 20 the
-  target alpha becomes 0.05 instead of 1. Fix: scale index 2 only.
-- [ ] **A2 Overload matching is too coarse.** `symbols::get_method_overload` compares
+  `src/il2cpp/hook/umamusume/NowLoading.rs` scaled every float it receives, so at factor 20 the
+  target alpha became 0.05 instead of 1. Fixed in `db3c272`, index 2 only is now scaled.
+- [~] **A2 Overload matching is too coarse.** `symbols::get_method_overload` compares
   `Il2CppTypeEnum` only, and `CLASS` matches every reference type. The dump shows
   `SingleModeResultContentBase::FadeInContent/4` is not a duplicate pair but distinct overloads
   taking `UnityEngine.UI.MaskableGraphic` versus `UnityEngine.CanvasGroup`, and
-  `FadeInContentFromBottom/4` takes `CanvasGroup` versus `Gallop.TextCommon`. Two of three are
-  unhooked. No `FadeInContent*` duration line appears in a session that contained several
-  training result screens. Fix: match parameter class names, not type enums.
+  `FadeInContentFromBottom/4` takes `CanvasGroup` versus `Gallop.TextCommon`. Partly worked
+  around: `SingleModeResultContentBase.rs` resolves its three fades through
+  `AnimationSpeed::resolve_method` with an explicit parameter type list, and those hooks fired 16
+  times in the 07:53 run. The coarse matcher itself is still in place for every other caller.
 - [ ] **A3 Static helpers are currently not hooked.** The new static guard rejected two targets:
   `StoryTimelineController::GetTimeScaleByHighSpeedType/1 -> static float(bool)` and
   `GetTimeScaleHighSpeed/1 -> static float(bool)`. The guard prevented a wrapper that reserves a
@@ -72,10 +73,43 @@ and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
 
 15 complete fade pairs (fade to black then fade from black) across 260.2 s of play:
 gaps in ms 1139, 978, 650, 730, 2901, 326, 794, 2647, 337, 2164, 605, 1079, 3177, 392, 1024.
-min 326 ms, median 1024 ms, max 3177 ms, total 18.9 s. With both fades at 0.3 s shipped, at most
-about 9 s of that window is animation, and both fades are DOTween based (`DG.Tweening.Ease` in the
-signature) so they were already compressed by `ui_animation_scale` before this feature existed.
-Any future claim of speedup must be measured against these numbers, not against feel.
+min 326 ms, median 1024 ms, max 3177 ms, total 18.9 s. `ui_animation_scale` was 1.0 in this run, so
+the fades were not pre compressed. Any future claim of speedup must be measured against these
+numbers, not against feel.
+
+### Run 2, build `3adb2bf-dirty`, 07:53:03 to 08:00:52, 469.5 s
+
+`hachimi.log` 277 KB / 2609 lines. 198 hook installs, 10 `_addr is null`, 22 name resolution
+warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `db3c272`,
+40,155,648 bytes, SHA256 `191F9B24A2666F105578FC9DD8A31D924E786910CB9E7A3772FE1B48A12E7E1B`.
+
+- 47 wipe calls formed 23 in transition pairs: gaps in ms 980, 1022, 697, 19, 987, 676, 303, 599,
+  2072, 377, 1177, 1146, 1185, 3657, 222, 969, 2137, 215, 2095, 604, 412, 1343, 959. min 19 ms,
+  median 969 ms, mean 1037 ms, max 3657 ms, total 23.9 s, which is 5.1% of the session. The 19 ms
+  pair shows the scaled fades themselves cost nothing once the target assets are already loaded.
+- 22 screen intervals (fade from black to the next fade to black): min 1.5 s, median 9.5 s,
+  mean 19.5 s, max 83.7 s, total 428.6 s, which is 91% of the session. That time is spent on
+  screens rather than in animation, so it is where any further gain has to come from.
+- `SingleModeResultContentBase::FadeInContentFromRight` fired 16 times carrying the shipped
+  durations 0.03, 0.06, 0.09 and 0.12 s. `CountupModifier_getDuration 0.16 -> 0.008` and
+  `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` fired again. `PlayInNowLoading`,
+  `PlayOutNowLoading`, `SetupLoadingTips`, `getTimeScaleEventWipe`, `SetHighSpeedFrameCount` and
+  `ActivateSkipButton` still appear only as install lines, never as calls.
+
+- [x] **A10 `HighSpeedSetting` re-applied the same write at every scene change.** 50 lines read
+  `story high speed 1 -> 2 via StoryManager::SaveHighSpeedType, read back 1`. `SaveHighSpeedType`
+  moves StoryManager's own saved setting, the `saved story` value did go 1 to 2, but
+  `ApplicationSettingSaveLoader::get_StoryHighSpeedType` kept reporting 1 and the idempotency
+  check used the loader value. Fixed in `db3c272` by comparing against `GetSavedHighSpeedSetting`.
+- [ ] **A11 `GetMaxHighSpeedType` is context dependent.** Two snapshots in one session:
+  `max 1, saved story 1, loader story 1, training 2` x27 at menus, and
+  `max 2, saved story 2, loader story 1, training 2` x50 once story content was reached. The game
+  ceiling is 2 in story context, the story setting was genuinely raised from 1 to 2, and training
+  already sat at 2. A ceiling read in the wrong context raises nothing.
+- [ ] **A12 Hook installation costs about 4.6 s of every launch.** `Initializing il2cpp hooks` at
+  07:53:03.332 to `Hooking finished` at 07:53:08.013, with `MH_EnableHook: MH_OK` events spaced at
+  a uniform 24 ms. 192 enables at that spacing is 4.6 s. Every `new_hook!` enables its own hook, so
+  creating all hooks first and enabling them in one batch would collapse this.
 
 ## B. Open items from the animation feature review
 
