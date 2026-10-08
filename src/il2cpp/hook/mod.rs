@@ -248,7 +248,7 @@ pub fn init() {
         let config = crate::core::Hachimi::instance().config.load();
 
         info!(
-            "Config snapshot: transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {} auto_skip_result {} high_speed_settings {} hide_now_loading {} physics {:?}",
+            "Config snapshot: transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {} auto_skip_result {} high_speed_settings {} story_high_speed {} skip_scale {} hide_now_loading {} physics {:?}",
             config.transition_speed,
             config.result_screen_speed,
             config.story_speed,
@@ -259,6 +259,8 @@ pub fn init() {
             config.target_fps.unwrap_or(-1),
             config.auto_skip_result_screens,
             config.high_speed_settings,
+            config.story_high_speed_mode,
+            config.story_skip_frame_scale,
             config.hide_now_loading,
             config.physics_update_mode
         );

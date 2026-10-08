@@ -47,6 +47,7 @@ extern "C" fn GameSystem_Update(this: *mut Il2CppObject) {
     Hachimi::instance().drain_skill_data_desc_rebuild();
     crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply_if_dirty();
     crate::il2cpp::hook::umamusume::AnimationSpeed::apply_if_dirty();
+    crate::il2cpp::hook::umamusume::StoryTimelineController::engage_high_speed_mode();
     super::StoryFrameProbe::report_if_due();
 
     #[cfg(target_os = "windows")]

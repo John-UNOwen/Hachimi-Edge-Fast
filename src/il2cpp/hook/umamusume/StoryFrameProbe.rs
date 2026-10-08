@@ -29,7 +29,9 @@ use crate::{
 // client does not use that path, which is why a summary of the probes that never even resolved is
 // printed at install time.
 const PROBE_DETAIL_LIMIT: usize = 6;
-const PROBE_CHUNK: usize = 512;
+// A predicate called about 110 times a second wrote 66 lines of a 1026 line log at the 512
+// cadence, so the summary cadence is coarser now that the totals line carries the counts.
+const PROBE_CHUNK: usize = 4096;
 const REPORT_INTERVAL_SECS: i64 = 20;
 
 // Frame counts, flags and scales all share one log slot. A whole number prints without a
@@ -74,7 +76,6 @@ impl FrameProbe {
     }
 }
 
-static SKIP_FRAME_COUNT: FrameProbe = FrameProbe::new("StoryTimelineController::SkipFrameCount(frames, flag1, flag2)");
 static SET_FRAME_COUNT_FOR_WAITING: FrameProbe = FrameProbe::new("StoryTimelineController::SetFrameCountForWaiting(frames)");
 static WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK: FrameProbe = FrameProbe::new("StoryTimelineController::get_WaitFrameCountUntilNextBlock()");
 static WAIT_FRAME_UNTIL_NEXT_BLOCK: FrameProbe = FrameProbe::new("StoryTimelineController::get_WaitFrameUntilNextBlock()");
@@ -84,14 +85,12 @@ static WAITING_FRAME_COUNT: FrameProbe = FrameProbe::new("StoryTimelineControlle
 static UPDATE_TIME_SCALE_BY_HIGHSPEED: FrameProbe = FrameProbe::new("StoryTimelineController::UpdateTimeScaleByHispeedType()");
 static GET_TIME_SCALE: FrameProbe = FrameProbe::new("StoryTimelineController::get_TimeScale()");
 static SET_TIME_SCALE: FrameProbe = FrameProbe::new("StoryTimelineController::set_TimeScale(scale)");
-static SKIP_MOTION_FRAME: FrameProbe = FrameProbe::new("StoryTimelineController::SkipMotionFrame(frames)");
 static IS_SKIP_TO_TEXT_CLIP: FrameProbe = FrameProbe::new("StoryTimelineController::IsSkipToTextClip(skip_text, skip_block)");
 static IS_HIGH_SPEED_MODE: FrameProbe = FrameProbe::new("StoryTimelineController::IsHighSpeedMode()");
 static STORY_END_FRAME_SKIPPED: FrameProbe = FrameProbe::new("StoryTimelineController::IsStoryEndFrameOrGrandLiveWaitFrameSkipped(frame, next_frame)");
 static TEXT_CLIP_WAIT_FRAME: FrameProbe = FrameProbe::new("StoryTimelineTextClipData::GetWaitFrameUntilNextBlockLocalize()");
 
-static PROBES: [&FrameProbe; 15] = [
-    &SKIP_FRAME_COUNT,
+static PROBES: [&FrameProbe; 13] = [
     &SET_FRAME_COUNT_FOR_WAITING,
     &WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK,
     &WAIT_FRAME_UNTIL_NEXT_BLOCK,
@@ -101,19 +100,11 @@ static PROBES: [&FrameProbe; 15] = [
     &UPDATE_TIME_SCALE_BY_HIGHSPEED,
     &GET_TIME_SCALE,
     &SET_TIME_SCALE,
-    &SKIP_MOTION_FRAME,
     &IS_SKIP_TO_TEXT_CLIP,
     &IS_HIGH_SPEED_MODE,
     &STORY_END_FRAME_SKIPPED,
     &TEXT_CLIP_WAIT_FRAME,
 ];
-
-type SkipFrameCountFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, flag1: bool, flag2: bool);
-extern "C" fn SkipFrameCount(this: *mut Il2CppObject, frames: i32, flag1: bool, flag2: bool) {
-    SKIP_FRAME_COUNT.observe(&[frames as f64, bit(flag1), bit(flag2)]);
-
-    get_orig_fn!(SkipFrameCount, SkipFrameCountFn)(this, frames, flag1, flag2);
-}
 
 type SetFrameCountForWaitingFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
 extern "C" fn SetFrameCountForWaiting(this: *mut Il2CppObject, frames: i32) {
@@ -183,13 +174,6 @@ extern "C" fn set_TimeScale(scale: f32) {
     SET_TIME_SCALE.observe(&[scale as f64]);
 
     get_orig_fn!(set_TimeScale, SetTimeScaleFn)(scale);
-}
-
-type SkipMotionFrameFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
-extern "C" fn SkipMotionFrame(this: *mut Il2CppObject, frames: i32) {
-    SKIP_MOTION_FRAME.observe(&[frames as f64]);
-
-    get_orig_fn!(SkipMotionFrame, SkipMotionFrameFn)(this, frames);
 }
 
 type IsSkipToTextClipFn = extern "C" fn(this: *mut Il2CppObject, skip_text: bool, skip_block: bool) -> bool;
@@ -268,13 +252,6 @@ pub fn init(umamusume: *const Il2CppImage) {
         };
     }
 
-    let skip_frames_addr = unsafe { AnimationSpeed::resolve_method(
-        controller, "SkipFrameCount",
-        &[Il2CppTypeEnum_IL2CPP_TYPE_I4, Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN, Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN],
-        Il2CppTypeEnum_IL2CPP_TYPE_VOID,
-    ) };
-    probe!(skip_frames_addr, SkipFrameCount, "SkipFrameCount");
-
     let set_waiting_addr = unsafe { AnimationSpeed::resolve_method(
         controller, "SetFrameCountForWaiting", &[Il2CppTypeEnum_IL2CPP_TYPE_I4], Il2CppTypeEnum_IL2CPP_TYPE_VOID,
     ) };
@@ -319,11 +296,6 @@ pub fn init(umamusume: *const Il2CppImage) {
         controller, "set_TimeScale", &[Il2CppTypeEnum_IL2CPP_TYPE_R4], Il2CppTypeEnum_IL2CPP_TYPE_VOID,
     ) };
     probe!(set_scale_addr, set_TimeScale, "set_TimeScale");
-
-    let skip_motion_addr = unsafe { AnimationSpeed::resolve_method(
-        controller, "SkipMotionFrame", &[Il2CppTypeEnum_IL2CPP_TYPE_I4], Il2CppTypeEnum_IL2CPP_TYPE_VOID,
-    ) };
-    probe!(skip_motion_addr, SkipMotionFrame, "SkipMotionFrame");
 
     let skip_clip_addr = unsafe { AnimationSpeed::resolve_method(
         controller, "IsSkipToTextClip",

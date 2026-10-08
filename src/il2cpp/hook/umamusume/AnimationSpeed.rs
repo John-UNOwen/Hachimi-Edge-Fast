@@ -679,6 +679,7 @@ pub fn apply() {
     // The game's own High Speed settings travel with the speed groups, so a change made in the
     // Config Editor lands at the same point either way.
     super::HighSpeedSetting::apply();
+    super::StoryTimelineController::apply_config();
 
     let (transition, screens, story) = factors();
     // Cached first, and even when there is nothing to rewrite: the detours that scale
