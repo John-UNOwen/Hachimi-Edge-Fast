@@ -1202,7 +1202,8 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
 5. C2 unwind and SEH barrier at hook entry, `unwrap_or_else` on shared mutexes, bypass instead of
    `process::exit`.
 6. [~] C5 clamp `ui_animation_scale` in code (`AnimationSpeed` mirror, 0.1..=MAX_FACTOR) and
-   leave `independent_time` alone: the clamp landed, the `independent_time` half is still open.
+   leave `independent_time` alone: the clamp landed, both sliders now sit on the constants too (C45,
+        `baa5570`), and the `independent_time` half is still open.
 7. [~] C22 and C24, the two compounding multipliers that are live in the current config. C24's two
    sites now read one clamped mirror and each half is capped by the quantity it touches (MAX_FACTOR on
    the wait time increment, MAX_TIME_SCALE on the story time scale); the same factor is still applied
