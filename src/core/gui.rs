@@ -5933,12 +5933,6 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
-            if should_show_option(search, &t!("config_editor.story_skip_frame_scale")) {
-                ui.label(t!("config_editor.story_skip_frame_scale"));
-                ui.add(egui::Slider::new(&mut config.story_skip_frame_scale, 1.0..=8.0).step_by(0.5));
-                ui.end_row();
-            }
-
             if should_show_option(search, &t!("config_editor.story_text_speed_multiplier")) {
                 ui.label(t!("config_editor.story_text_speed_multiplier"));
                 ui.add(egui::Slider::new(&mut config.story_tcps_multiplier, 0.1..=1000.0).step_by(0.1));
