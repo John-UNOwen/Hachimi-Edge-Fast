@@ -531,7 +531,7 @@ numbered fix order items.
   bound is enforced by code now: `value_shape_for` refuses a `struct<...>` whose payload is over
   `MAX_INLINE_VALUE_BYTES = 4` in front of any value-shaped wrapper (item 25).
 
-## C. Safety review findings (43)
+## C. Safety review findings (C1 to C46)
 
 - [~] **C1 Calls through address 0.** Closed for `def_method_wrapper_fn!`,
   `impl_addr_wrapper_fn!` and both field accessor macro families. Still open: `get_orig_fn!`
@@ -1174,6 +1174,23 @@ with 0 failed, `cargo check --all-targets` and `cargo clippy --target x86_64-pc-
 --release` finished in 2 m 30 s with no warnings. That closes the two problems the fix series ended on: the
 android link claim C42 repeated is withdrawn above, and 59 is the count every entry now quotes for this tree.
 
+- [~] **C45 The Config Editor and the setup wizard offered `ui_animation_scale` up to 1000.0 while the
+  code honours 20.0.** `normalize_ui_animation_scale` (`AnimationSpeed.rs:866`) clamps the lever to
+  `MIN_UI_ANIMATION_SCALE..=MAX_UI_ANIMATION_SCALE`, and `MAX_UI_ANIMATION_SCALE = MAX_FACTOR = 20.0`,
+  before the DOTween `Update` detour multiplies its delta time. The top of the slider therefore did
+  nothing, and the live config carried 1000.0 while the game ran at 20.0. `baa5570` puts both sliders on
+  the constants, the Performance tab and the first time setup wizard, so the offered range is the honoured
+  range. `[~]` until a launch shows the bounded slider. Behaviour does not change: the stored 1000.0 was
+  already clamped at read.
+- [ ] **C46 `story_text_speed_multiplier` has no ceiling in code at all.**
+  `StoryTimelineData.rs:106-110` reads `get_TypewriteCountPerSecond`, multiplies it by the raw config
+  value and writes it back, unclamped, on every story timeline asset load. The slider offers 0.1..=1000.0
+  and this client's config carries 1000.0, so the typewriter runs at 1000 times the game's rate while every
+  speed lever this fork added is capped at MAX_FACTOR (AGENTS section 2). Unmeasured: whether one asset
+  object can reach that path twice and compound, which is the C22 shape, and what the client does with a
+  typewriter rate that large. It is an upstream option, so bounding it is a behaviour decision and not a
+  tidy up.
+
 ## D. Fix order
 
 1. [x] A1 duration argument index in `NowLoading` (`db3c272`).
@@ -1486,7 +1503,9 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
 ### Probe build `253458f`, deployed and waiting for a career run (2026-10-08)
 
 Deployed as `cri_mana_vpx.dll` at the game root, 29,352,448 bytes, SHA256
-`8C115D7C207A11F05D9321F600B48CAE13BD4C54E03AC665F8789F6221860038`, replacing the run 8 build (29,284,864
+`4E4720D9140C8913A20B97AA4A4D1E3E87154E219CFC7FB94D80F6A1DC96B328`, built from the tree at `baa5570` so it
+carries the C45 slider bound as well as the probe (the same tree before that commit hashed
+`8C115D7C207A11F05D9321F600B48CAE13BD4C54E03AC665F8789F6221860038`), replacing the run 8 build (29,284,864
 bytes, `2E36C270CCAE9B34B783D7DA5A1DE36F8987CD7CB107CD6BE3B0007F2BD8C88A`). Nothing in it changes
 behaviour: every new hook hands its arguments to the original untouched, and they arm only under
 `debug_mode`, which this client already has on.
