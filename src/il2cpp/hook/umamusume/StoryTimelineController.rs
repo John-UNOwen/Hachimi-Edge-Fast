@@ -65,6 +65,16 @@ extern "C" fn GetTimeScaleHighSpeed(this: *mut Il2CppObject, is_high_speed: bool
     )
 }
 
+type SetHighSpeedFrameCountFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
+extern "C" fn SetHighSpeedFrameCount(this: *mut Il2CppObject, frames: i32) {
+    // Scaling the value the game is about to store is applied exactly once, unlike
+    // scaling its read side.
+    let scaled = AnimationSpeed::scale_frame_count(frames, STORY);
+    AnimationSpeed::hit(19, "StoryTimelineController.SetHighSpeedFrameCount", frames as f32, scaled as f32);
+
+    get_orig_fn!(SetHighSpeedFrameCount, SetHighSpeedFrameCountFn)(this, scaled);
+}
+
 pub fn init(umamusume: *const Il2CppImage) {
     get_class_or_return!(umamusume, Gallop, StoryTimelineController);
 
@@ -88,4 +98,10 @@ pub fn init(umamusume: *const Il2CppImage) {
         &[Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN], Il2CppTypeEnum_IL2CPP_TYPE_R4,
     ) };
     if high_speed_addr != 0 { new_hook!(high_speed_addr, GetTimeScaleHighSpeed); }
+
+    let set_frames_addr = unsafe { AnimationSpeed::resolve_method(
+        StoryTimelineController, "SetHighSpeedFrameCount",
+        &[Il2CppTypeEnum_IL2CPP_TYPE_I4], Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+    ) };
+    if set_frames_addr != 0 { new_hook!(set_frames_addr, SetHighSpeedFrameCount); }
 }

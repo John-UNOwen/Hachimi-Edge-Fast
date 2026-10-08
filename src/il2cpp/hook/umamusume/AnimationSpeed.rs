@@ -31,6 +31,7 @@ const FIELD_ATTRIBUTE_LITERAL: c_int = 0x40;
 
 // Upper bound on how much of an animation may be removed in one step.
 const MAX_FACTOR: f32 = 20.0;
+const METHOD_ATTRIBUTE_STATIC: u16 = 0x0010;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -224,6 +225,18 @@ pub unsafe fn resolve_method(
     params: &[Il2CppTypeEnum],
     ret: Il2CppTypeEnum,
 ) -> usize {
+    resolve_method_any(class, name, params, ret, false)
+}
+
+// `allow_static` is only for wrappers that carry no real arguments: a static method
+// simply ignores the `this` register such a wrapper hands over.
+unsafe fn resolve_method_any(
+    class: *mut Il2CppClass,
+    name: &str,
+    params: &[Il2CppTypeEnum],
+    ret: Il2CppTypeEnum,
+    allow_static: bool,
+) -> usize {
     let method = match crate::il2cpp::symbols::get_method_overload(class, name, params) {
         Ok(method) => method,
         Err(_) => {
@@ -234,6 +247,14 @@ pub unsafe fn resolve_method(
 
     if (*method).is_generic() != 0 {
         debug!("AnimationSpeed: {} is generic", name);
+        return 0;
+    }
+
+    // A wrapper reserves the first register for `this`. Against a static method that
+    // register holds the first real argument, so every following argument would be read
+    // from the wrong place. `flags` is the MethodAttributes word, and bit 0x0010 is static.
+    if !allow_static && (*method).flags & METHOD_ATTRIBUTE_STATIC != 0 {
+        debug!("AnimationSpeed: {} is static, its arguments would be misread", name);
         return 0;
     }
 
@@ -257,7 +278,9 @@ pub unsafe fn resolve_method(
 // the value collapses geometrically instead of being shortened once. A getter is only
 // wrapped when the class has no matching setter to write it back.
 unsafe fn resolve_getter(class: *mut Il2CppClass, name: &str, ret: Il2CppTypeEnum) -> usize {
-    let addr = resolve_method(class, name, &[], ret);
+    // Zero-argument getters are safe either way: a static one simply ignores the `this`
+    // register the wrapper hands over.
+    let addr = resolve_method_any(class, name, &[], ret, true);
 
     if addr == 0 {
         return 0;
@@ -278,14 +301,31 @@ unsafe fn resolve_getter(class: *mut Il2CppClass, name: &str, ret: Il2CppTypeEnu
     addr
 }
 
+// One debug line per scaling point, the first time the game actually calls through it.
+// Installing a hook and reaching it are different facts, and a test run has to tell them
+// apart.
+const HIT_SLOTS: usize = 20;
+static FIRST_HIT: [AtomicBool; HIT_SLOTS] = [const { AtomicBool::new(false) }; HIT_SLOTS];
+
+pub fn hit(slot: usize, name: &str, raw: f32, scaled: f32) {
+    if raw != scaled && slot < HIT_SLOTS && !FIRST_HIT[slot].swap(true, Ordering::AcqRel) {
+        debug!("AnimationSpeed: {name} {raw} -> {scaled}");
+    }
+}
+
 // These getters hand out a hardcoded duration or a playback scale, and are the only way
 // to reach a `const` duration that is not passed as an argument anywhere.
 macro_rules! def_getter_hook {
-    ($hook:ident, $group:expr, $scale:ident) => {
+    ($hook:ident, $group:expr, $scale:ident, $slot:literal) => {
         extern "C" fn $hook(this: *mut Il2CppObject) -> f32 {
             type Orig = extern "C" fn(*mut Il2CppObject) -> f32;
 
-            $scale(get_orig_fn!($hook, Orig)(this), $group)
+            let raw = get_orig_fn!($hook, Orig)(this);
+            let scaled = $scale(raw, $group);
+
+            hit($slot, stringify!($hook), raw, scaled);
+
+            scaled
         }
     };
 }
@@ -460,39 +500,42 @@ pub fn init(umamusume: *const Il2CppImage) {
     apply();
 }
 
-def_getter_hook!(CountupModifier_getDuration, Group::Screens, scale_duration);
-def_getter_hook!(TextModifier_getDuration, Group::Screens, scale_duration);
-def_getter_hook!(TextModifier_getDelay, Group::Screens, scale_duration);
-def_getter_hook!(TrainingFooter_GetCloseAnimWaitTime, Group::Screens, scale_duration);
-def_getter_hook!(TrainingCuttClip_getDelayTime, Group::Story, scale_duration);
-def_getter_hook!(SingleModeUtils_GetHighSpeedPlayDuration, Group::Story, scale_duration);
-def_getter_hook!(StoryTimeline_getTimeScaleEventWipe, Group::Story, scale_time_scale);
-def_getter_hook!(StoryTimeline_getTimeScaleAfterEndStory, Group::Story, scale_time_scale);
-def_getter_hook!(StoryViewController_GetTimeScaleByHighSpeedType, Group::Story, scale_time_scale);
-def_getter_hook!(SingleModeUtils_GetCutTimeScale, Group::Story, scale_time_scale);
+def_getter_hook!(CountupModifier_getDuration, Group::Screens, scale_duration, 8);
+def_getter_hook!(TextModifier_getDuration, Group::Screens, scale_duration, 9);
+def_getter_hook!(TextModifier_getDelay, Group::Screens, scale_duration, 10);
+def_getter_hook!(TrainingFooter_GetCloseAnimWaitTime, Group::Screens, scale_duration, 11);
+def_getter_hook!(TrainingCuttClip_getDelayTime, Group::Story, scale_duration, 12);
+def_getter_hook!(SingleModeUtils_GetHighSpeedPlayDuration, Group::Story, scale_duration, 13);
+def_getter_hook!(StoryTimeline_getTimeScaleEventWipe, Group::Story, scale_time_scale, 14);
+def_getter_hook!(StoryTimeline_getTimeScaleAfterEndStory, Group::Story, scale_time_scale, 15);
+def_getter_hook!(SingleModeUtils_GetCutTimeScale, Group::Story, scale_time_scale, 16);
 
 // One float argument in a fixed position, so the wrapper cannot misread it. This is the
 // grand result screen's own entry point for its hardcoded DURATION constant.
 type GrandResultFadeInFromRightFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32);
 extern "C" fn TeamStadiumGrandResult_FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32) {
-    get_orig_fn!(TeamStadiumGrandResult_FadeInContentFromRight, GrandResultFadeInFromRightFn)(
-        this, content, scale_duration(duration, Group::Screens)
-    );
+    let scaled = scale_duration(duration, Group::Screens);
+    hit(6, "TeamStadiumGrandResultViewController.FadeInContentFromRight", duration, scaled);
+
+    get_orig_fn!(TeamStadiumGrandResult_FadeInContentFromRight, GrandResultFadeInFromRightFn)(this, content, scaled);
 }
 
 // A getter that takes the thing it is measuring and still returns a duration.
 type TrainingFooterGetItemAnimDurationFn = extern "C" fn(this: *mut Il2CppObject, item: *mut Il2CppObject) -> f32;
 extern "C" fn TrainingFooter_GetItemAnimDuration(this: *mut Il2CppObject, item: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(TrainingFooter_GetItemAnimDuration, TrainingFooterGetItemAnimDurationFn)(this, item);
+    let raw = get_orig_fn!(TrainingFooter_GetItemAnimDuration, TrainingFooterGetItemAnimDurationFn)(this, item);
+    let scaled = scale_duration(raw, Group::Screens);
 
-    scale_duration(value, Group::Screens)
+    hit(7, "SingleModeMainViewTrainingFooter.GetItemAnimDuration", raw, scaled);
+
+    scaled
 }
 
 // Every class named below has to be resolved before the getters are installed, because
 // the install macro looks the class up by name.
 const GETTER_CLASSES: &[&str] = &[
     "CountupModifier", "TextModifier", "SingleModeMainViewTrainingFooter",
-    "StoryTimelineTrainingCuttClipData", "SingleModeUtils", "StoryViewController",
+    "StoryTimelineTrainingCuttClipData", "SingleModeUtils",
     "StoryTimelineController", "TeamStadiumGrandResultViewController",
 ];
 
@@ -519,7 +562,6 @@ fn install_getters(umamusume: *const Il2CppImage) {
     install_getter!(classes, SingleModeUtils_GetHighSpeedPlayDuration, SingleModeUtils, GetHighSpeedPlayDuration);
     install_getter!(classes, StoryTimeline_getTimeScaleEventWipe, StoryTimelineController, get_TimeScaleEventWipe);
     install_getter!(classes, StoryTimeline_getTimeScaleAfterEndStory, StoryTimelineController, get_TimeScaleAfterEndStory);
-    install_getter!(classes, StoryViewController_GetTimeScaleByHighSpeedType, StoryViewController, GetTimeScaleByHighSpeedType);
     install_getter!(classes, SingleModeUtils_GetCutTimeScale, SingleModeUtils, GetCutTimeScale);
 
     if let Some(class) = classes.get("TeamStadiumGrandResultViewController").copied() {
