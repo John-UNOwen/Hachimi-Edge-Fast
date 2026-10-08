@@ -43,9 +43,15 @@ impl Drop for SkipGuard {
 
 type ActivateSkipButtonFn = extern "C" fn(this: *mut Il2CppObject);
 extern "C" fn ActivateSkipButton(this: *mut Il2CppObject) {
+    // Without a line here the run log could only prove the hook was installed, never that
+    // auto_skip_result_screens actually ran. The existing unavailable warning tells the
+    // other half: an entry line with no warning means the tween chain was finished.
+    let auto_skip = Hachimi::instance().config.load().auto_skip_result_screens;
+    debug!("SingleModeResultContentBase::ActivateSkipButton (auto_skip_result_screens {auto_skip})");
+
     get_orig_fn!(ActivateSkipButton, ActivateSkipButtonFn)(this);
 
-    if !Hachimi::instance().config.load().auto_skip_result_screens {
+    if !auto_skip {
         return;
     }
 
