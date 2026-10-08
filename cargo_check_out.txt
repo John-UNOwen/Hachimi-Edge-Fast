@@ -1,9 +1,0 @@
-cargo.exe :    Compiling hachimi v0.31.2 (C:\Users\<user>\Documents\GitHub\Hachimi-Edge)
-At line:1 char:183
-+ ... himi-Edge"; & "$env:USERPROFILE\.cargo\bin\cargo.exe" check 2>&1 | Ou ...
-+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (   Compiling ha...b\Hachimi-Edge):String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.82s
-
