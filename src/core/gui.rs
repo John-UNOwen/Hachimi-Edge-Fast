@@ -5888,7 +5888,11 @@ impl ConfigEditor {
 
             if should_show_option(search, &t!("config_editor.ui_animation_scale")) {
                 ui.label(t!("config_editor.ui_animation_scale"));
-                ui.add(egui::Slider::new(&mut config.ui_animation_scale, 0.1..=1000.0).step_by(0.1));
+                // The range is the ceiling the code honours. `AnimationSpeed::normalize_ui_animation_scale`
+                // clamps the lever to MIN_UI_ANIMATION_SCALE..=MAX_UI_ANIMATION_SCALE before the
+                // DOTween `Update` detour multiplies its delta time, so the top of a 1000.0 slider
+                // offered a value the mod would silently cut to 20.0 (C5).
+                ui.add(egui::Slider::new(&mut config.ui_animation_scale, AnimationSpeed::MIN_UI_ANIMATION_SCALE..=AnimationSpeed::MAX_UI_ANIMATION_SCALE).step_by(0.1));
                 ui.end_row();
             }
 
@@ -7341,7 +7345,9 @@ impl Window for FirstTimeSetupWindow {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(t!("config_editor.ui_animation_scale"));
                         });
-                        let _ = ui.add(egui::Slider::new(&mut self.config.ui_animation_scale, 0.1..=1000.0).step_by(0.1));
+                        // Same bound as the Performance tab: the wizard is where a new user meets this option, and
+                        // a 1000.0 ceiling there offered a value the code cuts to MAX_UI_ANIMATION_SCALE.
+                        let _ = ui.add(egui::Slider::new(&mut self.config.ui_animation_scale, AnimationSpeed::MIN_UI_ANIMATION_SCALE..=AnimationSpeed::MAX_UI_ANIMATION_SCALE).step_by(0.1));
                     }
                     3 => {
                         ui.heading(t!("first_time_setup.complete_heading"));
