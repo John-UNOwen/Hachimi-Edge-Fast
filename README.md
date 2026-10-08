@@ -55,7 +55,7 @@ Hooks are now created first and armed in a single pass. Arming used to take abou
 ### Diagnostics
 - With `enable_file_logging` on, every run writes a **config snapshot** line with the timing settings it used, plus a log line the first time each speed hook is actually reached.
 - `debug_mode` writes the game's own class, method and field names to `introspect.log`. It also turns on observe only probes for the story playback paths.
-- The [defect ledger](DEFECTS.md) records every measured run, known issue and fix in order.
+- The [defect ledger](LEDGER.md) records every measured run, known issue and fix in order.
 
 # Features (from upstream)
 - **High quality translations:** Hachimi comes with advanced translation features that help translations feel more natural (plural forms, ordinal numbers, etc.) and prevent introducing jank to the UI. It also supports translating most in-game components; no manual assets patching needed!

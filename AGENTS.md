@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code,
-then read [DEFECTS.md](DEFECTS.md), which is the fork's working memory: measured baselines, open
+then read [LEDGER.md](LEDGER.md), which is the fork's working memory: measured baselines, open
 items with IDs (A1 to A27, C1 to C46, E1 to E3), the fix order, the run notes, and section F for
 releases.
 
@@ -27,7 +27,7 @@ where performance work is measured.
 
 ## 2. Rules that override everything else
 
-- **Measure, don't feel.** Every speed claim is checked against the baselines in DEFECTS.md
+- **Measure, don't feel.** Every speed claim is checked against the baselines in LEDGER.md
   (section A: transition gaps median ~1.0 s, screens 91–95% of a session, hook arming 4.68 s
   before batching). A change that cannot be shown in `hachimi.log` is not done.
 - **Neutral defaults.** Every speed option defaults to `1.0` / `false` and must do *nothing at
@@ -194,7 +194,7 @@ Hot paths run every frame or every tween tick. In them:
      e field writes`: what the speed pass cost the run, counted by the pass itself (C36, C41).
      Field reads stay 0 while `init` resolves no duration field (C13).
    - `Frame probe totals at N s:` for the story stepping search (item D13).
-4. Record the run in DEFECTS.md in the existing format: build hash, duration, numbers, what
+4. Record the run in LEDGER.md in the existing format: build hash, duration, numbers, what
    moved, what didn't.
 
 ## 8. Where the remaining time is
@@ -227,7 +227,7 @@ A new speed or performance option touches, in one change:
 3. The Performance tab in `src/core/gui.rs`, with an in code clamp, not only a slider range.
 4. Keys in **all ten** `assets/locales/*.yml` (English text is an acceptable placeholder; never
    leave a key out or define it twice, E1/E2).
-5. A DEFECTS.md note if it is unverified on the Global client. Options that do nothing on this
+5. A LEDGER.md note if it is unverified on the Global client. Options that do nothing on this
    client must not be offered as if they work (C14). JP only options are region gated.
 
 ## 10. Conventions
@@ -236,7 +236,7 @@ A new speed or performance option touches, in one change:
   `docs`, `windows`, `android`. One concern per commit; the ledger update is its own `docs:` commit.
 - Code style follows the surrounding file: hook files use the game's PascalCase names
   (`src/lib.rs` allows `non_snake_case` crate wide), comments explain *why* a value is safe, not what the line does.
-- DEFECTS.md status marks: `[x]` fixed and verified, `[~]` partial, `[ ]` open, `[latent]` inert
+- LEDGER.md status marks: `[x]` fixed and verified, `[~]` partial, `[ ]` open, `[latent]` inert
   on this client. Cite the commit hash when closing an item, and never mark `[x]` without a run. An
   item whose own text says the run is missing is `[~]`, not `[x]`. A ledger self check must match the
   shape a diff prints: `^\+- \[x\]` is a closure the change set awards and `^-- \[x\]` one it takes

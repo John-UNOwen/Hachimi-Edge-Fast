@@ -34,7 +34,7 @@ static IN_SKIP_OWNER: AtomicPtr<Il2CppObject> = AtomicPtr::new(std::ptr::null_mu
 // A dropped request used to log nothing, so the entry line and the `SkipFadeInTween
 // unavailable` warning were the only two signals a run had, and they cannot tell a
 // finished tween chain from a swallowed request - which is exactly how run 3 read them
-// as proof the skip worked end to end (DEFECTS.md:125-127, C38). Every dropped request
+// as proof the skip worked end to end (LEDGER.md item C38). Every dropped request
 // now counts on its own line, so `entries - unavailable - contended` is the number of
 // chains this hook actually finished.
 static SKIP_GUARD_CONTENDED: AtomicUsize = AtomicUsize::new(0);
