@@ -45,26 +45,44 @@ pub extern "C" fn GotoBlock(this: *mut Il2CppObject, block_id: i32, weaken_cy_sp
 // factor compound instead of being applied once. These two functions are where the
 // game computes the scale it then stores, so scaling here lands in the game's own state
 // exactly once.
+//
+// Both are dumped as static: `GetTimeScaleByHighSpeedType/1 -> static float(bool)` and
+// `GetTimeScaleHighSpeed/1 -> static float(bool)`. A static carries no hidden `this`, so the
+// wrapper takes only the bool; a wrapper that declared an instance pointer would read the flag
+// from the wrong register, which is why the matcher refused them for a whole ledger cycle (A3).
+// They are installed as measurement first: the timeline speed they produce is the biggest story
+// lever this class has, and a run has to report what the game returns for each flag before a
+// factor is put on it. Run 5 is the reason for that order.
 const STORY: AnimationSpeed::Group = AnimationSpeed::Group::Story;
 
-type GetTimeScaleByHighSpeedTypeFn = extern "C" fn(this: *mut Il2CppObject, is_high_speed: bool) -> f32;
-extern "C" fn GetTimeScaleByHighSpeedType(this: *mut Il2CppObject, is_high_speed: bool) -> f32 {
-    let value = get_orig_fn!(GetTimeScaleByHighSpeedType, GetTimeScaleByHighSpeedTypeFn)(this, is_high_speed);
-    let scaled = AnimationSpeed::scale_time_scale(value, STORY);
+static HIGH_SPEED_SCALE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static PLAIN_SCALE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    if scaled != value {
-        debug!("StoryTimelineController::GetTimeScaleByHighSpeedType({}) -> {} (from {})", is_high_speed, scaled, value);
+fn log_scale(calls: &AtomicUsize, name: &'static str, flag: bool, value: f32) {
+    let calls = calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+    let flag = u8::from(flag);
+
+    if calls <= STEP_DETAIL_LIMIT {
+        debug!("Story scale {name}({flag}) call {calls} -> {value}");
+    } else if calls % STEP_CHUNK == 0 {
+        debug!("Story scale {name} {calls} calls, most recent value {value}");
     }
-
-    scaled
 }
 
-type GetTimeScaleHighSpeedFn = extern "C" fn(this: *mut Il2CppObject, is_high_speed: bool) -> f32;
-extern "C" fn GetTimeScaleHighSpeed(this: *mut Il2CppObject, is_high_speed: bool) -> f32 {
-    AnimationSpeed::scale_time_scale(
-        get_orig_fn!(GetTimeScaleHighSpeed, GetTimeScaleHighSpeedFn)(this, is_high_speed),
-        STORY
-    )
+type GetTimeScaleByHighSpeedTypeFn = extern "C" fn(is_high_speed: bool) -> f32;
+extern "C" fn GetTimeScaleByHighSpeedType(is_high_speed: bool) -> f32 {
+    let value = get_orig_fn!(GetTimeScaleByHighSpeedType, GetTimeScaleByHighSpeedTypeFn)(is_high_speed);
+    log_scale(&HIGH_SPEED_SCALE_CALLS, "StoryTimelineController::GetTimeScaleByHighSpeedType", is_high_speed, value);
+
+    value
+}
+
+type GetTimeScaleHighSpeedFn = extern "C" fn(is_high_speed: bool) -> f32;
+extern "C" fn GetTimeScaleHighSpeed(is_high_speed: bool) -> f32 {
+    let value = get_orig_fn!(GetTimeScaleHighSpeed, GetTimeScaleHighSpeedFn)(is_high_speed);
+    log_scale(&PLAIN_SCALE_CALLS, "StoryTimelineController::GetTimeScaleHighSpeed", is_high_speed, value);
+
+    value
 }
 
 type SetHighSpeedFrameCountFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
@@ -205,7 +223,12 @@ impl_addr_wrapper_fn!(IsHighSpeedModeValue, IS_HIGH_SPEED_MODE_VALUE_ADDR, i32, 
 static mut IS_HIGH_SPEED_MODE_ADDR: usize = 0;
 impl_addr_wrapper_fn!(IsStoryHighSpeedMode, IS_HIGH_SPEED_MODE_ADDR, i32,);
 
-const STORY_ACTIVE_WINDOW_SECS: i64 = 10;
+// The stepping paths fire in bursts when the game jumps between blocks, not on a steady cadence:
+// one run stepped them at 47 s into a scene and its next game thread report was 98 s later. A
+// window measured in seconds therefore reads as "no story running" in the middle of a scene. The
+// window is generous so a live scene is never missed; a menu or a race never stamps it at all,
+// because nothing there reaches these methods.
+const STORY_ACTIVE_WINDOW_SECS: i64 = 300;
 const ENGAGE_INTERVAL_SECS: i64 = 10;
 
 static HIGH_SPEED_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -239,13 +262,19 @@ pub fn apply_config() {
     }
 }
 
-// Every exit that is not the option being off has to say why it did nothing, or the feature
-// cannot be read out of a log.
-static ENGAGE_NOTES: AtomicUsize = AtomicUsize::new(0);
+// Each reason an attempt stops gets its own slot and speaks once per session. A shared budget of
+// six lines was spent on the menu phase of a run before story content was reached, so the exit
+// that mattered printed nothing and the run could not be read.
+const REASON_WINDOW: usize = 1 << 0;
+const REASON_NO_MAX: usize = 1 << 1;
+const REASON_ALREADY_ON: usize = 1 << 2;
+const REASON_ATTEMPT: usize = 1 << 3;
 
-fn note_engage_blocked(reason: &str) {
-    if ENGAGE_NOTES.fetch_add(1, atomic::Ordering::Relaxed) < STEP_DETAIL_LIMIT {
-        debug!("StoryTimelineController: story high speed mode left alone, {reason}");
+static ENGAGE_REASONS: AtomicUsize = AtomicUsize::new(0);
+
+fn note_engage(bit: usize, message: &str) {
+    if ENGAGE_REASONS.fetch_or(bit, atomic::Ordering::AcqRel) & bit == 0 {
+        debug!("StoryTimelineController: {message}");
     }
 }
 
@@ -263,8 +292,14 @@ pub fn engage_high_speed_mode() {
     let last_activity = STORY_LAST_SEC.load(atomic::Ordering::Relaxed);
     let last_engage = ENGAGE_LAST_SEC.load(atomic::Ordering::Relaxed);
 
-    if last_activity < 0 || now - last_activity > STORY_ACTIVE_WINDOW_SECS {
-        note_engage_blocked("no story stepping path ran in the last 10 s");
+    // No story frame has stepped in this session yet, which is the menu and loading screen case
+    // where the static must not be written. Silence here is the correct behaviour.
+    if last_activity < 0 {
+        return;
+    }
+
+    if now - last_activity > STORY_ACTIVE_WINDOW_SECS {
+        note_engage(REASON_WINDOW, "story high speed mode left alone, the story stepping paths have been quiet since the last scene");
         return;
     }
 
@@ -277,18 +312,28 @@ pub fn engage_high_speed_mode() {
     let target = HighSpeedSetting::GetMaxHighSpeedType();
 
     if target <= 0 {
-        note_engage_blocked("StoryManager::GetMaxHighSpeedType gave {target}");
+        note_engage(REASON_NO_MAX, "story high speed mode left alone, StoryManager reported no high speed type in this context");
         return;
     }
 
     let before = IsStoryHighSpeedMode();
+    let accepted = IsHighSpeedModeValue(target);
+
+    // The one line that carries the three numbers the decision is made from. Without it a run that
+    // writes nothing cannot be told apart from a run that never looked.
+    if ENGAGE_REASONS.load(atomic::Ordering::Relaxed) & REASON_ATTEMPT == 0 {
+        note_engage(REASON_ATTEMPT, &format!(
+            "story high speed attempt, StoryManager max {target}, IsHighSpeedMode {before}, IsHighSpeedMode({target}) {}",
+            u8::from(accepted != 0)
+        ));
+    }
 
     if before != 0 {
-        note_engage_blocked("the game already reports story high speed mode");
+        note_engage(REASON_ALREADY_ON, "story high speed mode left alone, the game already reports the mode as on");
         return;
     }
 
-    if IsHighSpeedModeValue(target) == 0 {
+    if accepted == 0 {
         if HIGH_SPEED_VALUE_REJECTED.swap(target, atomic::Ordering::AcqRel) != target {
             warn!("StoryTimelineController: this client does not read HighSpeedType {target} as a high speed mode, leaving the story timeline alone");
         }
@@ -317,13 +362,13 @@ pub fn init(umamusume: *const Il2CppImage) {
         GET_TIMELINEDATA_ADDR = get_method_addr(StoryTimelineController, c"get_TimelineData", 0);
     }
 
-    let by_high_speed_addr = unsafe { AnimationSpeed::resolve_method(
+    let by_high_speed_addr = unsafe { AnimationSpeed::resolve_static_method(
         StoryTimelineController, "GetTimeScaleByHighSpeedType",
         &[Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN], Il2CppTypeEnum_IL2CPP_TYPE_R4,
     ) };
     if by_high_speed_addr != 0 { new_hook!(by_high_speed_addr, GetTimeScaleByHighSpeedType); }
 
-    let high_speed_addr = unsafe { AnimationSpeed::resolve_method(
+    let high_speed_addr = unsafe { AnimationSpeed::resolve_static_method(
         StoryTimelineController, "GetTimeScaleHighSpeed",
         &[Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN], Il2CppTypeEnum_IL2CPP_TYPE_R4,
     ) };
