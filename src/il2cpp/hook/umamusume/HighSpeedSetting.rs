@@ -88,11 +88,14 @@ pub fn apply() {
 
     debug!("HighSpeedSetting: max {}, saved story {}, loader story {}, training {}", max, saved, story, training);
 
-    if story != max {
+    // StoryManager::SaveHighSpeedType changes StoryManager's own saved setting. The save
+    // loader getter keeps reporting the value last written to disk, so comparing against it
+    // re-applies the same write at every scene change.
+    if saved != max {
         SaveHighSpeedType(max);
 
-        let after = get_StoryHighSpeedType(loader);
-        info!("HighSpeedSetting: story high speed {} -> {} via StoryManager::SaveHighSpeedType, read back {}", story, max, after);
+        let after = GetSavedHighSpeedSetting();
+        info!("HighSpeedSetting: story high speed {} -> {} via StoryManager::SaveHighSpeedType, saved now {}", saved, max, after);
     }
 
     if training < max {

@@ -61,6 +61,10 @@ extern "C" fn Hide(this: *mut Il2CppObject, onComplete: *mut Il2CppDelegate, ove
 // FADE_TIME / BLACK_FADE_TIME / WHITE_OUT_HORSE_SHOE_FADE_TIME constants reach the
 // tween as arguments here. They are `const`, so they have no writable storage; scaling
 // the argument is the only place the value can still be reached.
+//
+// PlayFadeNowLoading takes the alpha endpoints first: the calls logged by this client are
+// always (0, 1, dur) for the wipe in and (1, 0, dur) for the wipe out, so only the third
+// argument is a duration. Scaling the endpoints made the fade target 0.05 at factor 20.
 const TRANSITION: AnimationSpeed::Group = AnimationSpeed::Group::Transition;
 
 type PlayFadeNowLoadingFn = extern "C" fn(this: *mut Il2CppObject, first: f32, second: f32, third: f32, onComplete: *mut Il2CppObject);
@@ -71,8 +75,8 @@ extern "C" fn PlayFadeNowLoading(this: *mut Il2CppObject, first: f32, second: f3
 
     get_orig_fn!(PlayFadeNowLoading, PlayFadeNowLoadingFn)(
         this,
-        AnimationSpeed::scale_duration(first, TRANSITION),
-        AnimationSpeed::scale_duration(second, TRANSITION),
+        first,
+        second,
         AnimationSpeed::scale_duration(third, TRANSITION),
         onComplete
     );
