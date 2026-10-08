@@ -9,6 +9,7 @@
 // forth never compounds. Fields that do not exist in the current client are skipped
 // silently, so one table serves every region.
 use std::ffi::CString;
+use std::collections::HashMap;
 use std::os::raw::{c_int, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -18,9 +19,9 @@ use once_cell::sync::Lazy;
 use crate::core::Hachimi;
 use crate::il2cpp::{
     api::{
-        il2cpp_class_from_name, il2cpp_class_get_field_from_name, il2cpp_field_get_flags,
-        il2cpp_field_get_type, il2cpp_field_is_literal, il2cpp_field_static_get_value,
-        il2cpp_field_static_set_value,
+        il2cpp_class_from_name, il2cpp_class_get_field_from_name, il2cpp_class_get_method_from_name,
+        il2cpp_field_get_flags, il2cpp_field_get_type, il2cpp_field_is_literal,
+        il2cpp_field_static_get_value, il2cpp_field_static_set_value, il2cpp_method_get_return_type,
     },
     types::*,
 };
@@ -148,10 +149,157 @@ static DIRTY: AtomicBool = AtomicBool::new(false);
 static WAS_SCALED: AtomicBool = AtomicBool::new(false);
 
 // Mirrored for hot paths (timeline getters run every frame while a cutscene plays).
+static TRANSITION_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+static SCREENS_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static STORY_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+
+// A ceiling on the time-scale lever, independent of the slider: a game path that reads
+// a scaled value back and writes it again would otherwise compound every frame.
+const MAX_TIME_SCALE: f32 = 5.0;
 
 pub fn story_factor() -> f32 {
     f32::from_bits(STORY_FACTOR.load(Ordering::Acquire))
+}
+
+// The factors are cached so a detour that runs per call reads one atomic instead of
+// loading the whole config.
+pub fn factor(group: Group) -> f32 {
+    let bits = match group {
+        Group::Transition => TRANSITION_FACTOR.load(Ordering::Relaxed),
+        Group::Screens => SCREENS_FACTOR.load(Ordering::Relaxed),
+        Group::Story => STORY_FACTOR.load(Ordering::Relaxed),
+    };
+
+    f32::from_bits(bits)
+}
+
+// Most of Gallop's durations are `const`, which IL2CPP folds into the call sites, so
+// the value has no writable storage (see the init log). The methods that play the
+// animation still receive it as a plain argument, so scaling the argument is the same
+// adjustment applied one level earlier, and it does not care how the caller stores it.
+pub fn scale_duration(value: f32, group: Group) -> f32 {
+    let factor = factor(group);
+
+    if factor == 1.0 || !value.is_finite() || value == 0.0 {
+        return value;
+    }
+
+    // Dividing keeps the sign, so a negative offset moves towards zero instead of
+    // flipping into a duration that did not exist before.
+    value / factor
+}
+
+// A frame count never drops below one frame: the coroutines that advance animation
+// poll these counts, and a zero wait can leave them spinning without advancing.
+pub fn scale_frame_count(value: i32, group: Group) -> i32 {
+    let factor = factor(group);
+
+    if factor == 1.0 || value == 0 {
+        return value;
+    }
+
+    let scaled = value as f32 / factor;
+
+    if value > 0 { scaled.max(1.0).round() as i32 }
+    else { scaled.min(-1.0).round() as i32 }
+}
+
+// A time scale only ever goes up, and only to MAX_TIME_SCALE.
+pub fn scale_time_scale(value: f32, group: Group) -> f32 {
+    let factor = factor(group);
+
+    if factor == 1.0 || !value.is_finite() {
+        return value;
+    }
+
+    (value * factor).min(MAX_TIME_SCALE).max(value)
+}
+
+// A detour installed against the wrong overload reads its arguments from the wrong
+// registers, so the parameter list and the return type both have to match the declared
+// method before anything is hooked.
+pub unsafe fn resolve_method(
+    class: *mut Il2CppClass,
+    name: &str,
+    params: &[Il2CppTypeEnum],
+    ret: Il2CppTypeEnum,
+) -> usize {
+    let method = match crate::il2cpp::symbols::get_method_overload(class, name, params) {
+        Ok(method) => method,
+        Err(_) => {
+            debug!("AnimationSpeed: {} has no overload with the expected signature", name);
+            return 0;
+        }
+    };
+
+    if (*method).is_generic() != 0 {
+        debug!("AnimationSpeed: {} is generic", name);
+        return 0;
+    }
+
+    let return_type = il2cpp_method_get_return_type(method);
+
+    if return_type.is_null() || (*return_type).type_() != ret {
+        warn!(
+            "AnimationSpeed: {} returns il2cpp type {}, wrapper expects {}",
+            name,
+            if return_type.is_null() { u32::MAX } else { (*return_type).type_() },
+            ret
+        );
+        return 0;
+    }
+
+    (*method).methodPointer
+}
+
+// Scaling only the read half of a settable property is unsafe: a game path that does
+// `prop = prop - 1` writes the already divided value back into the backing field, and
+// the value collapses geometrically instead of being shortened once. A getter is only
+// wrapped when the class has no matching setter to write it back.
+unsafe fn resolve_getter(class: *mut Il2CppClass, name: &str, ret: Il2CppTypeEnum) -> usize {
+    let addr = resolve_method(class, name, &[], ret);
+
+    if addr == 0 {
+        return 0;
+    }
+
+    let rest = match name.strip_prefix("get_").or_else(|| name.strip_prefix("Get")) {
+        Some(rest) => rest,
+        None => return addr,
+    };
+
+    let setter = CString::new(format!("set_{rest}")).unwrap();
+
+    if !il2cpp_class_get_method_from_name(class, setter.as_ptr(), 1).is_null() {
+        debug!("AnimationSpeed: {} is settable, read-only scaling would compound", name);
+        return 0;
+    }
+
+    addr
+}
+
+// These getters hand out a hardcoded duration or a playback scale, and are the only way
+// to reach a `const` duration that is not passed as an argument anywhere.
+macro_rules! def_getter_hook {
+    ($hook:ident, $group:expr, $scale:ident) => {
+        extern "C" fn $hook(this: *mut Il2CppObject) -> f32 {
+            type Orig = extern "C" fn(*mut Il2CppObject) -> f32;
+
+            $scale(get_orig_fn!($hook, Orig)(this), $group)
+        }
+    };
+}
+
+macro_rules! install_getter {
+    ($classes:ident, $hook:ident, $class:ident, $method:ident) => {
+        if let Some(class) = $classes.get(stringify!($class)).copied() {
+            let addr = unsafe { resolve_getter(class, stringify!($method), Il2CppTypeEnum_IL2CPP_TYPE_R4) };
+
+            if addr != 0 {
+                new_hook!(addr, $hook);
+            }
+        }
+    };
 }
 
 fn normalize(value: f32) -> f32 {
@@ -308,7 +456,91 @@ pub fn init(umamusume: *const Il2CppImage) {
     );
 
     *ENTRIES.lock().unwrap() = entries;
+    install_getters(umamusume);
     apply();
+}
+
+def_getter_hook!(CountupModifier_getDuration, Group::Screens, scale_duration);
+def_getter_hook!(TextModifier_getDuration, Group::Screens, scale_duration);
+def_getter_hook!(TextModifier_getDelay, Group::Screens, scale_duration);
+def_getter_hook!(TrainingFooter_GetCloseAnimWaitTime, Group::Screens, scale_duration);
+def_getter_hook!(TrainingCuttClip_getDelayTime, Group::Story, scale_duration);
+def_getter_hook!(SingleModeUtils_GetHighSpeedPlayDuration, Group::Story, scale_duration);
+def_getter_hook!(StoryTimeline_getTimeScaleEventWipe, Group::Story, scale_time_scale);
+def_getter_hook!(StoryTimeline_getTimeScaleAfterEndStory, Group::Story, scale_time_scale);
+def_getter_hook!(StoryViewController_GetTimeScaleByHighSpeedType, Group::Story, scale_time_scale);
+def_getter_hook!(SingleModeUtils_GetCutTimeScale, Group::Story, scale_time_scale);
+
+// One float argument in a fixed position, so the wrapper cannot misread it. This is the
+// grand result screen's own entry point for its hardcoded DURATION constant.
+type GrandResultFadeInFromRightFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32);
+extern "C" fn TeamStadiumGrandResult_FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32) {
+    get_orig_fn!(TeamStadiumGrandResult_FadeInContentFromRight, GrandResultFadeInFromRightFn)(
+        this, content, scale_duration(duration, Group::Screens)
+    );
+}
+
+// A getter that takes the thing it is measuring and still returns a duration.
+type TrainingFooterGetItemAnimDurationFn = extern "C" fn(this: *mut Il2CppObject, item: *mut Il2CppObject) -> f32;
+extern "C" fn TrainingFooter_GetItemAnimDuration(this: *mut Il2CppObject, item: *mut Il2CppObject) -> f32 {
+    let value = get_orig_fn!(TrainingFooter_GetItemAnimDuration, TrainingFooterGetItemAnimDurationFn)(this, item);
+
+    scale_duration(value, Group::Screens)
+}
+
+// Every class named below has to be resolved before the getters are installed, because
+// the install macro looks the class up by name.
+const GETTER_CLASSES: &[&str] = &[
+    "CountupModifier", "TextModifier", "SingleModeMainViewTrainingFooter",
+    "StoryTimelineTrainingCuttClipData", "SingleModeUtils", "StoryViewController",
+    "StoryTimelineController", "TeamStadiumGrandResultViewController",
+];
+
+fn install_getters(umamusume: *const Il2CppImage) {
+    let mut classes: HashMap<&str, *mut Il2CppClass> = HashMap::new();
+
+    for name in GETTER_CLASSES {
+        let name_const = CString::new(*name).unwrap();
+        let class = il2cpp_class_from_name(umamusume, c"Gallop".as_ptr(), name_const.as_ptr());
+
+        if class.is_null() {
+            debug!("AnimationSpeed: Gallop.{} not present in this build", name);
+            continue;
+        }
+
+        classes.insert(name, class);
+    }
+
+    install_getter!(classes, CountupModifier_getDuration, CountupModifier, get_Duration);
+    install_getter!(classes, TextModifier_getDuration, TextModifier, get_Duration);
+    install_getter!(classes, TextModifier_getDelay, TextModifier, get_Delay);
+    install_getter!(classes, TrainingFooter_GetCloseAnimWaitTime, SingleModeMainViewTrainingFooter, GetCloseAnimWaitTime);
+    install_getter!(classes, TrainingCuttClip_getDelayTime, StoryTimelineTrainingCuttClipData, get_DelayTime);
+    install_getter!(classes, SingleModeUtils_GetHighSpeedPlayDuration, SingleModeUtils, GetHighSpeedPlayDuration);
+    install_getter!(classes, StoryTimeline_getTimeScaleEventWipe, StoryTimelineController, get_TimeScaleEventWipe);
+    install_getter!(classes, StoryTimeline_getTimeScaleAfterEndStory, StoryTimelineController, get_TimeScaleAfterEndStory);
+    install_getter!(classes, StoryViewController_GetTimeScaleByHighSpeedType, StoryViewController, GetTimeScaleByHighSpeedType);
+    install_getter!(classes, SingleModeUtils_GetCutTimeScale, SingleModeUtils, GetCutTimeScale);
+
+    if let Some(class) = classes.get("TeamStadiumGrandResultViewController").copied() {
+        let addr = unsafe { resolve_method(
+            class, "FadeInContentFromRight",
+            &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_R4],
+            Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+        ) };
+
+        if addr != 0 { new_hook!(addr, TeamStadiumGrandResult_FadeInContentFromRight); }
+    }
+
+    if let Some(class) = classes.get("SingleModeMainViewTrainingFooter").copied() {
+        let addr = unsafe { resolve_method(
+            class, "GetItemAnimDuration",
+            &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS],
+            Il2CppTypeEnum_IL2CPP_TYPE_R4,
+        ) };
+
+        if addr != 0 { new_hook!(addr, TrainingFooter_GetItemAnimDuration); }
+    }
 }
 
 pub fn mark_dirty() {
@@ -326,9 +558,11 @@ pub fn apply_if_dirty() {
 
 pub fn apply() {
     let (transition, screens, story) = factors();
-    // Kept current even when there is nothing to rewrite: the story timeline getters
-    // read this value directly, and a build with no resolvable duration field would
-    // otherwise silently ignore story_speed.
+    // Cached first, and even when there is nothing to rewrite: the detours that scale
+    // arguments read these values, and a build with no rewritable duration field would
+    // otherwise ignore every option.
+    TRANSITION_FACTOR.store(transition.to_bits(), Ordering::Release);
+    SCREENS_FACTOR.store(screens.to_bits(), Ordering::Release);
     STORY_FACTOR.store(story.to_bits(), Ordering::Release);
 
     let mut entries = ENTRIES.lock().unwrap();

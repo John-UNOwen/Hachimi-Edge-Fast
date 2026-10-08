@@ -118,8 +118,33 @@ fn type_label(t: *const Il2CppType) -> String {
         _ => "other",
     };
 
-    if byref { format!("{name}&") }
-    else { name.to_owned() }
+    let detail = match kind {
+        // A `struct` argument is only safe to wrap as an integer when it is small enough
+        // to travel in a general-purpose register, so the concrete type and its size are
+        // dumped next to the keyword.
+        Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE | Il2CppTypeEnum_IL2CPP_TYPE_ENUM | Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST => {
+            let class = il2cpp_type_get_class_or_element_class(t);
+
+            if class.is_null() {
+                String::new()
+            }
+            else {
+                let name = as_string(il2cpp_type_get_name(t)).unwrap_or_else(|| "?".to_owned());
+                // instance_size counts the object header; the payload is what the ABI moves.
+                let size = il2cpp_class_instance_size(class) - 16;
+
+                format!("<{name}:{size}B>")
+            }
+        },
+        Il2CppTypeEnum_IL2CPP_TYPE_CLASS | Il2CppTypeEnum_IL2CPP_TYPE_OBJECT | Il2CppTypeEnum_IL2CPP_TYPE_STRING => {
+            let name = as_string(il2cpp_type_get_name(t)).unwrap_or_else(|| "?".to_owned());
+            format!("<{name}>")
+        },
+        _ => String::new(),
+    };
+
+    if byref { format!("{name}{detail}&") }
+    else { format!("{name}{detail}") }
 }
 
 fn method_signature(method: *const MethodInfo) -> String {

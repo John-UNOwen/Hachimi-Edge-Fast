@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::core::Hachimi;
 use crate::il2cpp::{
     api::{il2cpp_class_get_method_from_name, il2cpp_class_get_parent, il2cpp_object_get_class},
+    hook::umamusume::AnimationSpeed,
     symbols::get_method_addr,
     types::*,
 };
@@ -64,6 +65,44 @@ extern "C" fn ActivateSkipButton(this: *mut Il2CppObject) {
     }
 }
 
+const SCREENS: AnimationSpeed::Group = AnimationSpeed::Group::Screens;
+
+// The result parts hand their hardcoded FADE_DURATION / FADE_OFFSET / COUNTUP_DURATION
+// to these three as float arguments. Same reason as NowLoading above: the constants
+// themselves are `const`, so the argument is where they can still be reached.
+type FadeInContentFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject);
+extern "C" fn FadeInContent(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject) {
+    log_duration("FadeInContent", duration);
+
+    get_orig_fn!(FadeInContent, FadeInContentFn)(
+        this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+    );
+}
+
+type FadeInContentFromRightFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject);
+extern "C" fn FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject) {
+    log_duration("FadeInContentFromRight", duration);
+
+    get_orig_fn!(FadeInContentFromRight, FadeInContentFromRightFn)(
+        this, content, AnimationSpeed::scale_duration(duration, SCREENS), onComplete
+    );
+}
+
+type FadeInContentFromBottomFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject);
+extern "C" fn FadeInContentFromBottom(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject) {
+    log_duration("FadeInContentFromBottom", duration);
+
+    get_orig_fn!(FadeInContentFromBottom, FadeInContentFromBottomFn)(
+        this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+    );
+}
+
+fn log_duration(name: &str, duration: f32) {
+    if AnimationSpeed::factor(SCREENS) != 1.0 {
+        debug!("SingleModeResultContentBase::{}({})", name, duration);
+    }
+}
+
 // Prefer the method on the concrete runtime class (a subclass may override it),
 // falling back to whatever the base class declared at init time.
 fn skip_fade_in_tween_addr(this: *mut Il2CppObject) -> Option<usize> {
@@ -103,4 +142,26 @@ pub fn init(umamusume: *const Il2CppImage) {
 
     let ActivateSkipButton_addr = get_method_addr(SingleModeResultContentBase, c"ActivateSkipButton", 0);
     new_hook!(ActivateSkipButton_addr, ActivateSkipButton);
+
+    let class = SingleModeResultContentBase;
+
+    let fade_in_content_addr = unsafe { AnimationSpeed::resolve_method(
+        class, "FadeInContent",
+        &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_CLASS],
+        Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+    ) };
+    let fade_in_right_addr = unsafe { AnimationSpeed::resolve_method(
+        class, "FadeInContentFromRight",
+        &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_CLASS],
+        Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+    ) };
+    let fade_in_bottom_addr = unsafe { AnimationSpeed::resolve_method(
+        class, "FadeInContentFromBottom",
+        &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_CLASS],
+        Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+    ) };
+
+    if fade_in_content_addr != 0 { new_hook!(fade_in_content_addr, FadeInContent); }
+    if fade_in_right_addr != 0 { new_hook!(fade_in_right_addr, FadeInContentFromRight); }
+    if fade_in_bottom_addr != 0 { new_hook!(fade_in_bottom_addr, FadeInContentFromBottom); }
 }
