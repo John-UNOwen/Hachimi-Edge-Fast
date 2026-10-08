@@ -356,10 +356,14 @@ pub fn report_if_due() {
     }
 
     // The mode the timeline is actually in, read once per report through the guarded wrapper
-    // instead of from a hook on the path the game polls a hundred and thirty times a second.
+    // instead of from a hook on the path the game polls a hundred and thirty times a second. The
+    // wrapper returns a bool, so the report prints the game's answer and not a register width.
+    // Beside it, how many values this module has put on the high speed static so far: the number
+    // that says whether the engagement is one write per story state or one write per block.
     let mode = crate::il2cpp::hook::umamusume::StoryTimelineController::IsStoryHighSpeedMode();
+    let writes = crate::il2cpp::hook::umamusume::StoryTimelineController::high_speed_write_count();
 
-    info!("Frame probe totals at {now} s:{line} story high speed mode {}", u8::from(mode != 0));
+    info!("Frame probe totals at {now} s:{line} story high speed mode {} writes {writes}", u8::from(mode));
 }
 
 static START: OnceLock<Instant> = OnceLock::new();

@@ -88,10 +88,19 @@ fn ChangeViewCommon(next_view_id: i32) {
     }
     debug!("next_view_id = {}", next_view_id);
 
-    // Gallop sets its own Time.timeScale around view changes, and the hook on
-    // set_timeScale only scales what the game writes, so re-assert ours here.
-    crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply();
-    crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
+    // Nothing speed related runs here. `AnimationSpeed::apply()` already ran in the ChangeView
+    // wrapper before the original call, which is the only point that can shorten this
+    // transition, because Gallop reads its fade constants while ChangeView runs. A second pass
+    // after the change completes re-reads the config and re-runs the `HighSpeedSetting` getter
+    // chain with its log line for groups `APPLIED_FACTORS` has already marked as written, and
+    // it is what doubled the `HighSpeedSetting: max ...` snapshots the ledger counts scene
+    // changes from.
+    //
+    // `Time::apply()` is not here either. Gallop sets its own Time.timeScale around view
+    // changes, and the hook on set_timeScale scales every value the game writes, so a view
+    // change has nothing to re-assert. Re-applying the configured lever here is what used to
+    // overwrite a pause or a game fast forward with the config value; `Time::apply()` now runs
+    // once per config change instead.
 }
 
 type ChangeViewJpfn = extern "C" fn(
@@ -104,8 +113,9 @@ extern "C" fn ChangeViewJp(
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool, is_fast_destroy: bool, fade_in_duration: f32
 ) {
-    // Applied before the original call: the game reads its fade constants while
-    // ChangeView runs, so a change saved in Config Editor has to be in place first.
+    // The one speed apply of this view change, and it has to sit before the original call:
+    // the game reads its fade constants while ChangeView runs, so a change saved in Config
+    // Editor has to be in place first. `ChangeViewCommon` does not apply it a second time.
     crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
 
     get_orig_fn!(ChangeViewJp, ChangeViewJpfn)(
@@ -126,6 +136,9 @@ extern "C" fn ChangeViewOther(
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool
 ) {
+    // The one speed apply of a view change on this client, before the original call, for the
+    // same reason as the Japan path: Gallop reads this transition's fade constants inside
+    // ChangeView, and `ChangeViewCommon` does not apply it a second time.
     crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
 
     get_orig_fn!(ChangeViewOther, ChangeViewOtherfn)(

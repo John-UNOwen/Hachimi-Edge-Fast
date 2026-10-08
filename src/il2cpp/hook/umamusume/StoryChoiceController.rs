@@ -3,7 +3,8 @@ use std::sync::atomic::{self, AtomicBool};
 use crate::{
     core::{Hachimi, game::Region},
     il2cpp::{
-        symbols::{get_method_addr, get_field_from_name},
+        hook::umamusume::AnimationSpeed,
+        symbols::{get_field_from_name, get_method_addr},
         types::*
     }
 };
@@ -21,8 +22,14 @@ extern "C" fn CheckChoiceAutoTap(this: *mut Il2CppObject) {
 
     // Global has a different way of handling choice auto select delay in stories
     let is_global = Hachimi::instance().game.region == Region::Global;
-    let delay = Hachimi::instance().config.load().story_choice_auto_select_delay;
-    let needs_scaling = is_global && delay != 0.75 && delay > 0.0 && delay.is_finite();
+    // The floor on the delay and the ceiling on the multiplier are in the mirror this reads, not in
+    // the Config Editor's slider range: egui clamps to the range and then snaps from `range.start`,
+    // so the left end of the slider is a real value, and config.json is read unbounded. C24 measured
+    // `0.75 / 0.0001` = 7500 reaching the game's own accumulator through this line. This half scales
+    // seconds, so AnimationSpeed caps it at MAX_STORY_CHOICE_AUTO_SELECT_MULTIPLIER; the story time
+    // scale half is capped at MAX_TIME_SCALE in `StoryViewController.rs`. NAN is the inert setting.
+    let mult = if is_global { AnimationSpeed::story_choice_wait_time_multiplier() } else { 1.0 };
+    let needs_scaling = mult.is_finite() && mult != 1.0;
     let before = if needs_scaling {
         get__choiceAutoSelectWaitTime(this)
     } else {
@@ -38,8 +45,8 @@ extern "C" fn CheckChoiceAutoTap(this: *mut Il2CppObject) {
             // _choiceAutoSelectWaitTime accumulates elapsed time upward from 0
             // Auto select triggers when it reaches SINGLE_CHOICE_AUTO_SELECT_DURATION (0.75)
             // Scale the increment so it takes "delay" seconds instead of 0.75
-            let mult = 0.75 / delay;
             set__choiceAutoSelectWaitTime(this, before + increment * mult);
+            AnimationSpeed::hit(18, "StoryChoiceController::CheckChoiceAutoTap", increment, increment * mult);
         }
     }
 
