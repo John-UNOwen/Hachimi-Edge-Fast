@@ -71,6 +71,11 @@ const FULL_DUMP_NAMES: &[&str] = &[
     "SingleModeDefine", "SingleModeMainDefine", "SingleModeMainViewController",
     "SingleModeMainHeaderAndFooterController", "TrainingParamChangeUI", "CutInTimelineController",
     "CutInHelper", "CutInBgModel", "SingleModeLogItem", "SingleModeLogGroupBase",
+    // The story side. These are the classes a story event option has to be written against, and no dump
+    // has ever printed their signatures, which is why the story event probe measures the cut-in doors the
+    // dump does name and not these (C47: a probe on a guessed signature measures nothing).
+    "StoryViewController", "StorySceneController", "StoryEventMissionViewController",
+    "StoryCharacterFade", "StoryTimelineController",
 ];
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
