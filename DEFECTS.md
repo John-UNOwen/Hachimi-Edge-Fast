@@ -382,10 +382,31 @@ overload`, 0 `is not static`, 0 `passed by reference`.
     - Scaling the `SkipFrameCount` and `SkipMotionFrame` frame arguments is the direct lever. Both are
       single int arguments rather than read-modify-write state, but C23 (story block length
       recomputation) has to be settled before multiplying a skip request.
-16. `GetNextFrameCount_HighSpeed` is still not proven uncalled, and the ledger should not paper over
+16. [~] `GetNextFrameCount_HighSpeed` is still not proven uncalled, and the ledger should not paper over
     that. Its detour only logs when scaling changes the value, so a call whose scaled value came out
     identical would be invisible, and the probe set has no plain counter for it or for
-    `SetHighSpeedFrameCount`. Two extra counters cost nothing and would close the question.
+    `SetHighSpeedFrameCount`. Both paths now carry a plain counter that logs `Story step <name> call N`
+    for its first six calls and then every 4096, so the next run proves or disproves the calls.
+17. [ ] Story high speed mode is now a lever, and it is unverified. Run 4 showed that raising the High
+    Speed setting does not engage the mode the timeline consults, so `story_high_speed_mode` (default
+    off) calls the game's own `StoryTimelineController::SetHighSpeedType` with whatever value
+    `StoryManager::GetMaxHighSpeedType` reports. Nothing is written unless the game's own
+    `IsHighSpeedMode(value)` predicate accepts that value first, so no enum value is invented, and the
+    write only happens while the skip paths were reached within the last 10 s, at most once per 10 s,
+    from the game thread. At install the log says `story high speed helpers setter ..., value predicate
+    ..., state reader ...`, and an attempt ends as either `IsHighSpeedMode 0 -> 1` or `this client does
+    not read HighSpeedType N as a high speed mode`. No run has exercised it yet.
+18. [ ] Skip frame extension is an assumption with a guard on it. `story_skip_frame_scale` (default
+    1.0, does nothing) raises the frame value handed to `SkipFrameCount` and `SkipMotionFrame`. Run 4's
+    values read like frame targets rather than wait lengths, so the hook only ever raises the value and
+    never lowers it, and one call may add at most `MAX_SKIP_EXTENSION` 600 frames: a story block is a
+    few hundred frames long, and walking past the block the timeline is standing in is what C23 warns
+    about. Both hooks log `Story step <name> call N: raw -> scaled` for the first six calls, so the
+    direction is measurable with the option left at 1.0. Unverified, and the direction is the open
+    question.
+19. The probe set is 13 candidates now: `SkipFrameCount` and `SkipMotionFrame` moved from observation
+    to real hooks, and the summary cadence went from 512 to 4096 after `IsHighSpeedMode` wrote 66 of
+    the 1026 lines in run 4 at the old cadence.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
@@ -421,6 +442,8 @@ What arrived:
   twice. The earlier definition is never read.
 - [ ] **E2 The new option labels are untranslated in the locales this fork maintains.** `es`, `id` and
   `vi` carry none of the nine new keys, `fil` is missing four shadow keys and `zh-tw` is missing
-  `custom_font_file_warning`. They fall back to English. `performance_tab` is present in all ten.
+  `custom_font_file_warning`. They fall back to English. `performance_tab` is present in all ten. The
+  two later keys `story_high_speed_mode` and `story_skip_frame_scale` are present in all ten, in English
+  for `en` and in new machine translations for the rest, which nobody has proofread.
 - A6, A13, C22, C23 and C24 are untouched by this merge. Upstream changed nothing in `NowLoading.rs`,
   and its `StoryTimelineData.rs` edit is the JP `rewrite_story_shadow_types` path.
