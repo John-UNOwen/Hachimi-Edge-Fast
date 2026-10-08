@@ -43,7 +43,7 @@ const CLASS_FILTERS: &[&str] = &[
 const METHOD_FILTERS: &[&str] = &[
     "fade", "transition", "duration", "timescale", "time_scale", "speed", "skip", "fast",
     "delay", "wait", "plate", "changescene", "changeview", "nextscene", "playrate",
-    "elapsedtime", "currenttime", "settime", "curspeed", "interval"
+    "elapsedtime", "currenttime", "settime", "curspeed", "interval", "cutt", "cutin"
 ];
 
 /// Same for field names: a public backing field is often the only way to reach a duration.
@@ -58,6 +58,24 @@ const MAX_HITS: usize = 30_000;
 
 /// Cap on full class dumps, so a broad filter cannot turn the log into the whole assembly.
 const MAX_FULL_CLASSES: usize = 500;
+
+/// Classes dumped in full by exact name instead of by substring. The training cut-in work needs the
+/// whole surface of these, and the general cap is spent long before the walk reaches them: in a
+/// career run's log the 500th full dump landed at line 23504 of a walk that ran to 27524 (A26).
+const FULL_DUMP_NAMES: &[&str] = &[
+    "SingleModeMainTrainingCuttController", "TimelineTrainingCuttController",
+    "SingleModeTrainingCutInHelper", "SingleModeTrainingCutHelperExtension",
+    "TagTrainingCutInPlayer", "SingleModeMainViewTagTrainingCutInPlayer",
+    "SingleModeMainViewTrainingCutStatus", "SingleModeMainViewTrainingCutStatusFrame",
+    "SingleModeMainViewTrainingFooter", "SingleModeMainViewHpGauge", "SingleModeUtils",
+    "SingleModeDefine", "SingleModeMainDefine", "SingleModeMainViewController",
+    "SingleModeMainHeaderAndFooterController", "TrainingParamChangeUI", "CutInTimelineController",
+    "CutInHelper", "CutInBgModel", "SingleModeLogItem", "SingleModeLogGroupBase",
+];
+
+/// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
+/// is bounded, so the log grows by these classes and not by whatever else matches a filter.
+const MAX_ALLOWLIST_CLASSES: usize = 40;
 
 fn as_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
@@ -245,7 +263,9 @@ fn field_label(field: *mut FieldInfo) -> String {
 struct Counts {
     classes: usize,
     methods: usize,
-    fields: usize
+    fields: usize,
+    // Full dumps granted from the allowlist budget, reported apart from the general ones.
+    allowlisted: usize
 }
 
 fn dump_full_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, counts: &mut Counts) -> bool {
@@ -288,7 +308,20 @@ fn dump_full_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, co
     true
 }
 
-fn scan_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, counts: &mut Counts) -> bool {
+fn scan_class<W: Write>(
+    w: &mut W,
+    klass: *mut Il2CppClass,
+    label: &str,
+    counts: &mut Counts,
+    allowlisted: bool,
+) -> bool {
+    // An allowlisted class is dumped in full without the hit scan below: the full dump already
+    // contains every method and field that scan could have matched, so scanning first would only
+    // duplicate the work and the lines.
+    if allowlisted && counts.allowlisted < MAX_ALLOWLIST_CLASSES {
+        counts.allowlisted += 1;
+        return dump_full_class(w, klass, label, counts);
+    }
     let mut matched = false;
 
     let mut iter: *mut c_void = ptr::null_mut();
@@ -358,7 +391,7 @@ fn scan_class<W: Write>(w: &mut W, klass: *mut Il2CppClass, label: &str, counts:
 }
 
 fn dump_inner<W: Write>(w: &mut W) -> Counts {
-    let mut counts = Counts { classes: 0, methods: 0, fields: 0 };
+    let mut counts = Counts { classes: 0, methods: 0, fields: 0, allowlisted: 0 };
 
     let domain = il2cpp_domain_get();
     if domain.is_null() {
@@ -402,7 +435,9 @@ fn dump_inner<W: Write>(w: &mut W) -> Counts {
             let namespace = as_string(il2cpp_class_get_namespace(klass as *mut Il2CppClass)).unwrap_or_default();
             let label = if namespace.is_empty() { name.clone() } else { format!("{namespace}.{name}") };
 
-            if !scan_class(w, klass as *mut Il2CppClass, &label, &mut counts) {
+            let allowlisted = FULL_DUMP_NAMES.iter().any(|allowed| allowed.eq_ignore_ascii_case(&name));
+
+            if !scan_class(w, klass as *mut Il2CppClass, &label, &mut counts, allowlisted) {
                 let _ = writeln!(w, "\n[truncated at {MAX_HITS} matches]");
                 return counts;
             }
@@ -437,8 +472,8 @@ pub fn dump_if_enabled() {
         let counts = dump_inner(&mut writer);
         let _ = writeln!(
             writer,
-            "\n{} classes, {} methods, {} fields written",
-            counts.classes, counts.methods, counts.fields
+            "\n{} classes ({} from the allowlist), {} methods, {} fields written",
+            counts.classes, counts.allowlisted, counts.methods, counts.fields
         );
     });
 

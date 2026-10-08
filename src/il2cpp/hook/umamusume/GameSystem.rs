@@ -49,6 +49,8 @@ extern "C" fn GameSystem_Update(this: *mut Il2CppObject) {
     crate::il2cpp::hook::umamusume::AnimationSpeed::apply_if_dirty();
     crate::il2cpp::hook::umamusume::StoryTimelineController::engage_high_speed_mode();
     super::StoryFrameProbe::report_if_due();
+    // The training cut-in measurement reports on the same tick and on the same quiet path rule.
+    super::TrainingCuttProbe::report_if_due();
 
     #[cfg(target_os = "windows")]
     {

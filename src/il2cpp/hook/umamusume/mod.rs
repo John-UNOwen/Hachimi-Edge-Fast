@@ -88,6 +88,7 @@ pub mod SceneManager;
 pub mod AnimationSpeed;
 pub mod SingleModeResultContentBase;
 mod StoryFrameProbe;
+mod TrainingCuttProbe;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -372,4 +373,8 @@ pub fn init() {
     // client really calls. It has to run after the scaling modules so it observes the same class
     // lookups they resolved.
     StoryFrameProbe::init(image);
+
+    // Also diagnostic only: the same shape of measurement for the training screen's cut-in, so a
+    // friendship training animation has a number in front of any decision to speed it up.
+    TrainingCuttProbe::init(image);
 }
