@@ -59,19 +59,35 @@ macro_rules! find_nested_class_or_return {
 
 // shorter ver of doing impl_addr_wrapper_fn!()
 macro_rules! def_method_wrapper_fn {
-    ($name:tt, $addr:tt, $ret:ty, $($v:ident: $t:ty),*) => {
+    ($name:tt, $addr:ident, $ret:ty, $($v:ident: $t:ty),*) => {
         static mut $addr: usize = 0;
         pub fn $name($($v: $t),*) -> $ret {
-            let orig_fn: extern "C" fn($($v: $t),*) -> $ret = unsafe { std::mem::transmute($addr) };
+            // Reached from mod code as well as from a trampoline, so an unresolved target
+            // is reachable on an ordinary feature path. Jumping to 0 is not recoverable.
+            let addr = unsafe { $addr };
+
+            if addr == 0 {
+                warn!("{}: target address is unresolved, call skipped", stringify!($name));
+                return unsafe { ::std::mem::zeroed() };
+            }
+
+            let orig_fn: extern "C" fn($($v: $t),*) -> $ret = unsafe { ::std::mem::transmute(addr) };
             orig_fn($($v),*)
         }
     };
 }
 
 macro_rules! impl_addr_wrapper_fn {
-    ($name:tt, $addr:tt, $ret:ty, $($v:ident: $t:ty),*) => {
+    ($name:tt, $addr:ident, $ret:ty, $($v:ident: $t:ty),*) => {
         pub fn $name($($v: $t),*) -> $ret {
-            let orig_fn: extern "C" fn($($v: $t),*) -> $ret = unsafe { std::mem::transmute($addr) };
+            let addr = unsafe { $addr };
+
+            if addr == 0 {
+                warn!("{}: target address is unresolved, call skipped", stringify!($name));
+                return unsafe { ::std::mem::zeroed() };
+            }
+
+            let orig_fn: extern "C" fn($($v: $t),*) -> $ret = unsafe { ::std::mem::transmute(addr) };
             orig_fn($($v),*)
         }
     };
@@ -125,23 +141,35 @@ macro_rules! def_field_value_accessors {
     ($get_name:ident, $set_name:ident, $field:ident, $t:ty) => {
         static mut $field: *mut FieldInfo = 0 as _;
         pub fn $get_name(this: *mut Il2CppObject) -> $t {
-            crate::il2cpp::symbols::get_field_value(this, unsafe { $field })
+            let field = unsafe { $field };
+            if field.is_null() { return unsafe { ::std::mem::zeroed() }; }
+
+            crate::il2cpp::symbols::get_field_value(this, field)
         }
 
         pub fn $set_name(this: *mut Il2CppObject, value: $t) {
-            crate::il2cpp::symbols::set_field_value(this, unsafe { $field }, &value)
+            let field = unsafe { $field };
+            if field.is_null() { return; }
+
+            crate::il2cpp::symbols::set_field_value(this, field, &value)
         }
     };
     (get $get_name:ident, $field:ident, $t:ty) => {
         static mut $field: *mut FieldInfo = 0 as _;
         pub fn $get_name(this: *mut Il2CppObject) -> $t {
-            crate::il2cpp::symbols::get_field_value(this, unsafe { $field })
+            let field = unsafe { $field };
+            if field.is_null() { return unsafe { ::std::mem::zeroed() }; }
+
+            crate::il2cpp::symbols::get_field_value(this, field)
         }
     };
     (set $set_name:ident, $field:ident, $t:ty) => {
         static mut $field: *mut FieldInfo = 0 as _;
         pub fn $set_name(this: *mut Il2CppObject, value: $t) {
-            crate::il2cpp::symbols::set_field_value(this, unsafe { $field }, &value)
+            let field = unsafe { $field };
+            if field.is_null() { return; }
+
+            crate::il2cpp::symbols::set_field_value(this, field, &value)
         }
     };
 }
@@ -150,23 +178,35 @@ macro_rules! def_field_object_accessors {
     ($get_name:ident, $set_name:ident, $field:ident, $t:ty) => {
         static mut $field: *mut FieldInfo = 0 as _;
         pub fn $get_name(this: *mut Il2CppObject) -> *mut $t {
-            crate::il2cpp::symbols::get_field_object_value(this, unsafe { $field })
+            let field = unsafe { $field };
+            if field.is_null() { return ::std::ptr::null_mut(); }
+
+            crate::il2cpp::symbols::get_field_object_value(this, field)
         }
 
         pub fn $set_name(this: *mut Il2CppObject, value: *mut $t) {
-            crate::il2cpp::symbols::set_field_object_value(this, unsafe { $field }, value)
+            let field = unsafe { $field };
+            if field.is_null() { return; }
+
+            crate::il2cpp::symbols::set_field_object_value(this, field, value)
         }
     };
     (get $get_name:ident, $field:ident, $t:ty) => {
         static mut $field: *mut FieldInfo = 0 as _;
         pub fn $get_name(this: *mut Il2CppObject) -> *mut $t {
-            crate::il2cpp::symbols::get_field_object_value(this, unsafe { $field })
+            let field = unsafe { $field };
+            if field.is_null() { return ::std::ptr::null_mut(); }
+
+            crate::il2cpp::symbols::get_field_object_value(this, field)
         }
     };
     (set $set_name:ident, $field:ident, $t:ty) => {
         static mut $field: *mut FieldInfo = 0 as _;
         pub fn $set_name(this: *mut Il2CppObject, value: *mut $t) {
-            crate::il2cpp::symbols::set_field_object_value(this, unsafe { $field }, value)
+            let field = unsafe { $field };
+            if field.is_null() { return; }
+
+            crate::il2cpp::symbols::set_field_object_value(this, field, value)
         }
     };
 }

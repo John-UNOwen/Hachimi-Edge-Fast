@@ -80,6 +80,7 @@ const FIELD_ATTRIBUTE_STATIC: ::std::os::raw::c_int = 0x10;
 const FIELD_ATTRIBUTE_PUBLIC: ::std::os::raw::c_int = 0x06;
 const FIELD_ATTRIBUTE_INIT_ONLY: ::std::os::raw::c_int = 0x20;
 const FIELD_ATTRIBUTE_LITERAL: ::std::os::raw::c_int = 0x40;
+const METHOD_ATTRIBUTE_STATIC: u16 = 0x0010;
 
 /// Readable name for a metadata type. The shape matters as much as the name: a wrapper
 /// that assumes `float` for a method which actually returns `int` hands garbage to every
@@ -159,7 +160,11 @@ fn method_signature(method: *const MethodInfo) -> String {
         params.push_str(&type_label(il2cpp_method_get_param(method, i)));
     }
 
-    format!("{return_type}({params})")
+    // Whether the method carries a hidden `this`. A wrapper that reserves one for a
+    // static method reads every argument from the wrong register.
+    let qualifier = if unsafe { (*method).flags } & METHOD_ATTRIBUTE_STATIC != 0 { "static " } else { "" };
+
+    format!("{qualifier}{return_type}({params})")
 }
 
 fn field_signature(field: *mut FieldInfo) -> String {
