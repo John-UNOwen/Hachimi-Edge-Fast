@@ -278,3 +278,41 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
     `StoryTimelineTextClipData.TYPEWRITER_WAIT_FRAME`, `StoryTimelineController.FADE_TIME_FOR_HIGH_SPEED`,
     `TOUCH_BLOCK_INTERVAL` and `CONTINUOUS_TOUCH_INTERVAL` all logged as compile-time constants in run 2,
     and `resolved 0/61 duration fields` still holds. A13 is the first of those methods.
+
+## E. Merge with upstream v0.32.0 (`5f89a7e`)
+
+Merge base `83dd99f` (upstream #231). 11 upstream commits, 38 files, 1845 insertions, 136 deletions.
+One textual conflict, in `src/il2cpp/mod.rs`: upstream made `utils` public while we had added
+`introspect` and kept `utils` private, resolved by taking both. Every other overlap (`gui.rs`,
+`hachimi.rs`, seven locale files, `GameSystem.rs`, `SceneManager.rs`, `umamusume/mod.rs`,
+`UnityEngine_CoreModule/mod.rs`) merged without intervention, and the merged tree builds with no
+errors and no warnings.
+
+What arrived:
+
+- JP only shadow options `shadow_distance`, `soft_shadows`, `soft_shadow_quality`,
+  `shadow_depth_bias`, `shadow_normal_bias`, `force_chara_shadows` and `story_shadow_type`, together
+  with new modules `StoryTimelineBg3DClipData`, `CascadeShadow`, `CascadeShadowForRace`,
+  `GallopRenderer`, `Shader` and `ScreenSpaceAmbientOcclusion`. They are region gated to Japan, so on
+  this Global client they are inert.
+- Standalone custom font support: `custom_font_file` replaces `custom_font_asset_bundle` and
+  `custom_font_name`, `.hachifont` ZIP packs are scanned every 3 s while the Config Editor is open,
+  bundles load through `AssetBundle.LoadFromMemoryAsync_Internal`, with a 2 GB bundle limit, a 4 KB
+  `font_path.txt` limit and a one time `custom_font_file_warning`.
+- `SceneManager` caches `GetCurrentSceneId` from an `AlterUpdate` detour and exposes
+  `is_race_scene_family()`. Its new wrapper inherits the zero address guard our macro family already
+  applies. Our speed groups stay installed last in `umamusume::init`.
+- `GameSystem` writes `_isMSAA` when msaa is enabled, the race playback slider and button no longer
+  persist as invisible unclickable areas after a race, and race finish detection for overlays is fixed.
+- `tl_repo::download_incremental` writes to a `.part` file, localized data reloads on an update
+  failure, corrupted texture diffs are deleted in favour of the original game texture, and
+  `run_internal` returns `RuntimeError` instead of panicking on an unset TL repo directory or id.
+
+- [ ] **E1 Upstream locale duplicates.** `ko.yml` defines `shadow_depth_bias` and `shadow_normal_bias`
+  twice inside `config_editor`, `zh-cn.yml` defines `custom_font_file` and `custom_font_none_found`
+  twice. The earlier definition is never read.
+- [ ] **E2 The new option labels are untranslated in the locales this fork maintains.** `es`, `id` and
+  `vi` carry none of the nine new keys, `fil` is missing four shadow keys and `zh-tw` is missing
+  `custom_font_file_warning`. They fall back to English. `performance_tab` is present in all ten.
+- A6, A13, C22, C23 and C24 are untouched by this merge. Upstream changed nothing in `NowLoading.rs`,
+  and its `StoryTimelineData.rs` edit is the JP `rewrite_story_shadow_types` path.
