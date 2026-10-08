@@ -44,6 +44,9 @@ and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
   `StoryTimeline_getTimeScaleEventWipe`, `TeamStadiumGrandResult_FadeInContentFromRight`,
   `FadeInContent`, `FadeInContentFromRight`, `FadeInContentFromBottom`,
   `SetHighSpeedFrameCount/1 (int)`, `ActivateSkipButton`, `PlayInNowLoading`, `PlayOutNowLoading`.
+  Run 2 retires part of this list: `FadeInContentFromRight` reached the game 16 times.
+  `ActivateSkipButton` now logs every call (`b138a9b`), so a run can tell an installed hook from one
+  the game actually used.
 - [ ] **A5 `PlayFadeFrontCanvas` is now hookable.** The dump resolves the blocked value type:
   `Gallop.NowLoading::PlayFadeFrontCanvas/5 -> void(float, float, float, class<System.Action>, struct<DG.Tweening.Ease:4B>)`.
   A 4 byte enum travels in a general purpose register, not XMM, so it can be passed through.
@@ -54,8 +57,14 @@ and `hachimi/introspect.log` 1896.1 KB dumped by the same build.
   dump lists only `PlayFadeNowLoading`, `PlayFadeFrontCanvas`, `SetupCrossFadeAsync` and
   `PlayCrossFadeAsync` for the class, so the arity needs a targeted dump before the wrappers are
   rewritten. See A8.
-- [ ] **A7 `byref` parameters are still ignored** by the overload matcher, for example
-  `GetNextFrameCount_HighSpeed/2 -> void(float&, int&)`.
+- [~] **A7 `byref` parameters are ignored when matching, but are now verified before use.**
+  `symbols::get_method_overload` still compares `Il2CppTypeEnum` only, and this client keeps the
+  element type in the enum: the dumped `float&` and `int&` report R4 and I4, with the reference held
+  in a separate bit of `Il2CppType`. `AnimationSpeed::resolve_ref_method` now checks that bit on
+  every parameter of the resolved overload before a wrapper may write through it, and
+  `StoryTimelineController::GetNextFrameCount_HighSpeed` is hooked through it (`be41b21`). A
+  reference parameter and a value parameter of the same type are still indistinguishable to the
+  matcher.
 - [ ] **A8 The introspection dump is silently truncated.** `MAX_FULL_CLASSES = 500`
   (`src/il2cpp/introspect.rs:60`) was hit exactly, with no truncation marker, while the same run
   reported 10 name resolution failures. Absence of a name in `introspect.log` does not prove the
@@ -106,10 +115,25 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
   `max 2, saved story 2, loader story 1, training 2` x50 once story content was reached. The game
   ceiling is 2 in story context, the story setting was genuinely raised from 1 to 2, and training
   already sat at 2. A ceiling read in the wrong context raises nothing.
-- [ ] **A12 Hook installation costs about 4.6 s of every launch.** `Initializing il2cpp hooks` at
-  07:53:03.332 to `Hooking finished` at 07:53:08.013, with `MH_EnableHook: MH_OK` events spaced at
-  a uniform 24 ms. 192 enables at that spacing is 4.6 s. Every `new_hook!` enables its own hook, so
-  creating all hooks first and enabling them in one batch would collapse this.
+- [x] **A12 Hook installation costs about 4.6 s of every launch.** `Initializing il2cpp hooks` at
+  07:53:03.332 to `Hooking finished` at 07:53:08.013, with `MH_EnableHook: MH_OK` events spaced at a
+  uniform 24 ms. 192 enables at that spacing is 4.6 s. MinHook separates building a detour from
+  arming it, so `Interceptor::begin_batch` and `finish_batch` create every hook during `hook::init`
+  and arm them in one `MH_EnableHook(MH_ALL_HOOKS)` pass (`865935f`). A failed batch arms each
+  target on its own rather than leaving the build unarmed. Android keeps arming at create time, so
+  the batch is a no-op there. The line to read in the next run is
+  `Hooking finished: N hooks armed in one pass, S s`, and S is what has to beat 4.68.
+- [ ] **A13 The scaling direction of `GetNextFrameCount_HighSpeed` is not known yet.** The
+  signature `void(float&, int&)` does not say which half is the wait between story characters and
+  which half is the step the timeline advances. The wrapper divides both and never multiplies, so a
+  value that turns out to be an index into the game's readonly `_highSpeedFrameCountArray` cannot be
+  pushed past the end of it. The first six calls log `frames a -> b, count c -> d (story xN)`. The
+  next run has to show whether story screens get shorter before the direction is settled.
+- [x] **A14 A run did not record the settings it ran with.** `hook::init` now writes one
+  `Config snapshot:` line carrying transition, result, story, ui_animation, time_scale, story_tcps,
+  choice_delay, target_fps, auto_skip_result, high_speed_settings, hide_now_loading and the physics
+  mode (`865935f`), which is what made run 2 ambiguous: `config.json` read 3.0 and 1.0 at 03:31 and
+  1000.0 and 1000.0 at 04:00 with nothing in the log to say which values were live.
 
 ## B. Open items from the animation feature review
 
@@ -199,7 +223,8 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
 - [ ] **C25 About 5.5 s of work runs inside `DllMain` under the loader lock**: 198 hook install
   requests, a 1.9 MB dump written into Program Files, native sqlite hooking, window subclassing
   plus a CBT hook, a Discord IPC pipe connect that fails, and `TerminateProcess` of another
-  process by image name with no ownership check.
+  process by image name with no ownership check. Batch arming (`865935f`) removes the 24 ms per hook
+  from this list but not the dump, the sqlite hooking, or the window work.
 - [ ] **C26 Outbound update check plus unsigned installer execution path**, live by default,
   from inside the game process (`src/core/hachimi.rs:560-571`, `src/core/updater.rs:151-192`).
 - [ ] **C27 `disabled_hooks` matches bare wrapper names** that are not unique across modules
@@ -220,7 +245,7 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
 
 ## D. Fix order
 
-1. A1 duration argument index in `NowLoading`.
+1. [x] A1 duration argument index in `NowLoading` (`db3c272`).
 2. A2 overload matching by parameter class name.
 3. A3 argument-only wrappers for static targets, then re-enable both high speed helpers.
 4. A5 hook `PlayFadeFrontCanvas` and the `HighSpeedType` enum overload.
@@ -229,7 +254,8 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
 6. C5 clamp `ui_animation_scale` in code and leave `independent_time` alone.
 7. C22 and C24, the two compounding multipliers that are live in the current config.
 8. C1 remaining `get_orig_fn!` audit and the proxy export stubs.
-9. A6 `Show/7` and `Hide/3`, and A7 `byref`.
+9. A6 `Show/7` and `Hide/3` still open. A7 is `[~]`: the reference bit is verified before a wrapper
+   writes back and one method is hooked through it (`be41b21`), the matcher itself is unchanged.
 10. [x] `src/il2cpp/hook/umamusume/HighSpeedSetting.rs` raises the game's own settings: it reads
     `StoryManager::GetMaxHighSpeedType/0`, writes story through `StoryManager::SaveHighSpeedType/1`
     and training through `ApplicationSettingSaveLoader::set_TrainingHighSpeedType/1`, gated on
@@ -242,4 +268,13 @@ warnings, 2 static rejections, 0 panics. Deployed build after the fixes below: `
     - [ ] `StoryManager::get_IsHighSpeedMode/0 -> static bool` is not hooked
     - [ ] `StoryTimelineController::SetHighSpeedFrameCount/2 -> void(class<StoryTimelineTextTrackData>, int)`
       and `/1 -> void(class<StoryTimelineTextClipData>)` are not hooked; only the `(int)` overload is
-    - [ ] `high_speed_settings` is config file only, it is not in the Config Editor GUI yet
+    - [x] `high_speed_settings` is in the Config Editor, on the Performance tab (`e705585`, `3adb2bf`)
+
+11. Read the next run before choosing the direction of A13: the line
+    `Hooking finished: N hooks armed in one pass, S s` against the measured 4.68 s, the six
+    `GetNextFrameCount_HighSpeed frames a -> b, count c -> d` lines, and whether the 428.6 s of screen
+    time in run 2 moved.
+12. The story text path is only reachable through the methods that read its constants.
+    `StoryTimelineTextClipData.TYPEWRITER_WAIT_FRAME`, `StoryTimelineController.FADE_TIME_FOR_HIGH_SPEED`,
+    `TOUCH_BLOCK_INTERVAL` and `CONTINUOUS_TOUCH_INTERVAL` all logged as compile-time constants in run 2,
+    and `resolved 0/61 duration fields` still holds. A13 is the first of those methods.
