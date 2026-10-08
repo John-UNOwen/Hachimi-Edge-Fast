@@ -2,7 +2,8 @@
 
 Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code,
 then read [DEFECTS.md](DEFECTS.md), which is the fork's working memory: measured baselines, open
-items with IDs (A1..A14, C1..C43, E1..E3) and the fix order.
+items with IDs (A1 to A27, C1 to C46, E1 to E3), the fix order, the run notes, and section F for
+releases.
 
 ## 1. What this fork is for
 
