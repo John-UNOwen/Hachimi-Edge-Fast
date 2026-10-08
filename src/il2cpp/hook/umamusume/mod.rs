@@ -64,6 +64,7 @@ pub mod RacePhaseCalculator;
 mod RaceUtil;
 mod SaveDataManager;
 mod ApplicationSettingSaveLoader;
+mod HighSpeedSetting;
 mod LiveTheaterCharaSelect;
 mod LiveTheaterViewController;
 pub mod CySpringController;
@@ -247,6 +248,7 @@ pub fn init() {
     RaceUtil::init(image);
     SaveDataManager::init(image);
     ApplicationSettingSaveLoader::init(image);
+    HighSpeedSetting::init(image);
     LiveTheaterCharaSelect::init(image);
     LiveTheaterViewController::init(image);
     CySpringController::init(image);

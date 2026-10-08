@@ -196,6 +196,16 @@ Any future claim of speedup must be measured against these numbers, not against 
 7. C22 and C24, the two compounding multipliers that are live in the current config.
 8. C1 remaining `get_orig_fn!` audit and the proxy export stubs.
 9. A6 `Show/7` and `Hide/3`, and A7 `byref`.
-10. `ApplicationSettingSaveLoader::get_StoryHighSpeedType/0 -> int` and
-    `get_TrainingHighSpeedType/0 -> int` read side, once the enum values are known, plus
-    `StoryTimelineController::SetHighSpeedFrameCount/2 -> void(class<StoryTimelineTextTrackData>, int)`.
+10. [x] `src/il2cpp/hook/umamusume/HighSpeedSetting.rs` raises the game's own settings: it reads
+    `StoryManager::GetMaxHighSpeedType/0`, writes story through `StoryManager::SaveHighSpeedType/1`
+    and training through `ApplicationSettingSaveLoader::set_TrainingHighSpeedType/1`, gated on
+    `high_speed_settings` (default false). Remaining on this item:
+    - [ ] the numeric members of `Gallop.StoryTimelineController.HighSpeedType` are unknown because
+      the enum class is not in the dump, so the `HighSpeedSetting: max ...` log line is the only
+      source of truth for the first run
+    - [ ] `StoryManager::ChangeAutoHighSpeedSettingAndSave/1` and `ChangeSavedAutoHighSpeedSetting/0`
+      are not called; they may cycle rather than set, so they need a probe before use
+    - [ ] `StoryManager::get_IsHighSpeedMode/0 -> static bool` is not hooked
+    - [ ] `StoryTimelineController::SetHighSpeedFrameCount/2 -> void(class<StoryTimelineTextTrackData>, int)`
+      and `/1 -> void(class<StoryTimelineTextClipData>)` are not hooked; only the `(int)` overload is
+    - [ ] `high_speed_settings` is config file only, it is not in the Config Editor GUI yet

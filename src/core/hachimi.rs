@@ -888,6 +888,10 @@ pub struct Config {
     pub story_speed: f32,
     #[serde(default)]
     pub auto_skip_result_screens: bool,
+    // Raises the story and training High Speed settings that the Global options screen does not
+    // expose, using StoryManager's own max and save path.
+    #[serde(default)]
+    pub high_speed_settings: bool,
     #[serde(default)]
     pub trainer_live_landscape: bool,
     #[serde(default)]
