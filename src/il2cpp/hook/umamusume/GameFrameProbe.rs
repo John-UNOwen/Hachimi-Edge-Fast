@@ -8,7 +8,8 @@ use crate::{
     il2cpp::hook::umamusume::{
         SceneManager,
         TrainingCuttProbe::{
-            bucket_for, current_view_id, report_due, BUCKET_COUNT, BUCKET_NAMES, REPORT_INTERVAL_SECS,
+            bucket_for, current_view_id, report_due, BUCKET_COUNT, BUCKET_NAMES, PROBE_DETAIL_LIMIT,
+            REPORT_INTERVAL_SECS,
         },
     },
 };
@@ -50,7 +51,19 @@ static BUCKET_GAPS: [AtomicUsize; BUCKET_COUNT] = [const { AtomicUsize::new(0) }
 static BUCKET_MS: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
 static BUCKET_SLOW: [AtomicUsize; BUCKET_COUNT] = [const { AtomicUsize::new(0) }; BUCKET_COUNT];
 static BUCKET_WORST: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
-static BUCKET_VIEW: [AtomicI32; BUCKET_COUNT] = [const { AtomicI32::new(0) }; BUCKET_COUNT];
+static WORST_AT_MS: AtomicI64 = AtomicI64::new(-1);
+static STALLS_SHOWN: AtomicUsize = AtomicUsize::new(0);
+// Run 11 labelled its `other` bucket with the first view that landed in it and printed `view 0`, which
+// hid the 1,621 frames the cut-in probe had measured on a screen this probe had never named. A bucket
+// now holds a bounded list of the views it saw and is labelled by the one that filled it most.
+// Eight is a bound on the work done per frame, not a claim about the game: extra views are counted as
+// `more` in the report instead of being dropped.
+const VIEWS_TRACKED: usize = 8;
+// A view id can legitimately be 0, so an empty slot holds a value no `ViewId` has.
+const VIEW_SLOT_EMPTY: i32 = i32::MIN;
+static BUCKET_VIEW_ID: [AtomicI32; BUCKET_COUNT * VIEWS_TRACKED] = [const { AtomicI32::new(VIEW_SLOT_EMPTY) }; BUCKET_COUNT * VIEWS_TRACKED];
+static BUCKET_VIEW_FRAMES: [AtomicUsize; BUCKET_COUNT * VIEWS_TRACKED] = [const { AtomicUsize::new(0) }; BUCKET_COUNT * VIEWS_TRACKED];
+static BUCKET_VIEWS_SEEN: [AtomicUsize; BUCKET_COUNT] = [const { AtomicUsize::new(0) }; BUCKET_COUNT];
 static LAST_REPORT_SEC: AtomicI64 = AtomicI64::new(-1);
 static LAST_GAPS: AtomicUsize = AtomicUsize::new(0);
 
@@ -93,18 +106,69 @@ pub fn observe_frame() {
     if gap > WORST_MS.load(atomic::Ordering::Relaxed) {
         WORST_MS.store(gap, atomic::Ordering::Relaxed);
         BUCKET_WORST[bucket].store(gap, atomic::Ordering::Relaxed);
+        WORST_AT_MS.store(now, atomic::Ordering::Relaxed);
     }
 
     if gap_is_slow(gap) {
         SLOW_GAPS.fetch_add(1, atomic::Ordering::Relaxed);
         SLOW_MS.fetch_add(gap, atomic::Ordering::Relaxed);
         BUCKET_SLOW[bucket].fetch_add(1, atomic::Ordering::Relaxed);
+
+        // A stall is only useful if a run can say where it happened, so the first ones are named with
+        // their place in the session and the view they landed on. The cap is the same one every other
+        // probe in this fork uses: a frame path must not format, so the reporting stops early and the
+        // totals line keeps counting.
+        let shown = STALLS_SHOWN.fetch_add(1, atomic::Ordering::Relaxed);
+
+        if shown < PROBE_DETAIL_LIMIT {
+            info!("Frame clock stall {}: {gap} ms at {} s on view {view} {}", shown + 1, now / 1000, BUCKET_NAMES[bucket]);
+        }
     }
 
-    // A bucket with no gap yet has no view, so the first frame that lands in it records where it was seen.
-    if BUCKET_GAPS[bucket].load(atomic::Ordering::Relaxed) == 1 {
-        BUCKET_VIEW[bucket].store(view, atomic::Ordering::Relaxed);
+    record_view(bucket, view);
+}
+
+// One frame's view into the bounded per bucket list. The game thread is the only writer, the scan is
+// over at most eight slots, and nothing allocates, which is what makes it safe to run every frame.
+fn record_view(bucket: usize, view: i32) {
+    let base = bucket * VIEWS_TRACKED;
+
+    for slot in 0..VIEWS_TRACKED {
+        let seen = BUCKET_VIEW_ID[base + slot].load(atomic::Ordering::Relaxed);
+
+        if seen == view {
+            BUCKET_VIEW_FRAMES[base + slot].fetch_add(1, atomic::Ordering::Relaxed);
+            return;
+        }
+
+        if seen == VIEW_SLOT_EMPTY {
+            BUCKET_VIEW_ID[base + slot].store(view, atomic::Ordering::Relaxed);
+            BUCKET_VIEW_FRAMES[base + slot].store(1, atomic::Ordering::Relaxed);
+            BUCKET_VIEWS_SEEN[bucket].fetch_add(1, atomic::Ordering::Relaxed);
+            return;
+        }
     }
+}
+
+// The view that filled this bucket most, and how many more views were seen besides it. Computed at
+// report time, so the frame path above never searches.
+fn dominant_view(bucket: usize) -> (i32, usize) {
+    let base = bucket * VIEWS_TRACKED;
+    let mut best_view = 0;
+    let mut best_frames = 0;
+
+    for slot in 0..VIEWS_TRACKED {
+        let frames = BUCKET_VIEW_FRAMES[base + slot].load(atomic::Ordering::Relaxed);
+
+        if frames > best_frames {
+            best_frames = frames;
+            best_view = BUCKET_VIEW_ID[base + slot].load(atomic::Ordering::Relaxed);
+        }
+    }
+
+    let seen = BUCKET_VIEWS_SEEN[bucket].load(atomic::Ordering::Relaxed);
+
+    (best_view, seen.saturating_sub(1))
 }
 
 // One decision, spelled out so a change to it is a change to a test and not a silent edit to a hot path.
@@ -158,11 +222,18 @@ pub fn report_if_due() {
             continue;
         }
 
+        let (view, more) = dominant_view(index);
+        // `+4 more` says the bucket is mixed rather than pretending one view owns it.
+        let label = match more {
+            0 => format!("view {view}"),
+            n => format!("view {view} +{n} more"),
+        };
+
         let _ = write!(
             buckets,
-            " {}(view {}) frames {} over {} ms slow {} worst {} ms",
+            " {}({}) frames {} over {} ms slow {} worst {} ms",
             BUCKET_NAMES[index],
-            BUCKET_VIEW[index].load(atomic::Ordering::Relaxed),
+            label,
             count,
             BUCKET_MS[index].load(atomic::Ordering::Relaxed),
             BUCKET_SLOW[index].load(atomic::Ordering::Relaxed),
@@ -170,8 +241,13 @@ pub fn report_if_due() {
         );
     }
 
+    let worst_at = match WORST_AT_MS.load(atomic::Ordering::Relaxed) {
+        at if at >= 0 => format!(" at {} s", at / 1000),
+        _ => String::new(),
+    };
+
     info!(
-        "Frame clock totals at {now_sec} s: frames {gaps} over {total_ms} ms mean {mean:.1} ms worst {} ms slow frames over {SLOW_FRAME_MS} ms {} ({} ms), dropped {}",
+        "Frame clock totals at {now_sec} s: frames {gaps} over {total_ms} ms mean {mean:.1} ms worst {} ms{worst_at} slow frames over {SLOW_FRAME_MS} ms {} ({} ms), dropped {}",
         WORST_MS.load(atomic::Ordering::Relaxed),
         SLOW_GAPS.load(atomic::Ordering::Relaxed),
         SLOW_MS.load(atomic::Ordering::Relaxed),
@@ -183,6 +259,7 @@ pub fn report_if_due() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::il2cpp::hook::umamusume::TrainingCuttProbe::ViewBucket;
 
     #[test]
     fn a_gap_is_only_a_frame_when_it_has_a_start() {
@@ -192,6 +269,39 @@ mod tests {
         assert_eq!(elapsed_ms_for(900, 500), None);
         assert_eq!(elapsed_ms_for(500, 500), Some(0));
         assert_eq!(elapsed_ms_for(500, 542), Some(42));
+    }
+
+    #[test]
+    fn a_bucket_is_labelled_by_the_view_that_filled_it() {
+        // Each test works in its own bucket so the shared statics cannot interfere across a parallel run.
+        let bucket = ViewBucket::Gacha as usize;
+
+        for _ in 0..3 {
+            record_view(bucket, 1621);
+        }
+
+        record_view(bucket, 0);
+
+        assert_eq!(dominant_view(bucket), (1621, 1), "run 11 labelled a mixed bucket by its first frame");
+    }
+
+    #[test]
+    fn a_bucket_that_saw_more_views_than_it_tracks_says_so() {
+        let bucket = ViewBucket::StoryEvent as usize;
+        let first = 7001;
+
+        for index in 0..VIEWS_TRACKED {
+            record_view(bucket, first + index as i32);
+        }
+
+        for index in 0..VIEWS_TRACKED + 2 {
+            record_view(bucket, 8001 + index as i32);
+        }
+
+        let (view, more) = dominant_view(bucket);
+
+        assert_eq!(view, first, "the first tracked view still owns the bucket");
+        assert_eq!(more, VIEWS_TRACKED - 1, "the report tells the reader views were seen beyond the tracked list");
     }
 
     #[test]
