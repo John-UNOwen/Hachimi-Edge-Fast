@@ -1717,10 +1717,12 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     that actually plays a story event. Run 10 visited Story 3000 for 18.6 s over 13 visits and never opened
     `ViewId.StoryEventMission`, so the story event half is still unmeasured, and the half that did measure found the cut-in
     engine busy with its own entry door missing (C50).
-43. [ ] Find the door that opens a cut-in, on both sides, from a dump line rather than a name. The training pairing the
+43. [~] Find the door that opens a cut-in, on both sides, from a dump line rather than a name. The training pairing the
     run 10 data supports is `PlayTrainingCut(info)` open to `CleanUpCutt()` close (19 and 35 calls), and the story side has
     `CutInHelper::CleanupPlaying` closing 36 times with no opener at all (C49, C50). Nothing scales through a run, so this
-    is measurement work only.
+    is measurement work only. Landed in `8a253e4` and `5754448`: the training pairing is in place, and the story probe now
+    asks for the eight derived helper doors and the eight base lifecycle, pause, stop and status doors the dump names.
+    Run 11 is the run that says whether any of them is the real one.
 44. [ ] Measure the training screen's animations that are not the cut-in. `Gallop.SingleModeMainViewHpGauge` is dumped with
     `SetProgressbarBlendTime/1 -> void(float)`, `PlayIn/0`, `PlayValue/1`, `PlayValue/5`, `PlayMaxValue/2` and
     `field GAUGE_FADE_ANIMATION_DURATION [static const float]`; `Gallop.SingleModeLogItem` is dumped with
@@ -1738,6 +1740,12 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     `StoryManager::GetMaxHighSpeedType/0 -> static struct<HighSpeedType:4B>` is there too. Reading those fields once at
     init, with no hook and no write, would say what speed the story and event wipes already run at. `get_TargetFps` came
     back 20 for the training cut timeline in run 10, which is the first number of this kind the probe produced.
+47. [~] Measure frames, not doors. Every probe in this fork counts calls, and a call count is not a cost: run 10 says
+    317.1 s on the training screen without saying how much of it the game drew and how much a person read.
+    `GameFrameProbe.rs` (`75d3782`) sits on the `GameSystem_Update` detour that already exists, measures the gap between
+    two of the game's own ticks, and reports frames, total milliseconds, the worst frame and frames over 50 ms as stalls,
+    per screen bucket. No new hook and no new game call, inert when `debug_mode` is off. It has never printed a line yet:
+    the run that reads it is run 11.
 
 ### Probe build `253458f`, deployed and waiting for a career run (2026-10-08)
 
@@ -1914,6 +1922,62 @@ The allowlist delivered what it was for. `introspect.log` for this run is 1,966,
 `Gallop.SingleModeLogItem` (109). C44 is still open: this is 1.97 MB at launch, and the next allowlist
 increase has to be watched against it.
 
+
+
+### Probe v3 build `75d3782`, deployed for run 11 (2026-10-08 20:41)
+
+Three code commits, one per concern, all built from the tree at `75d3782`:
+
+- `8a253e4` pairs a training cut run on the doors run 10 proved the client calls. `PlayTrainingCut`,
+  `PlayScenarioTrainingCut` and `PlayTrainingSaboriAsync` open a run and `CleanUpCutt` closes it.
+  `set_IsPlayingCutt` and `get_IsPlayingCutt` are still counted and no longer drive anything, and the install line
+  now reads `{installed} doors installed, 47 of them carry a counted kind` instead of the confusing `50 of 47`.
+- `5754448` puts the story probe on the doors the C50 dump named. On `Gallop.CutInHelper`: `OnStart`, `OnEnd`,
+  `OnEndCutIn`, `OnRestart`, `StopRequest`, `Pause(play, pause)`, `IsPause`, `set_Status(status)`. On
+  `Gallop.SingleModeTrainingCutInHelper`: `Play`, `OnPlayCutIn`, `OnStartCutIn`, `OnPlayMainCutIn`, `OnEndCutIn`,
+  `CleanupPlaying`, `OnTerminateRuntime(controller)`, `OnTimelineUpdatePost(time)`. 14 doors became 30. Each run
+  now prints which door opened it and which closed it, and a run keeps the first open it gets so two openers
+  cannot move the start clock to the later one. `set_Status` takes
+  `struct<Gallop.CutInHelper.CutInStatus:4B>`, declared as one word and handed back untouched, on the strength of
+  A5, and its values are sampled, which is how the cut-in's own state machine stops being a guess.
+- `75d3782` adds `GameFrameProbe.rs`, a frame clock on the `GameSystem_Update` detour the fork already owns. No
+  new hook and no new game call: the gap between two of the game's own ticks is one rendered frame. It counts
+  frames, total milliseconds, the worst frame, and the frames over 50 ms as stalls, per screen bucket, and it
+  does nothing at all when `debug_mode` is off. The 50 ms line is the 20 fps the run 10 log read out of
+  `get_TargetFps`: a frame past that is a frame the cut timeline already lost. This is what separates the time a
+  screen spends drawing from the time a person spends reading.
+
+`cargo test --lib` is 79 passed. `cargo check --all-targets`, both clippy legs with `-D warnings` and
+`cargo build --release` exit 0. No review pass was run, per the agreed order: smoke test now, thorough review
+after the features.
+
+Deployed as `cri_mana_vpx.dll` at the game root: 29,554,688 bytes, SHA256
+`C30F3E692E4024D4C341D8044AF2B3708079EE010EBF4BD44670C60C3C85AAAD`, version string `0.32.0-75d3782`. It replaces
+`v0.32.0-eb92734` (29,502,464 bytes, `BAE4343DCD07215F6F3DEDF24F82ED2BBBA45F14BB98282F7D84F6041F4D6C87`), kept at
+`target\deploy-backup\cri_mana_vpx-eb92734.dll`. The game was not running when the copy happened and
+`hachimi\config.json` is untouched at 6,740 bytes from 08:33.
+
+What run 11 has to show:
+
+1. `Cutt probe: cut run N closed at ... as K` lines. If they are still absent while `PlayTrainingCut` shows
+   calls, the cut does not end at `CleanUpCutt` either, and that is a third finding rather than a fast game.
+2. `Story event probe: cut-in N closed after T ms from DOOR to DOOR` lines, which is the only way C50 closes.
+   `SingleModeTrainingCutInHelper::Play` and `OnPlayCutIn` are the doors the dump names; if they are silent too,
+   the cut-in is opened from somewhere the dump has not printed yet.
+3. Whether `CutInHelper::Pause`, `IsPause` or `StopRequest` is ever reached. They are the game's own pause and
+   stop doors on this screen, and item 41 has been looking for exactly that.
+4. `set_Status` values, which is the cut-in state machine read as numbers instead of inferred from method names.
+5. `Frame clock totals` and `Frame clock by screen`, which is the first measurement in this fork that is not a
+   door count: frames, worst frame and stalls per screen. Compare the training screen's frame total against its
+   317.1 s of dwell from run 10.
+6. `training scaling points reached` for the five `TRAINING_HIT_SLOTS` doors. If they stay at zero (C51) then any
+   training speed option this fork writes has to sit on `GetTargetSpeed`, `GetTrainingCutTimeScale` or
+   `UpdateSpeed`, and `GetTargetSpeed` has a setter beside it, so the rule against scaling a getter alone applies.
+
+In the fix order list, item 43 moves from `[ ]` to `[~]` (the doors are found and installed; the run that reads
+them has not happened) and item 47 is new at `[~]` (the frame clock is written and deployed, and has never printed a
+line). Items 39, 41 and 42 stay `[~]`, items 44, 45 and 46 stay `[ ]`. The list now reads 12 `[x]`, 17 `[~]`,
+8 `[ ]`, and the ledger bullet counts are 12 `[x]`, 21 `[~]`, 54 `[ ]`, 3 `[latent]`.
 
 
 ### The build run 10 carried (deployed 2026-10-08 19:56)
