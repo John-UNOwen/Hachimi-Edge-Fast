@@ -76,8 +76,6 @@ const RESULT_AND_LIST: &[Il2CppTypeEnum] = &[VALUETYPE, CLASS];
 const FRAMES_AND_FLAG: &[Il2CppTypeEnum] = &[I4, BOOL];
 // `PlayCutIn/2 -> void(generic<List<SupportCardData>>, class<System.Action>)`.
 const LIST_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, CLASS];
-// `PlayIn/4 -> void(float, int, bool, Action)` on the training status panel.
-const DURATION_COUNT_FLAG_ACTION: &[Il2CppTypeEnum] = &[R4, I4, BOOL, CLASS];
 // `PlayOut/2 -> void(bool, class<System.Action>)`.
 const FLAG_AND_ACTION: &[Il2CppTypeEnum] = &[BOOL, CLASS];
 
@@ -233,7 +231,10 @@ static CUTT_GET_SPEED: CutProbe = CutProbe::peaked("CutInTimelineController::get
 static CUTT_SET_SKIP_FRAME: CutProbe = CutProbe::counted("CutInTimelineController::set_SkipFrame(frames)");
 static CUTT_SET_IS_AUTO_PLAY: CutProbe = CutProbe::counted("CutInTimelineController::set_IsAutoPlay(playing)");
 static CUTT_GET_IS_AUTO_PLAY: CutProbe = CutProbe::peaked("CutInTimelineController::get_IsAutoPlay()");
-static STATUS_PLAY_IN: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::PlayIn(duration, count, flag, action)");
+// `SingleModeMainViewTrainingCutStatus::PlayIn` and `SingleModeMainViewHpGauge::SetProgressbarBlendTime`
+// are no longer counted here: AnimationSpeed installs scaling hooks on those two addresses (C51), and a
+// probe cannot hook an address a second time to watch its own scaling hook. Their call counts reach this
+// report through AnimationSpeed::TRAINING_HIT_SLOTS instead.
 static STATUS_PLAY_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::PlayOut(flag, action)");
 static STATUS_INTERVAL_OUT: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::GetIntervalOutBegine(time)");
 static STATUS_RANK_UP_HIGH_SPEED: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::WillRankUpInHighSpeedMode()");
@@ -245,7 +246,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 47] = [
+static PROBES: [&CutProbe; 52] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -284,7 +285,6 @@ static PROBES: [&CutProbe; 47] = [
     &CUTT_SET_SKIP_FRAME,
     &CUTT_SET_IS_AUTO_PLAY,
     &CUTT_GET_IS_AUTO_PLAY,
-    &STATUS_PLAY_IN,
     &STATUS_PLAY_OUT,
     &STATUS_INTERVAL_OUT,
     &STATUS_RANK_UP_HIGH_SPEED,
@@ -293,6 +293,12 @@ static PROBES: [&CutProbe; 47] = [
     &TAG_PLAYER_IS_VALID_TAG,
     &TAG_PLAYER_PLAY_CUT_IN,
     &TAG_PLAYER_PLAY_CUT_OUT,
+    &HP_GAUGE_PLAY_IN,
+    &HP_GAUGE_PLAY_VALUE,
+    &HP_GAUGE_PLAY_OUT,
+    &STATUS_PLAY_PRE_IN,
+    &STATUS_PLAY_END,
+    &PLATE_GET_IS_AUTO_PLAY,
 ];
 
 // One cut-in run, opened by `ResetCurrentTime` and closed by the next one. The wall clock between the
@@ -389,6 +395,45 @@ static TIMELINE_TOTAL_FRAMES_PEAK: AtomicU32 = AtomicU32::new(0);
 static TIMELINE_CURRENT_FRAME_PEAK: AtomicU32 = AtomicU32::new(0);
 static TIMELINE_TARGET_FPS: AtomicU32 = AtomicU32::new(0);
 
+// Run 11 measured 55 cut runs at 138,604 ms inside 1,210,471 ms of training screen frames, so about
+// 1,015 s of that screen was neither a cut run nor a cut in, and nothing said what it was. These three
+// clocks split what is left: how long a cut stayed open after it asked for a tap, how long the game sat
+// between one cut closing and the next opening, and how the plate list interval the game hands
+// `InitializePlateList` lines up with the wall clock between two of its calls.
+static RUN_TAP_REQUESTED_MS: AtomicI64 = AtomicI64::new(-1);
+static RUN_CLOSED_MS: AtomicI64 = AtomicI64::new(-1);
+static TAP_WAIT_RUNS: AtomicUsize = AtomicUsize::new(0);
+static TAP_WAIT_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static TAP_WAIT_BUCKET_RUNS: [AtomicUsize; BUCKET_COUNT] = [const { AtomicUsize::new(0) }; BUCKET_COUNT];
+static TAP_WAIT_BUCKET_MS: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
+static CUT_GAP_RUNS: AtomicUsize = AtomicUsize::new(0);
+static CUT_GAP_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static CUT_GAP_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static CUT_GAP_BUCKET_MS: [AtomicI64; BUCKET_COUNT] = [const { AtomicI64::new(0) }; BUCKET_COUNT];
+static PLATE_LAST_MS: AtomicI64 = AtomicI64::new(-1);
+static PLATE_STEP_RUNS: AtomicUsize = AtomicUsize::new(0);
+static PLATE_STEP_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static PLATE_STEP_WORST_MS: AtomicI64 = AtomicI64::new(0);
+
+// The animation doors run 11 never looked at, on the classes that hold the gauge and the param plates.
+// Counting only: an argument is recorded and handed back untouched.
+static HP_GAUGE_PLAY_IN: CutProbe = CutProbe::counted("SingleModeMainViewHpGauge::PlayIn()");
+static HP_GAUGE_PLAY_VALUE: CutProbe = CutProbe::counted("SingleModeMainViewHpGauge::PlayValue(value)");
+static HP_GAUGE_PLAY_OUT: CutProbe = CutProbe::counted("SingleModeMainViewHpGauge::PlayOut()");
+static STATUS_PLAY_PRE_IN: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::PlayPreIn()");
+static STATUS_PLAY_END: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::PlayEnd()");
+static PLATE_GET_IS_AUTO_PLAY: CutProbe = CutProbe::counted("TrainingParamChangeUI::get_IsAutoPlay()");
+
+// A span from a door the game reached to the point the run ended, guarded against a request that never
+// happened or landed after the close. Kept apart from the callers so the guard is a test.
+fn span_from(requested: i64, now: i64) -> Option<i64> {
+    if requested < 0 || now < requested {
+        return None;
+    }
+
+    Some(now - requested)
+}
+
 fn elapsed_ms() -> i64 {
     match START.get() {
         Some(start) => start.elapsed().as_millis() as i64,
@@ -426,6 +471,20 @@ fn open_cut_run() {
     RUN_TAG_PLAYER_SEEN.store(0, atomic::Ordering::Relaxed);
     RUN_TAG_NAME.store(tag_kind_for_run(false, LAST_TAG_ANSWER.load(atomic::Ordering::Relaxed)), atomic::Ordering::Relaxed);
     RUN_PEAK_BITS.store(0, atomic::Ordering::Relaxed);
+
+    // The idle between one cut closing and the next opening is the part of a training turn the cut
+    // clocks never covered: run 11 put 138,604 ms of cuts inside 1,210,471 ms of training frames.
+    if let Some(gap_ms) = span_from(RUN_CLOSED_MS.swap(-1, atomic::Ordering::Relaxed), now) {
+        let gaps = CUT_GAP_RUNS.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        CUT_GAP_MS_TOTAL.fetch_add(gap_ms, atomic::Ordering::Relaxed);
+        CUT_GAP_BUCKET_MS[bucket as usize].fetch_add(gap_ms, atomic::Ordering::Relaxed);
+        CUT_GAP_WORST_MS.fetch_max(gap_ms, atomic::Ordering::Relaxed);
+
+        if gaps <= PROBE_DETAIL_LIMIT {
+            info!("Cutt probe: cut gap {gap_ms} ms from the previous close to this open on view {view} {}", BUCKET_NAMES[bucket as usize]);
+        }
+    }
 }
 
 // Called from `CleanUpCutt`, which run 10 measured 35 times against 19 cut starts. A close with nothing open
@@ -446,6 +505,7 @@ fn close_cut_run() {
     let run_ms = now - opened;
     let runs = RUNS_CLOSED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
     let peak_ms = peak_milliseconds(peak);
+    let tap_ms = span_from(RUN_TAP_REQUESTED_MS.swap(-1, atomic::Ordering::Relaxed), now);
 
     RUN_WALL_MS_TOTAL.fetch_add(run_ms, atomic::Ordering::Relaxed);
     RUN_PEAK_MS_TOTAL.fetch_add(peak_ms, atomic::Ordering::Relaxed);
@@ -460,8 +520,22 @@ fn close_cut_run() {
     RUN_TAG_COUNT[tag_kind].fetch_add(1, atomic::Ordering::Relaxed);
     RUN_TAG_WALL_MS[tag_kind].fetch_add(run_ms, atomic::Ordering::Relaxed);
 
+    if let Some(waited) = tap_ms {
+        TAP_WAIT_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        TAP_WAIT_MS_TOTAL.fetch_add(waited, atomic::Ordering::Relaxed);
+        TAP_WAIT_BUCKET_RUNS[closed_bucket].fetch_add(1, atomic::Ordering::Relaxed);
+        TAP_WAIT_BUCKET_MS[closed_bucket].fetch_add(waited, atomic::Ordering::Relaxed);
+    }
+
+    RUN_CLOSED_MS.store(now, atomic::Ordering::Relaxed);
+
     if runs <= PROBE_DETAIL_LIMIT {
-        info!("Cutt probe: cut run {} closed at {now} ms in view {closed_view} {} as {}, timeline peak {} s, wall {run_ms} ms", runs, BUCKET_NAMES[closed_bucket], TAG_NAMES[tag_kind], peak_seconds(peak));
+        let tap = match tap_ms {
+            Some(waited) => format!("tap waited {waited} ms"),
+            None => "no tap asked for".to_string(),
+        };
+
+        info!("Cutt probe: cut run {} closed at {now} ms in view {closed_view} {} as {}, timeline peak {} s, wall {run_ms} ms, {tap}", runs, BUCKET_NAMES[closed_bucket], TAG_NAMES[tag_kind], peak_seconds(peak));
     }
 }
 
@@ -588,6 +662,12 @@ type WaitTapAsyncFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObjec
 extern "C" fn TrainingCutt_WaitTapAsync(this: *mut Il2CppObject) -> *mut Il2CppObject {
     CUTT_WAIT_TAP_ASYNC.count();
 
+    // Where the tap wait clock starts. Only while a run is open, so a request outside a measured cut
+    // cannot be charged to one.
+    if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) >= 0 {
+        RUN_TAP_REQUESTED_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+    }
+
     get_orig_fn!(TrainingCutt_WaitTapAsync, WaitTapAsyncFn)(this)
 }
 
@@ -604,8 +684,72 @@ type InitializePlateListFn = extern "C" fn(this: *mut Il2CppObject, list: *mut I
 extern "C" fn TrainingParamChangeUI_InitializePlateList(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
     PLATE_INITIALIZE_LIST.observe(&[interval as f64]);
     PLATE_INITIALIZE_LIST.sample(interval);
+    record_plate_step();
 
     get_orig_fn!(TrainingParamChangeUI_InitializePlateList, InitializePlateListFn)(this, list, interval);
+}
+
+// The wall clock between two `InitializePlateList` calls is what the interval the game passed actually
+// buys. Run 11 read the float as 1.5 and 1.0 across 370 calls and never said what those seconds cost,
+// which is the difference between a duration this fork can scale and a number it must not touch.
+fn record_plate_step() {
+    let now = elapsed_ms();
+
+    if now < 0 {
+        return;
+    }
+
+    if let Some(step_ms) = span_from(PLATE_LAST_MS.swap(now, atomic::Ordering::Relaxed), now) {
+        PLATE_STEP_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        PLATE_STEP_MS_TOTAL.fetch_add(step_ms, atomic::Ordering::Relaxed);
+        PLATE_STEP_WORST_MS.fetch_max(step_ms, atomic::Ordering::Relaxed);
+    }
+}
+
+// The gauge and plate animation doors run 11 never opened. Every argument is handed to the original
+// untouched. `SetProgressbarBlendTime` records its float because it is a duration, and a scaling hook
+// only belongs on it once a run shows how often the game reaches it.
+type HpGaugePlayInFn = extern "C" fn(this: *mut Il2CppObject);
+extern "C" fn HpGauge_PlayIn(this: *mut Il2CppObject) {
+    HP_GAUGE_PLAY_IN.count();
+
+    get_orig_fn!(HpGauge_PlayIn, HpGaugePlayInFn)(this);
+}
+
+type HpGaugePlayValueFn = extern "C" fn(this: *mut Il2CppObject, value: i32);
+extern "C" fn HpGauge_PlayValue(this: *mut Il2CppObject, value: i32) {
+    HP_GAUGE_PLAY_VALUE.observe(&[value as f64]);
+
+    get_orig_fn!(HpGauge_PlayValue, HpGaugePlayValueFn)(this, value);
+}
+
+type HpGaugePlayOutFn = extern "C" fn(this: *mut Il2CppObject);
+extern "C" fn HpGauge_PlayOut(this: *mut Il2CppObject) {
+    HP_GAUGE_PLAY_OUT.count();
+
+    get_orig_fn!(HpGauge_PlayOut, HpGaugePlayOutFn)(this);
+}
+
+type StatusPlayPreInFn = extern "C" fn(this: *mut Il2CppObject);
+extern "C" fn TrainingCutStatus_PlayPreIn(this: *mut Il2CppObject) {
+    STATUS_PLAY_PRE_IN.count();
+
+    get_orig_fn!(TrainingCutStatus_PlayPreIn, StatusPlayPreInFn)(this);
+}
+
+type StatusPlayEndFn = extern "C" fn(this: *mut Il2CppObject);
+extern "C" fn TrainingCutStatus_PlayEnd(this: *mut Il2CppObject) {
+    STATUS_PLAY_END.count();
+
+    get_orig_fn!(TrainingCutStatus_PlayEnd, StatusPlayEndFn)(this);
+}
+
+type PlateGetIsAutoPlayFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
+extern "C" fn PlateUI_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
+    let value = get_orig_fn!(PlateUI_GetIsAutoPlay, PlateGetIsAutoPlayFn)(this);
+    PLATE_GET_IS_AUTO_PLAY.observe(&[bit(value)]);
+
+    value
 }
 
 type CoroutineReturnFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObject;
@@ -846,16 +990,6 @@ extern "C" fn CuttTimeline_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
     value
 }
 
-type StatusPlayInFn = extern "C" fn(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject);
-// Dumped: `PlayIn/4 -> void(float, int, bool, class<System.Action>)` on the status panel that pops in over
-// a training result. The float is the only duration in the list, so it is the only value sampled (A1).
-extern "C" fn TrainingCutStatus_PlayIn(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject) {
-    STATUS_PLAY_IN.observe(&[duration as f64, frames as f64, bit(flag)]);
-    STATUS_PLAY_IN.sample(duration);
-
-    get_orig_fn!(TrainingCutStatus_PlayIn, StatusPlayInFn)(this, duration, frames, flag, action);
-}
-
 type StatusPlayOutFn = extern "C" fn(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject);
 extern "C" fn TrainingCutStatus_PlayOut(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject) {
     STATUS_PLAY_OUT.observe(&[bit(flag)]);
@@ -927,6 +1061,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     let cut_status = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatus");
     let cutt_controller = class_for_label(umamusume, "Gallop.SingleModeMainTrainingCuttController");
     let plate_ui = class_for_label(umamusume, "Gallop.TrainingParamChangeUI");
+    let hp_gauge = class_for_label(umamusume, "Gallop.SingleModeMainViewHpGauge");
     let main_view = class_for_label(umamusume, "Gallop.SingleModeMainViewController");
     let tag_player = class_for_label(umamusume, "Gallop.SingleModeMainViewTagTrainingCutInPlayer");
 
@@ -1047,7 +1182,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_GetIsAutoPlay, "get_IsAutoPlay", NO_PARAMS, BOOL, "CutInTimelineController::get_IsAutoPlay");
 
     probe!(cut_status, TrainingCutStatus_Skip, "Skip", ONE_FLAG, VOID, "SingleModeMainViewTrainingCutStatus::Skip");
-    probe!(cut_status, TrainingCutStatus_PlayIn, "PlayIn", DURATION_COUNT_FLAG_ACTION, VOID, "SingleModeMainViewTrainingCutStatus::PlayIn");
+    // `PlayIn` is not probed here any more: AnimationSpeed scales it, and its count and its raw value
+    // reach this report through TRAINING_HIT_SLOTS (C51).
     probe!(cut_status, TrainingCutStatus_PlayOut, "PlayOut", FLAG_AND_ACTION, VOID, "SingleModeMainViewTrainingCutStatus::PlayOut");
     probe!(cut_status, TrainingCutStatus_GetIntervalOutBegine, "GetIntervalOutBegine", ONE_FLOAT, R4, "SingleModeMainViewTrainingCutStatus::GetIntervalOutBegine");
     probe!(cut_status, TrainingCutStatus_WillRankUpInHighSpeedMode, "WillRankUpInHighSpeedMode", NO_PARAMS, BOOL, "SingleModeMainViewTrainingCutStatus::WillRankUpInHighSpeedMode");
@@ -1082,6 +1218,14 @@ pub fn init(umamusume: *const Il2CppImage) {
     // Run 9's one install failure: the parameter is a generic instantiation, which the exact walk has never
     // answered (C48). The wrapper declares a pointer for it and never reads through it.
     generic_probe!(plate_ui, TrainingParamChangeUI_InitializePlateList, "InitializePlateList", LIST_AND_FLOAT, VOID, "TrainingParamChangeUI::InitializePlateList");
+    probe!(plate_ui, PlateUI_GetIsAutoPlay, "get_IsAutoPlay", NO_PARAMS, BOOL, "TrainingParamChangeUI::get_IsAutoPlay");
+
+    // The gauge animation is the largest piece of the training screen that run 11 measured no part of.
+    probe!(hp_gauge, HpGauge_PlayIn, "PlayIn", NO_PARAMS, VOID, "SingleModeMainViewHpGauge::PlayIn");
+    probe!(hp_gauge, HpGauge_PlayValue, "PlayValue", ONE_INT, VOID, "SingleModeMainViewHpGauge::PlayValue");
+    probe!(hp_gauge, HpGauge_PlayOut, "PlayOut", NO_PARAMS, VOID, "SingleModeMainViewHpGauge::PlayOut");
+    probe!(cut_status, TrainingCutStatus_PlayPreIn, "PlayPreIn", NO_PARAMS, VOID, "SingleModeMainViewTrainingCutStatus::PlayPreIn");
+    probe!(cut_status, TrainingCutStatus_PlayEnd, "PlayEnd", NO_PARAMS, VOID, "SingleModeMainViewTrainingCutStatus::PlayEnd");
     probe!(main_view, SingleModeMain_CoroutineDoTweenTimeScale, "CoroutineDoTweenTimeScale", NO_PARAMS, CLASS, "SingleModeMainViewController::CoroutineDoTweenTimeScale");
     probe!(main_view, SingleModeMain_WaitTap, "WaitTap", NO_PARAMS, CLASS, "SingleModeMainViewController::WaitTap");
 
@@ -1146,11 +1290,14 @@ pub fn report_if_due() {
 
         let _ = write!(
             buckets,
-            " {}(view {}) runs {count} wall {} ms timeline {} ms",
+            " {}(view {}) runs {count} wall {} ms timeline {} ms, tap waited {} ms in {} cuts, gap between cuts {} ms",
             BUCKET_NAMES[index],
             RUN_BUCKET_VIEW[index].load(atomic::Ordering::Relaxed),
             RUN_BUCKET_WALL_MS[index].load(atomic::Ordering::Relaxed),
-            RUN_BUCKET_PEAK_MS[index].load(atomic::Ordering::Relaxed)
+            RUN_BUCKET_PEAK_MS[index].load(atomic::Ordering::Relaxed),
+            TAP_WAIT_BUCKET_MS[index].load(atomic::Ordering::Relaxed),
+            TAP_WAIT_BUCKET_RUNS[index].load(atomic::Ordering::Relaxed),
+            CUT_GAP_BUCKET_MS[index].load(atomic::Ordering::Relaxed)
         );
     }
 
@@ -1188,6 +1335,29 @@ pub fn report_if_due() {
 
     info!("Cutt probe totals at {now_sec} s:{line} cut runs {runs} wall {wall_ms} ms timeline {peak_ms} ms open {open_for} ms");
     info!("Cutt probe cut runs by screen:{buckets}");
+
+    // The three clocks run 11 left open, on their own line so the totals above stay readable. The tap
+    // wait is what a cut costs after it asked the player for a tap, the gap is what the game spends
+    // between cuts, and the plate step is the wall clock between two plate list intervals.
+    let tap_runs = TAP_WAIT_RUNS.load(atomic::Ordering::Relaxed);
+    let tap_ms = TAP_WAIT_MS_TOTAL.load(atomic::Ordering::Relaxed);
+    let gap_runs = CUT_GAP_RUNS.load(atomic::Ordering::Relaxed);
+    let gap_ms = CUT_GAP_MS_TOTAL.load(atomic::Ordering::Relaxed);
+    let plate_runs = PLATE_STEP_RUNS.load(atomic::Ordering::Relaxed);
+    let plate_ms = PLATE_STEP_MS_TOTAL.load(atomic::Ordering::Relaxed);
+    let mean_ms = |total: i64, count: usize| match count {
+        0 => 0.0,
+        n => total as f64 / n as f64,
+    };
+
+    info!(
+        "Cutt probe cut clocks: tap waits {tap_runs} of {runs} closes mean {:.1} ms, gaps between cuts {gap_runs} mean {:.1} ms worst {} ms, plate list steps {plate_runs} mean {:.1} ms worst {} ms",
+        mean_ms(tap_ms, tap_runs),
+        mean_ms(gap_ms, gap_runs),
+        CUT_GAP_WORST_MS.load(atomic::Ordering::Relaxed),
+        mean_ms(plate_ms, plate_runs),
+        PLATE_STEP_WORST_MS.load(atomic::Ordering::Relaxed)
+    );
     info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");
     info!("Cutt probe training scaling points reached:{doors}");
 }
