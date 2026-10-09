@@ -2,8 +2,12 @@
 
 Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code,
 then read [LEDGER.md](LEDGER.md), which is the fork's working memory: measured baselines, open
-items with IDs (A1 to A30, C1 to C51, E1 to E3), the fix order, the run notes, and section F for
-releases.
+items with IDs (A1 to A30, C1 to C51, E1 to E3; the C ids now live in `knowledge/defects/`), the
+fix order, the run notes, and section F for releases.
+
+LEDGER.md and `knowledge/` are local records that this repository does not track. Both are in
+`.gitignore`, both are absent from a fresh clone, and `git clean -xdf` deletes them. Never `git add`
+them, and never audit them with `git diff`, which sees neither.
 
 ## 1. What this fork is for
 
@@ -24,6 +28,11 @@ breaking the game, the account, or the upstream feature set. In priority order:
 Primary target: **Windows, Steam, Global client** (deployed as `cri_mana_vpx.dll` at the game
 root, see C4). Android must still compile (CI runs clippy for `aarch64-linux-android`), but is not
 where performance work is measured.
+
+The durable half of that memory is an OKF bundle at `knowledge/`: one concept per file, for a
+rule, a decision, a baseline or a measurement procedure. Write one when an item closes with a run
+or a decision is taken, not as a scratch pad. The split and the evidence rule are in
+`knowledge/conventions/ledger-bridge.md`.
 
 ## 2. Rules that override everything else
 
@@ -233,15 +242,25 @@ A new speed or performance option touches, in one change:
 ## 10. Conventions
 
 - Commits: `area: lower case imperative summary`, areas `il2cpp`, `core`, `gui`, `l10n`,
-  `docs`, `windows`, `android`. One concern per commit; the ledger update is its own `docs:` commit.
+  `docs`, `windows`, `android`. One concern per commit. The ledger and the bundle are not part of a
+  commit: they are local records, gitignored, and never staged.
 - Code style follows the surrounding file: hook files use the game's PascalCase names
   (`src/lib.rs` allows `non_snake_case` crate wide), comments explain *why* a value is safe, not what the line does.
 - LEDGER.md status marks: `[x]` fixed and verified, `[~]` partial, `[ ]` open, `[latent]` inert
-  on this client. Cite the commit hash when closing an item, and never mark `[x]` without a run. An
-  item whose own text says the run is missing is `[~]`, not `[x]`. A ledger self check must match the
-  shape a diff prints: `^\+- \[x\]` is a closure the change set awards and `^-- \[x\]` one it takes
-  away, while `^- \[x\]` matches the file only.
+  on this client. They apply to the items of section D, the fix order, and to the A and E items;
+  a C item's state lives in its concept at `knowledge/defects/`, as `state`, `fixed_in` and the
+  proof line. Cite the commit hash when closing a code item, and never mark `[x]` without a run. An
+  item whose own text says the run is missing is `[~]`, not `[x]`. A ledger self check counts marks
+  in the files, never in a diff, because git tracks neither: count
+  `Select-String '^- \[x\]|^[0-9]+\. \[x\]' LEDGER.md` and `Select-String '^state: fixed' knowledge\defects\*.md`
+  before and after the change set, and quote both counts with the moment each was taken. A check
+  that cannot match what it looks for returns a clean number on any tree.
 - Upstream merges: keep our `introspect`/speed modules, take upstream's everything else, rebuild
   with zero warnings, and record the merge in section E.
+- `knowledge/` concepts follow OKF v0.2: frontmatter with a `type`, the ledger id inside the
+  filename (`defects/c48-<slug>.md`, ids are never reused), the proof line quoted in the body, and
+  no `verified` entry without that line. The ledger keeps the queue, the bundle keeps the
+  conclusion, and both stay out of git. The view over them is
+  `python knowledge/references/computations/defect_rollup.py`.
 - Upstream's PR template forbids untested AI generated code. Anything heading upstream must be
   built, run in game and understood by the human submitting it.
