@@ -156,6 +156,26 @@ impl CutProbe {
         self.observe(&[]);
     }
 
+    // A door that reports its values and keeps a peak must increment once. The first version called
+    // `observe` and then `sample`, and both incremented, so every peaked door that also printed its
+    // values reported twice the calls the game actually made: run 13's `InitializePlateList(list,
+    // interval)=12` was six calls, and its first hit lines numbered them 1, 3, 5 and 7 (C53).
+    pub(crate) fn observe_peak(&self, values: &[f64], value: f32) {
+        let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        if self.peaked {
+            let bits = peak_merge(self.peak.load(atomic::Ordering::Relaxed), value);
+            self.peak.fetch_max(bits, atomic::Ordering::Relaxed);
+        }
+
+        if calls <= PROBE_DETAIL_LIMIT {
+            debug!("Cutt probe {} call {}: {:?}", self.name, calls, values);
+        }
+        else if calls % PROBE_CHUNK == 0 {
+            debug!("Cutt probe {} {} calls peak {}", self.name, calls, f32::from_bits(self.peak.load(atomic::Ordering::Relaxed)));
+        }
+    }
+
     // The frame hot shape: one increment, one max, no slice and no formatting until a chunk boundary.
     pub(crate) fn sample(&self, value: f32) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
@@ -616,8 +636,7 @@ type GetTrainingCutTimeScaleFn = extern "C" fn(scale: f32) -> f32;
 // dumped argument and no `this` (A3).
 extern "C" fn TrainingCuttUtils_GetTrainingCutTimeScale(scale: f32) -> f32 {
     let value = get_orig_fn!(TrainingCuttUtils_GetTrainingCutTimeScale, GetTrainingCutTimeScaleFn)(scale);
-    GET_TRAINING_CUT_TIME_SCALE.observe(&[scale as f64, value as f64]);
-    GET_TRAINING_CUT_TIME_SCALE.sample(value);
+    GET_TRAINING_CUT_TIME_SCALE.observe_peak(&[scale as f64, value as f64], value);
 
     value
 }
@@ -632,8 +651,7 @@ extern "C" fn TrainingCuttHelper_SkipRuntime(this: *mut Il2CppObject) {
 type CutInGetTargetSpeedFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
 extern "C" fn TrainingCuttHelper_GetTargetSpeed(this: *mut Il2CppObject) -> f32 {
     let value = get_orig_fn!(TrainingCuttHelper_GetTargetSpeed, CutInGetTargetSpeedFn)(this);
-    CUT_IN_GET_TARGET_SPEED.observe(&[value as f64]);
-    CUT_IN_GET_TARGET_SPEED.sample(value);
+    CUT_IN_GET_TARGET_SPEED.observe_peak(&[value as f64], value);
 
     value
 }
@@ -686,8 +704,7 @@ extern "C" fn CuttTimeline_GetWaitingTime(this: *mut Il2CppObject) -> f32 {
 
 type CuttSetSpeedFn = extern "C" fn(this: *mut Il2CppObject, speed: f32);
 extern "C" fn CuttTimeline_SetSpeed(this: *mut Il2CppObject, speed: f32) {
-    CUTT_SET_SPEED.observe(&[speed as f64]);
-    CUTT_SET_SPEED.sample(speed);
+    CUTT_SET_SPEED.observe_peak(&[speed as f64], speed);
 
     get_orig_fn!(CuttTimeline_SetSpeed, CuttSetSpeedFn)(this, speed);
 }
@@ -764,8 +781,7 @@ type InitializePlateListFn = extern "C" fn(this: *mut Il2CppObject, list: *mut I
 // `InitializePlateList/2 -> void(class<Gallop.SingleModeTrainingCutInHelper list>, float)`: the list
 // travels as a pointer and is passed straight through, and only the float is recorded.
 extern "C" fn TrainingParamChangeUI_InitializePlateList(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
-    PLATE_INITIALIZE_LIST.observe(&[interval as f64]);
-    PLATE_INITIALIZE_LIST.sample(interval);
+    PLATE_INITIALIZE_LIST.observe_peak(&[interval as f64], interval);
     record_plate_step();
 
     get_orig_fn!(TrainingParamChangeUI_InitializePlateList, InitializePlateListFn)(this, list, interval);
@@ -1094,8 +1110,7 @@ type StatusIntervalFn = extern "C" fn(this: *mut Il2CppObject, time: f32) -> f32
 // it is the gap the status panel waits before it plays out.
 extern "C" fn TrainingCutStatus_GetIntervalOutBegine(this: *mut Il2CppObject, time: f32) -> f32 {
     let value = get_orig_fn!(TrainingCutStatus_GetIntervalOutBegine, StatusIntervalFn)(this, time);
-    STATUS_INTERVAL_OUT.observe(&[time as f64, value as f64]);
-    STATUS_INTERVAL_OUT.sample(value);
+    STATUS_INTERVAL_OUT.observe_peak(&[time as f64, value as f64], value);
 
     value
 }
@@ -1520,6 +1535,20 @@ mod tests {
         // The caller counts these apart so the report cannot read three legs of zero as an explanation of
         // an idle the probe never saw a door in.
         assert_eq!(gap_legs(1_000, -1, -1, 9_000), None);
+    }
+
+    // A door that reports its values and keeps a peak counts one call. The peaked doors that printed
+    // values called `observe` and then `sample`, and both incremented, so their totals line reported
+    // twice the calls the game made (C53).
+    #[test]
+    fn a_peaked_door_that_reports_its_values_counts_one_call() {
+        let probe = CutProbe::peaked("test door");
+
+        probe.observe_peak(&[1.5], 1.5);
+        probe.observe_peak(&[2.5], 2.5);
+
+        assert_eq!(probe.calls(), 2);
+        assert_eq!(probe.peak_bits(), 2.5f32.to_bits());
     }
 
     #[test]

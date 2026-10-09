@@ -270,8 +270,7 @@ type CutInRateFn = extern "C" fn(this: *mut Il2CppObject, rate: f32);
 // rate it is driving at. Sampling the argument is what tells the fork whether a story cut-in already has a
 // fast path, which is the question item 41 has to answer before anything is scaled.
 extern "C" fn CutInHelper_FixedUpdateForHighSpeed(this: *mut Il2CppObject, rate: f32) {
-    CUT_IN_FIXED_UPDATE_HIGH_SPEED.observe(&[rate as f64]);
-    CUT_IN_FIXED_UPDATE_HIGH_SPEED.sample(rate);
+    CUT_IN_FIXED_UPDATE_HIGH_SPEED.observe_peak(&[rate as f64], rate);
 
     get_orig_fn!(CutInHelper_FixedUpdateForHighSpeed, CutInRateFn)(this, rate);
 }
@@ -377,8 +376,7 @@ extern "C" fn TrainingCutInHelper_OnTerminateRuntime(this: *mut Il2CppObject, co
 // `OnTimelineUpdatePost/1 -> void(float)` (L26607): the per frame post update a training cut-in runs, with
 // the time value it is stepped by. The argument is sampled as a peak and written back untouched.
 extern "C" fn TrainingCutInHelper_OnTimelineUpdatePost(this: *mut Il2CppObject, time: f32) {
-    TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.observe(&[time as f64]);
-    TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.sample(time);
+    TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.observe_peak(&[time as f64], time);
 
     get_orig_fn!(TrainingCutInHelper_OnTimelineUpdatePost, CutInRateFn)(this, time);
 }
@@ -455,15 +453,13 @@ type ContextListValueFn = extern "C" fn(helpers: *mut Il2CppObject, value: f32);
 // `FixedUpdateForHighSpeed/2 -> static void(generic<IList<...>>, float)`. The float is the second slot in
 // the mixed calling convention and is only read, never written.
 extern "C" fn ContextExtension_SetTimeAll(helpers: *mut Il2CppObject, time: f32) {
-    CONTEXT_SET_TIME_ALL.observe(&[time as f64]);
-    CONTEXT_SET_TIME_ALL.sample(time);
+    CONTEXT_SET_TIME_ALL.observe_peak(&[time as f64], time);
 
     get_orig_fn!(ContextExtension_SetTimeAll, ContextListValueFn)(helpers, time);
 }
 
 extern "C" fn ContextExtension_FixedUpdateForHighSpeedRate(helpers: *mut Il2CppObject, rate: f32) {
-    CONTEXT_FIXED_UPDATE_HIGH_SPEED_RATE.observe(&[rate as f64]);
-    CONTEXT_FIXED_UPDATE_HIGH_SPEED_RATE.sample(rate);
+    CONTEXT_FIXED_UPDATE_HIGH_SPEED_RATE.observe_peak(&[rate as f64], rate);
 
     get_orig_fn!(ContextExtension_FixedUpdateForHighSpeedRate, ContextListValueFn)(helpers, rate);
 }
