@@ -897,16 +897,14 @@ pub fn hit_calls(slot: usize) -> usize {
     HIT_CALLS.get(slot).map(|counter| counter.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
-// The scaling points on the training screen, by slot and by the name a run reads. These installed in
-// run 8 and printed no call line, which is the open half of A21, and they are the regular training
-// path rather than the friendship one. The training cut-in probe prints their counts in its totals
-// line so a career run says whether the game reached them at all.
-pub const TRAINING_HIT_SLOTS: [(usize, &str); 5] = [
-    (7, "TrainingFooter.GetItemAnimDuration"),
-    (11, "TrainingFooter.GetCloseAnimWaitTime"),
-    (12, "TrainingCuttClip.get_DelayTime"),
-    (13, "SingleModeUtils.GetHighSpeedPlayDuration"),
-    (16, "SingleModeUtils.GetCutTimeScale"),
+// The training scaling points as run 11 found them. The five these replaced installed in run 8 and
+// printed no call line in four career runs (C51), so they were hooks on doors this client never opens.
+// These two are doors the run 11 log shows the game reaching, with the duration each was handed:
+// `PlayIn/4` 106 times at 2.4 s, and the gauge's progress bar blend time on a class run 11 measured
+// frames on but no animation door of.
+pub const TRAINING_HIT_SLOTS: [(usize, &str); 2] = [
+    (7, "SingleModeMainViewTrainingCutStatus.PlayIn"),
+    (11, "SingleModeMainViewHpGauge.SetProgressbarBlendTime"),
 ];
 
 // These getters hand out a hardcoded duration or a playback scale, and are the only way
@@ -1240,12 +1238,29 @@ pub fn init(umamusume: *const Il2CppImage) {
 def_getter_hook!(CountupModifier_getDuration, Group::Screens, scale_duration, 8);
 def_getter_hook!(TextModifier_getDuration, Group::Screens, scale_duration, 9);
 def_getter_hook!(TextModifier_getDelay, Group::Screens, scale_duration, 10);
-def_getter_hook!(TrainingFooter_GetCloseAnimWaitTime, Group::Screens, scale_duration, 11);
-def_getter_hook!(TrainingCuttClip_getDelayTime, Group::Story, scale_duration, 12);
-def_getter_hook!(SingleModeUtils_GetHighSpeedPlayDuration, Group::Story, scale_duration, 13);
 def_getter_hook!(StoryTimeline_getTimeScaleEventWipe, Group::Story, scale_time_scale, 14);
 def_getter_hook!(StoryTimeline_getTimeScaleAfterEndStory, Group::Story, scale_time_scale, 15);
-def_getter_hook!(SingleModeUtils_GetCutTimeScale, Group::Story, scale_time_scale, 16);
+
+// The training cut status in animation, scaled on the duration the game hands it (run 11: 106 calls at
+// 2.4 s). `frames`, the flag and the action are the game's own and go through untouched: multiplying a
+// frame count is the shape that stalled a story path in run 5.
+type TrainingCutStatusPlayInFn = extern "C" fn(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject);
+extern "C" fn TrainingCutStatus_PlayInSpeed(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject) {
+    let scaled = scale_duration(duration, Group::Screens);
+    hit(7, "SingleModeMainViewTrainingCutStatus.PlayIn", duration, scaled);
+
+    get_orig_fn!(TrainingCutStatus_PlayInSpeed, TrainingCutStatusPlayInFn)(this, scaled, frames, flag, action);
+}
+
+// The HP gauge progress bar blend time, the only float the gauge class takes. Run 11 measured 63,731
+// frames on the screen this class draws and never measured one animation door of it.
+type HpGaugeSetBlendTimeFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
+extern "C" fn HpGauge_SetBlendTimeSpeed(this: *mut Il2CppObject, time: f32) {
+    let scaled = scale_duration(time, Group::Screens);
+    hit(11, "SingleModeMainViewHpGauge.SetProgressbarBlendTime", time, scaled);
+
+    get_orig_fn!(HpGauge_SetBlendTimeSpeed, HpGaugeSetBlendTimeFn)(this, scaled);
+}
 
 // One float argument in a fixed position, so the wrapper cannot misread it. This is the
 // grand result screen's own entry point for its hardcoded DURATION constant.
@@ -1257,23 +1272,13 @@ extern "C" fn TeamStadiumGrandResult_FadeInContentFromRight(this: *mut Il2CppObj
     get_orig_fn!(TeamStadiumGrandResult_FadeInContentFromRight, GrandResultFadeInFromRightFn)(this, content, scaled);
 }
 
-// A getter that takes the thing it is measuring and still returns a duration.
-type TrainingFooterGetItemAnimDurationFn = extern "C" fn(this: *mut Il2CppObject, item: *mut Il2CppObject) -> f32;
-extern "C" fn TrainingFooter_GetItemAnimDuration(this: *mut Il2CppObject, item: *mut Il2CppObject) -> f32 {
-    let raw = get_orig_fn!(TrainingFooter_GetItemAnimDuration, TrainingFooterGetItemAnimDurationFn)(this, item);
-    let scaled = scale_duration(raw, Group::Screens);
-
-    hit(7, "SingleModeMainViewTrainingFooter.GetItemAnimDuration", raw, scaled);
-
-    scaled
-}
-
 // Every class named below has to be resolved before the getters are installed, because
-// the install macro looks the class up by name.
+// the install macro looks the class up by name. `SingleModeMainViewTrainingFooter`,
+// `StoryTimelineTrainingCuttClipData` and `SingleModeUtils` are gone: their hooks printed no call line
+// in four runs, and run 11 put the training scaling points on two other classes (C51).
 const GETTER_CLASSES: &[&str] = &[
-    "CountupModifier", "TextModifier", "SingleModeMainViewTrainingFooter",
-    "StoryTimelineTrainingCuttClipData", "SingleModeUtils",
-    "StoryTimelineController", "TeamStadiumGrandResultViewController",
+    "CountupModifier", "TextModifier", "StoryTimelineController",
+    "TeamStadiumGrandResultViewController", "SingleModeMainViewTrainingCutStatus", "SingleModeMainViewHpGauge",
 ];
 
 fn install_getters(umamusume: *const Il2CppImage) {
@@ -1294,12 +1299,8 @@ fn install_getters(umamusume: *const Il2CppImage) {
     install_getter!(classes, CountupModifier_getDuration, CountupModifier, get_Duration);
     install_getter!(classes, TextModifier_getDuration, TextModifier, get_Duration);
     install_getter!(classes, TextModifier_getDelay, TextModifier, get_Delay);
-    install_getter!(classes, TrainingFooter_GetCloseAnimWaitTime, SingleModeMainViewTrainingFooter, GetCloseAnimWaitTime);
-    install_getter!(classes, TrainingCuttClip_getDelayTime, StoryTimelineTrainingCuttClipData, get_DelayTime);
-    install_getter!(classes, SingleModeUtils_GetHighSpeedPlayDuration, SingleModeUtils, GetHighSpeedPlayDuration);
     install_getter!(classes, StoryTimeline_getTimeScaleEventWipe, StoryTimelineController, get_TimeScaleEventWipe);
     install_getter!(classes, StoryTimeline_getTimeScaleAfterEndStory, StoryTimelineController, get_TimeScaleAfterEndStory);
-    install_getter!(classes, SingleModeUtils_GetCutTimeScale, SingleModeUtils, GetCutTimeScale);
 
     if let Some(class) = classes.get("TeamStadiumGrandResultViewController").copied() {
         let addr = unsafe { resolve_method(
@@ -1311,14 +1312,31 @@ fn install_getters(umamusume: *const Il2CppImage) {
         if addr != 0 { new_hook!(addr, TeamStadiumGrandResult_FadeInContentFromRight); }
     }
 
-    if let Some(class) = classes.get("SingleModeMainViewTrainingFooter").copied() {
+    // The two training doors run 11 showed the game opening. `PlayIn/4 -> void(float, int, bool,
+    // class<System.Action>)` is resolved by its full dumped signature so the float in position 0 cannot
+    // land on the `CoroutinePlayIn/2 -> IEnumerator(float, int)` next to it, and only that float is
+    // scaled.
+    if let Some(class) = classes.get("SingleModeMainViewTrainingCutStatus").copied() {
         let addr = unsafe { resolve_method(
-            class, "GetItemAnimDuration",
-            &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS],
-            Il2CppTypeEnum_IL2CPP_TYPE_R4,
+            class, "PlayIn",
+            &[
+                Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_I4,
+                Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN, Il2CppTypeEnum_IL2CPP_TYPE_CLASS,
+            ],
+            Il2CppTypeEnum_IL2CPP_TYPE_VOID,
         ) };
 
-        if addr != 0 { new_hook!(addr, TrainingFooter_GetItemAnimDuration); }
+        if addr != 0 { new_hook!(addr, TrainingCutStatus_PlayInSpeed); }
+    }
+
+    if let Some(class) = classes.get("SingleModeMainViewHpGauge").copied() {
+        let addr = unsafe { resolve_method(
+            class, "SetProgressbarBlendTime",
+            &[Il2CppTypeEnum_IL2CPP_TYPE_R4],
+            Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+        ) };
+
+        if addr != 0 { new_hook!(addr, HpGauge_SetBlendTimeSpeed); }
     }
 }
 
