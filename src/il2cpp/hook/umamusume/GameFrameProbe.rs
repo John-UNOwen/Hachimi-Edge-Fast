@@ -103,11 +103,7 @@ pub fn observe_frame() {
     BUCKET_GAPS[bucket].fetch_add(1, atomic::Ordering::Relaxed);
     BUCKET_MS[bucket].fetch_add(gap, atomic::Ordering::Relaxed);
 
-    if gap > WORST_MS.load(atomic::Ordering::Relaxed) {
-        WORST_MS.store(gap, atomic::Ordering::Relaxed);
-        BUCKET_WORST[bucket].store(gap, atomic::Ordering::Relaxed);
-        WORST_AT_MS.store(now, atomic::Ordering::Relaxed);
-    }
+    record_worst(bucket, gap, now);
 
     if gap_is_slow(gap) {
         SLOW_GAPS.fetch_add(1, atomic::Ordering::Relaxed);
@@ -126,6 +122,21 @@ pub fn observe_frame() {
     }
 
     record_view(bucket, view);
+}
+
+/// The session's worst frame and a screen's worst frame are two separate records. They were one write
+/// in the first version, which is how run 12 came to print `training screen ... slow 40 worst 0 ms`: a
+/// bucket only got a number on the frame that beat the whole session, so a screen that held 40 frames
+/// over 50 ms could still claim it had none.
+fn record_worst(bucket: usize, gap: i64, now: i64) {
+    if gap > WORST_MS.load(atomic::Ordering::Relaxed) {
+        WORST_MS.store(gap, atomic::Ordering::Relaxed);
+        WORST_AT_MS.store(now, atomic::Ordering::Relaxed);
+    }
+
+    if gap > BUCKET_WORST[bucket].load(atomic::Ordering::Relaxed) {
+        BUCKET_WORST[bucket].store(gap, atomic::Ordering::Relaxed);
+    }
 }
 
 // One frame's view into the bounded per bucket list. The game thread is the only writer, the scan is
@@ -311,6 +322,29 @@ mod tests {
         assert!(!gap_is_slow(50), "a frame exactly at the line is not a stall");
         assert!(gap_is_slow(51));
         assert!(gap_is_slow(20_000), "a load gap is a stall, and the report says so in the open");
+    }
+
+    #[test]
+    fn a_bucket_keeps_its_own_worst_frame() {
+        // Run 12 printed `training screen(view 1101 +3 more) ... slow 40 worst 0 ms`, which cannot be
+        // true: 40 frames over 50 ms means that screen has a frame over 50 ms. The bucket number was
+        // only written on the frame that also beat the session, so a screen holding stalls while another
+        // screen held the session's worst reported zero.
+        let training = ViewBucket::Training as usize;
+        let other = ViewBucket::Other as usize;
+
+        record_worst(training, 2_299, 13_000);
+        record_worst(other, 90, 14_000);
+        record_worst(other, 60, 15_000);
+        record_worst(other, 30, 16_000);
+
+        assert_eq!(WORST_MS.load(atomic::Ordering::Relaxed), 2_299, "the session record keeps the largest frame");
+        assert_eq!(BUCKET_WORST[training].load(atomic::Ordering::Relaxed), 2_299);
+        assert_eq!(
+            BUCKET_WORST[other].load(atomic::Ordering::Relaxed),
+            90,
+            "a stall that is not the session's worst still belongs to the screen it landed on"
+        );
     }
 
     // The decision about a gap that has no previous tick, spelled out because `observe_frame` cannot be
