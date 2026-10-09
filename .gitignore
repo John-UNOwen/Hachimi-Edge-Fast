@@ -5,3 +5,7 @@
 dump.cs
 .envrc
 cargo_check_out.txt
+
+# local working memory and the knowledge bundle
+/LEDGER.md
+/knowledge/
