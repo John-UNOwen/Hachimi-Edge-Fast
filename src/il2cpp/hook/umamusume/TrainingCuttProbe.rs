@@ -786,6 +786,10 @@ fn close_cut_run() {
     // here rather than paired with the next cut's.
     CUT_HOLE_FROM_MS.store(-1, atomic::Ordering::Relaxed);
 
+    // The cut's own coroutine window closes on the same door, and reports what that coroutine did inside
+    // the wall clock this line just measured.
+    super::CutStateProbe::note_cut_run_closed();
+
     if runs <= PROBE_DETAIL_LIMIT {
         let tap = match tap_ms {
             Some(waited) => format!("tap waited {waited} ms"),
@@ -1231,6 +1235,7 @@ fn record_typewrite_cadence() {
 // the status panel playing out, is a door this probe owns.
 pub(crate) fn note_cut_in_end() {
     CUT_HOLE_FROM_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+    super::CutStateProbe::note_hole_open();
 }
 
 // Closes the hole at the status play out. The mark is swapped out rather than read so a cut that calls
@@ -1242,6 +1247,9 @@ fn record_cut_hole() {
         CUT_HOLE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         CUT_HOLE_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
         CUT_HOLE_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
+        // The same stretch read off the cut's own coroutine: whether the engine kept calling it while the
+        // status panel was held off decides whether this is a wait the fork can reach at all.
+        super::CutStateProbe::note_hole_closed(span_ms);
     }
 }
 

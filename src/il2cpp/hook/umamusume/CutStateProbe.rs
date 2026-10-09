@@ -1,5 +1,5 @@
 use std::ffi::CStr;
-use std::sync::atomic::{self, AtomicI32, AtomicI64, AtomicPtr, AtomicU64, AtomicUsize};
+use std::sync::atomic::{self, AtomicI32, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -37,6 +37,13 @@ use super::TrainingCuttProbe::{class_for_label, peak_seconds, report_due, CutPro
 // (A29), and a door on its `MoveNext` says which branch of the coroutine the game is sitting in, how long
 // it sat there, and whether the driver kept calling it at all. Those three answers are what decides
 // whether the hole is a wait the fork can shorten or a round trip it must not touch (C3, C31).
+//
+// Run 19 read this door for the first time and named the hole: 4932 ms and 7866 ms between the training
+// cut-in ending and the status play out on the two slow turns, against nothing on the four that played out
+// at once. Its own branch numbers came back cross contaminated, because every training turn builds a new
+// machine and the clock ran across all of them: `worst 65894 ms at branch 13` is a branch of a finished cut
+// held through 66 s of menu, not a wait inside a cut. The clock is therefore windowed per cut, closed on the
+// same door `cut run N closed` uses, and the stretch the hole clock measures is read off the coroutine too.
 //
 // Everything here is observe only. The wrappers hand the original its arguments and its return value back
 // and write nothing, so a measurement made on a value cannot change it. A field handle is only used after
@@ -178,6 +185,37 @@ static HIGH_SPEED_START_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FIELD_READS: AtomicUsize = AtomicUsize::new(0);
 static LAST_REPORT_SEC: AtomicI64 = AtomicI64::new(-1);
 static LAST_TOTALS: AtomicUsize = AtomicUsize::new(0);
+
+// One window per training cut. `PlayTrainingCut` builds a fresh machine every turn, and a hold or a gap
+// measured across two of them says something that never happened: run 18 printed `worst 65894 ms at branch
+// 13` for a stretch where no training cut was open at all, because the clock behind that number was the
+// last branch of the machine belonging to the cut that had already finished 66 s earlier. The cut window
+// is opened with the machine and closed with the cut, and the run totals fold it in when they are read.
+static CUT_OPEN_MS: AtomicI64 = AtomicI64::new(-1);
+static CUT_STEPS: AtomicUsize = AtomicUsize::new(0);
+static CUT_CHANGES: AtomicUsize = AtomicUsize::new(0);
+static CUT_STATES_SEEN: AtomicU64 = AtomicU64::new(0);
+static CUT_HOLDS: AtomicUsize = AtomicUsize::new(0);
+static CUT_HOLD_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static CUT_HOLD_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static CUT_HOLD_WORST_STATE: AtomicI32 = AtomicI32::new(NO_STATE);
+static CUT_GAP_RUNS: AtomicUsize = AtomicUsize::new(0);
+static CUT_GAP_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static CUT_GAP_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static CUT_TIME_SCALE_PEAK: AtomicU32 = AtomicU32::new(0);
+static CUT_ALL_TEXT_WAIT_PEAK: AtomicU32 = AtomicU32::new(0);
+
+// Open while `TrainingCuttProbe` has a cut hole open, which is the stretch between the training cut-in
+// ending and the status panel playing out, the leg run 19 measured at 4932 ms and 7866 ms. Counting the
+// coroutine inside that window is the whole point: it separates a coroutine the driver stopped calling from
+// one that is being called every frame while it waits on something the fork has no door on.
+static HOLE_OPEN_MS: AtomicI64 = AtomicI64::new(-1);
+static HOLE_START_STATE: AtomicI32 = AtomicI32::new(NO_STATE);
+static HOLE_STEPS_AT_START: AtomicUsize = AtomicUsize::new(0);
+static HOLE_CHANGES: AtomicUsize = AtomicUsize::new(0);
+static HOLE_STATES_SEEN: AtomicU64 = AtomicU64::new(0);
+static HOLE_GAP_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static CUTS_CLOSED: AtomicUsize = AtomicUsize::new(0);
 // The machine class this probe resolved, and whether it has already reported a surprise. The snapshot is
 // taken from a door that hands back a coroutine object, and a door that hands back a different class than
 // the one these field handles belong to must say so instead of reading slots it has no claim on.
@@ -216,15 +254,27 @@ unsafe fn read_state(obj: *mut Il2CppObject) -> i32 {
     unsafe { *get_field_ptr::<i32>(obj, STATE_FIELD) }
 }
 
+// The largest value this window saw. Every door here runs on the game thread, so a load and a store is
+// enough and no compare exchange is needed on a path the engine walks every frame it is playing a cut.
+fn sample_peak(slot: &AtomicU32, value: f32) {
+    if value <= f32::from_bits(slot.load(atomic::Ordering::Relaxed)) {
+        return;
+    }
+
+    slot.store(value.to_bits(), atomic::Ordering::Relaxed);
+}
+
 // The values the game computed for this cut, read every frame the cut advances. A peak is enough: the
 // question is how large the game's own number got, not what it was at one instant.
 unsafe fn note_values(this: *mut Il2CppObject) {
     if let Some(value) = read_f32(this, TIME_SCALE_FIELD) {
         TIME_SCALE.sample(value);
+        sample_peak(&CUT_TIME_SCALE_PEAK, value);
     }
 
     if let Some(value) = read_f32(this, ALL_TEXT_WAIT_FIELD) {
         ALL_TEXT_WAIT.sample(value);
+        sample_peak(&CUT_ALL_TEXT_WAIT_PEAK, value);
     }
 
     if let Some(flag) = read_bool(this, HIGH_SPEED_FIELD) {
@@ -242,11 +292,17 @@ fn observe_step(this: *mut Il2CppObject) {
     let now = elapsed_ms();
     let state = unsafe { read_state(this) };
     let previous = LAST_STATE.load(atomic::Ordering::Relaxed);
+    let previous_step_ms = LAST_STEP_MS.load(atomic::Ordering::Relaxed);
+    let in_hole = HOLE_OPEN_MS.load(atomic::Ordering::Relaxed);
+
+    CUT_STEPS.fetch_add(1, atomic::Ordering::Relaxed);
 
     match hold_of(previous, LAST_CHANGE_MS.load(atomic::Ordering::Relaxed), now, state) {
         Some(held) => {
             HOLDS.fetch_add(1, atomic::Ordering::Relaxed);
             HOLD_MS_TOTAL.fetch_add(held.held_ms, atomic::Ordering::Relaxed);
+            CUT_HOLDS.fetch_add(1, atomic::Ordering::Relaxed);
+            CUT_HOLD_MS_TOTAL.fetch_add(held.held_ms, atomic::Ordering::Relaxed);
 
             // A branch that never changes is the parked case, and its hold grows on every frame the
             // engine drives the coroutine, so the worst hold is kept without a second pass.
@@ -255,9 +311,19 @@ fn observe_step(this: *mut Il2CppObject) {
                 HOLD_WORST_STATE.store(held.state, atomic::Ordering::Relaxed);
             }
 
+            if held.held_ms > CUT_HOLD_WORST_MS.load(atomic::Ordering::Relaxed) {
+                CUT_HOLD_WORST_MS.store(held.held_ms, atomic::Ordering::Relaxed);
+                CUT_HOLD_WORST_STATE.store(held.state, atomic::Ordering::Relaxed);
+            }
+
             if held.changed {
                 let changes = STATE_CHANGES.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+                CUT_CHANGES.fetch_add(1, atomic::Ordering::Relaxed);
                 LAST_CHANGE_MS.store(now, atomic::Ordering::Relaxed);
+
+                if in_hole >= 0 {
+                    HOLE_CHANGES.fetch_add(1, atomic::Ordering::Relaxed);
+                }
 
                 if changes <= PROBE_DETAIL_LIMIT {
                     debug!(
@@ -276,13 +342,30 @@ fn observe_step(this: *mut Il2CppObject) {
 
     LAST_STATE.store(state, atomic::Ordering::Relaxed);
     STATES_SEEN.fetch_or(state_bit(state), atomic::Ordering::Relaxed);
+    CUT_STATES_SEEN.fetch_or(state_bit(state), atomic::Ordering::Relaxed);
 
-    if let Some(gap) = step_gap(LAST_STEP_MS.load(atomic::Ordering::Relaxed), now) {
+    if in_hole >= 0 {
+        HOLE_STATES_SEEN.fetch_or(state_bit(state), atomic::Ordering::Relaxed);
+    }
+
+    if let Some(gap) = step_gap(previous_step_ms, now) {
         STEP_GAP_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         STEP_GAP_MS_TOTAL.fetch_add(gap, atomic::Ordering::Relaxed);
+        CUT_GAP_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        CUT_GAP_MS_TOTAL.fetch_add(gap, atomic::Ordering::Relaxed);
 
         if gap > STEP_GAP_WORST_MS.load(atomic::Ordering::Relaxed) {
             STEP_GAP_WORST_MS.store(gap, atomic::Ordering::Relaxed);
+        }
+
+        if gap > CUT_GAP_WORST_MS.load(atomic::Ordering::Relaxed) {
+            CUT_GAP_WORST_MS.store(gap, atomic::Ordering::Relaxed);
+        }
+
+        // A gap that began before the hole opened belongs to the stretch before it. Only a gap whose two
+        // steps both sit in the hole is charged to the hole.
+        if in_hole >= 0 && previous_step_ms >= in_hole && gap > HOLE_GAP_WORST_MS.load(atomic::Ordering::Relaxed) {
+            HOLE_GAP_WORST_MS.store(gap, atomic::Ordering::Relaxed);
         }
     }
 
@@ -334,6 +417,27 @@ pub(crate) fn note_play_training_cut(obj: *mut Il2CppObject) {
         return;
     }
 
+    // A machine this cut built has no branch history, and this cut's window has none either. Without the
+    // reset, the first step of a turn charges the time since the previous turn's last step to a branch of
+    // the machine that finished: run 18 reported `worst 65894 ms at branch 13` across a stretch where no
+    // training cut was open, which is the previous turn's last branch held for 66 s of menu, not a wait.
+    LAST_STATE.store(NO_STATE, atomic::Ordering::Relaxed);
+    LAST_CHANGE_MS.store(-1, atomic::Ordering::Relaxed);
+    LAST_STEP_MS.store(-1, atomic::Ordering::Relaxed);
+    CUT_OPEN_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+    CUT_STEPS.store(0, atomic::Ordering::Relaxed);
+    CUT_CHANGES.store(0, atomic::Ordering::Relaxed);
+    CUT_STATES_SEEN.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLDS.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLD_MS_TOTAL.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLD_WORST_MS.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLD_WORST_STATE.store(NO_STATE, atomic::Ordering::Relaxed);
+    CUT_GAP_RUNS.store(0, atomic::Ordering::Relaxed);
+    CUT_GAP_MS_TOTAL.store(0, atomic::Ordering::Relaxed);
+    CUT_GAP_WORST_MS.store(0, atomic::Ordering::Relaxed);
+    CUT_TIME_SCALE_PEAK.store(0, atomic::Ordering::Relaxed);
+    CUT_ALL_TEXT_WAIT_PEAK.store(0, atomic::Ordering::Relaxed);
+
     unsafe {
         if let Some(value) = read_f32(obj, TIME_SCALE_FIELD) {
             debug!("Cut state probe cut opening timeScale {value:.4}");
@@ -347,6 +451,111 @@ pub(crate) fn note_play_training_cut(obj: *mut Il2CppObject) {
             debug!("Cut state probe cut opening isHighSpeedOnStart {flag}");
         }
     }
+}
+
+// The wall a cut window had, or nothing when no cut was open. A `CleanUpCutt` that finds nothing open is
+// the game cleaning a cutt it already cleaned, which run 19 counted 8 times against 6 cuts.
+pub(crate) fn cut_wall_ms(opened_ms: i64, now_ms: i64) -> Option<i64> {
+    if opened_ms < 0 || now_ms < opened_ms {
+        return None;
+    }
+
+    Some(now_ms - opened_ms)
+}
+
+// Steps between two readings of a counter that only ever grows.
+pub(crate) fn steps_between(first: usize, last: usize) -> usize {
+    last.saturating_sub(first)
+}
+
+fn mean_of(total: i64, count: usize) -> f64 {
+    match count {
+        0 => 0.0,
+        n => total as f64 / n as f64,
+    }
+}
+
+// Opens the coroutine window over the hole `TrainingCuttProbe` measured, from the training cut-in ending to
+// the status panel playing out. The two probes share the pairing so the hole in the wall clock and the
+// coroutine inside it are the same stretch.
+pub(crate) fn note_hole_open() {
+    HOLE_OPEN_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+    HOLE_START_STATE.store(LAST_STATE.load(atomic::Ordering::Relaxed), atomic::Ordering::Relaxed);
+    HOLE_STEPS_AT_START.store(MOVENEXT.calls(), atomic::Ordering::Relaxed);
+    HOLE_CHANGES.store(0, atomic::Ordering::Relaxed);
+    HOLE_STATES_SEEN.store(0, atomic::Ordering::Relaxed);
+    HOLE_GAP_WORST_MS.store(0, atomic::Ordering::Relaxed);
+}
+
+// Says what the cut's own coroutine did while the status panel was being held off. Zero steps and a branch
+// that never moved says the driver stopped calling the coroutine, which a fork may not answer. Many steps
+// with a branch that never moved says the coroutine is being driven every frame while it waits on a
+// condition, which is the case a duration door or a setting could still reach.
+pub(crate) fn note_hole_closed(span_ms: i64) {
+    if HOLE_OPEN_MS.swap(-1, atomic::Ordering::Relaxed) < 0 {
+        return;
+    }
+
+    let steps = steps_between(HOLE_STEPS_AT_START.load(atomic::Ordering::Relaxed), MOVENEXT.calls());
+    let changes = HOLE_CHANGES.load(atomic::Ordering::Relaxed);
+    let distinct = states_seen(HOLE_STATES_SEEN.load(atomic::Ordering::Relaxed));
+    let worst_gap = HOLE_GAP_WORST_MS.load(atomic::Ordering::Relaxed);
+    let open_branch = HOLE_START_STATE.load(atomic::Ordering::Relaxed);
+    let close_branch = LAST_STATE.load(atomic::Ordering::Relaxed);
+
+    info!(
+        "Cut state probe cut hole {span_ms} ms with the cut coroutine in it: branch {open_branch} at the cut-in end, {close_branch} at the play out, {steps} MoveNext steps, {changes} branch changes over {distinct} branches, worst gap between steps {worst_gap} ms"
+    );
+}
+
+// Closes the window a cut's coroutine had, one line per training cut, paired with `cut run N closed`
+// because both open at `PlayTrainingCut` and close at `CleanUpCutt`. The window is then folded into the
+// run totals the periodic report reads.
+pub(crate) fn note_cut_run_closed() {
+    let opened_ms = CUT_OPEN_MS.swap(-1, atomic::Ordering::Relaxed);
+    let Some(wall_ms) = cut_wall_ms(opened_ms, elapsed_ms()) else {
+        return;
+    };
+
+    let cuts = CUTS_CLOSED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+    let steps = CUT_STEPS.load(atomic::Ordering::Relaxed);
+    let changes = CUT_CHANGES.load(atomic::Ordering::Relaxed);
+    let distinct = states_seen(CUT_STATES_SEEN.load(atomic::Ordering::Relaxed));
+    let holds = CUT_HOLDS.load(atomic::Ordering::Relaxed);
+    let hold_ms = CUT_HOLD_MS_TOTAL.load(atomic::Ordering::Relaxed);
+    let worst_hold = CUT_HOLD_WORST_MS.load(atomic::Ordering::Relaxed);
+    let worst_branch = CUT_HOLD_WORST_STATE.load(atomic::Ordering::Relaxed);
+    let gaps = CUT_GAP_RUNS.load(atomic::Ordering::Relaxed);
+    let gap_ms = CUT_GAP_MS_TOTAL.load(atomic::Ordering::Relaxed);
+    let worst_gap = CUT_GAP_WORST_MS.load(atomic::Ordering::Relaxed);
+    // A value never sampled keeps the bits of zero, and the bits of zero are the value zero.
+    let time_scale = f32::from_bits(CUT_TIME_SCALE_PEAK.load(atomic::Ordering::Relaxed));
+    let all_text_wait = f32::from_bits(CUT_ALL_TEXT_WAIT_PEAK.load(atomic::Ordering::Relaxed));
+    let hold_mean = mean_of(hold_ms, holds);
+    let gap_mean = mean_of(gap_ms, gaps);
+
+    // A hole whose play out never arrived is dropped here rather than paired with the next cut's, which is
+    // the rule `TrainingCuttProbe::close_cut_run` runs on.
+    HOLE_OPEN_MS.store(-1, atomic::Ordering::Relaxed);
+
+    // The run totals are charged on every `MoveNext`, so closing a window only empties the window. A report
+    // taken between two cuts therefore has nothing left in it to count twice.
+    CUT_STEPS.store(0, atomic::Ordering::Relaxed);
+    CUT_CHANGES.store(0, atomic::Ordering::Relaxed);
+    CUT_STATES_SEEN.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLDS.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLD_MS_TOTAL.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLD_WORST_MS.store(0, atomic::Ordering::Relaxed);
+    CUT_HOLD_WORST_STATE.store(NO_STATE, atomic::Ordering::Relaxed);
+    CUT_GAP_RUNS.store(0, atomic::Ordering::Relaxed);
+    CUT_GAP_MS_TOTAL.store(0, atomic::Ordering::Relaxed);
+    CUT_GAP_WORST_MS.store(0, atomic::Ordering::Relaxed);
+    CUT_TIME_SCALE_PEAK.store(0, atomic::Ordering::Relaxed);
+    CUT_ALL_TEXT_WAIT_PEAK.store(0, atomic::Ordering::Relaxed);
+
+    info!(
+        "Cut state probe cut {cuts} coroutine over {wall_ms} ms: {steps} MoveNext steps, {changes} branch changes over {distinct} branches, holds {holds} mean {hold_mean:.1} ms worst {worst_hold} ms at branch {worst_branch}, gaps {gaps} mean {gap_mean:.1} ms worst {worst_gap} ms, timeScale peak {time_scale:.4}, allTextWaitTime peak {all_text_wait:.4}"
+    );
 }
 
 pub fn init(umamusume: *const Il2CppImage) {
@@ -430,12 +639,8 @@ pub fn report_if_due() {
     let holds = HOLDS.load(atomic::Ordering::Relaxed);
     let hold_ms = HOLD_MS_TOTAL.load(atomic::Ordering::Relaxed);
     let gaps = STEP_GAP_RUNS.load(atomic::Ordering::Relaxed);
-    let mean = |total: i64, count: usize| match count {
-        0 => 0.0,
-        n => total as f64 / n as f64,
-    };
-    let hold_mean = mean(hold_ms, holds);
-    let gap_mean = mean(STEP_GAP_MS_TOTAL.load(atomic::Ordering::Relaxed), gaps);
+    let hold_mean = mean_of(hold_ms, holds);
+    let gap_mean = mean_of(STEP_GAP_MS_TOTAL.load(atomic::Ordering::Relaxed), gaps);
     let distinct = states_seen(STATES_SEEN.load(atomic::Ordering::Relaxed));
     let changes = STATE_CHANGES.load(atomic::Ordering::Relaxed);
     let worst_hold = HOLD_WORST_MS.load(atomic::Ordering::Relaxed);
@@ -531,8 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn the_machine_is_the_iterator_built_for_the_training_cut() {
-        assert!(machine_name_matches("<PlayTrainingCut>d__70"));
+    fn the_machine_is_the_iterator_built_for_the_training_cut() {        assert!(machine_name_matches("<PlayTrainingCut>d__70"));
         assert!(machine_name_matches("<PlayTrainingCut>d__7"));
 
         // `TrainingCuttTeamRaceController` has an iterator whose name differs by one letter, the method this
@@ -544,5 +748,29 @@ mod tests {
         assert!(!machine_name_matches("<PlayTrainingCut>d__70_1"));
         assert!(!machine_name_matches("<PlayTrainingCut>d__"));
         assert!(!machine_name_matches("MoveNext"));
+    }
+
+    #[test]
+    fn a_cut_window_is_measured_only_while_a_cut_was_open() {
+        // Run 19 closed 8 `CleanUpCutt` calls against 6 cuts, and the two extra ones must not be reported
+        // as cuts with a coroutine of their own.
+        assert_eq!(cut_wall_ms(-1, 142_915), None);
+        assert_eq!(cut_wall_ms(132_453, 132_452), None);
+        assert_eq!(cut_wall_ms(132_453, 142_915), Some(10_462));
+    }
+
+    #[test]
+    fn steps_are_counted_between_two_marks_of_the_same_counter() {
+        assert_eq!(steps_between(231, 612), 381);
+        assert_eq!(steps_between(612, 612), 0);
+
+        // A mark taken before the counter existed cannot produce a negative count.
+        assert_eq!(steps_between(612, 231), 0);
+    }
+
+    #[test]
+    fn a_mean_of_nothing_is_zero_rather_than_a_divide_by_zero() {
+        assert_eq!(mean_of(6_150, 6), 1_025.0);
+        assert_eq!(mean_of(0, 0), 0.0);
     }
 }
