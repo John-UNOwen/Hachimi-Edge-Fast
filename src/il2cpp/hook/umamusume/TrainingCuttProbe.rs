@@ -29,11 +29,13 @@ use crate::{
 // getters the engine reads every frame, so their hooks do one atomic increment and one atomic max, and
 // the value is still handed back untouched.
 //
-// The run boundary is `set_IsPlayingCutt/1 -> void(bool)` on the training cutt controller, which is the
-// game's own statement that a cut is playing. The first version of this probe used
-// `CutInTimelineController::ResetCurrentTime`, chosen from the class name, and run 9 showed what that was
-// worth: 18 of 19 probes installed, the timeline reached 3194 times, and `cut runs 0` because a training
-// cut never calls it (C47). `ResetCurrentTime` stays observed as a count so a non training cut-in is still
+// The run boundary is the door the game plays a cut through, measured rather than named. The first version
+// chose `CutInTimelineController::ResetCurrentTime` from the class name and run 9 returned `cut runs 0`
+// (C47). The second chose `set_IsPlayingCutt/1 -> void(bool)`, the game's own playing flag, and run 10
+// installed it and it printed nothing across a 472 s career that contained 19 training cuts (C49). What that
+// run did reach is `PlayTrainingCut` 19 times, `PlayTrainingCutEndAsync` 19 times and `CleanUpCutt` 35
+// times, so a run opens at the cut start doors and closes at `CleanUpCutt`. `set_IsPlayingCutt` and
+// `get_IsPlayingCutt` stay counted, and `ResetCurrentTime` stays counted so a non training cut-in is still
 // visible.
 //
 // Alongside the counts the probe now reads the numbers the cut-in engine keeps for itself:
@@ -401,8 +403,11 @@ fn tag_kind_for_run(tag_player_seen: bool, last_answer: usize) -> usize {
     if tag_player_seen { TAG_FRIENDSHIP } else { last_answer }
 }
 
-// Called when the game writes `true` into its own cut-in playing flag. The run before is closed first, so
-// a cut-in that was never closed is still measured instead of silently merged with the next one.
+// Called from the door run 10 measured 19 times in a career that produced 35 `CleanUpCutt` calls:
+// `PlayTrainingCut` is where the game starts a training cut. The run before is closed first, so a cut that
+// was never cleaned up is still measured instead of silently merged with the next one. C47 and C49 are the
+// two boundaries this probe tried before it, `ResetCurrentTime` and `set_IsPlayingCutt`, and a full career
+// showed that neither door is ever called on this path.
 fn open_cut_run() {
     let now = elapsed_ms();
 
@@ -423,8 +428,8 @@ fn open_cut_run() {
     RUN_PEAK_BITS.store(0, atomic::Ordering::Relaxed);
 }
 
-// Called when the game writes `false`. A close with nothing open is the game clearing a flag that was
-// already clear, so it is not counted as a run.
+// Called from `CleanUpCutt`, which run 10 measured 35 times against 19 cut starts. A close with nothing open
+// is the game cleaning a cutt it already cleaned, so it is not counted as a run.
 fn close_cut_run() {
     let opened = RUN_OPENED_MS.swap(-1, atomic::Ordering::Relaxed);
 
@@ -617,18 +622,11 @@ extern "C" fn SingleModeMain_WaitTap(this: *mut Il2CppObject) -> *mut Il2CppObje
 }
 
 type SetIsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
-// Dumped: `set_IsPlayingCutt/1 -> void(bool)` on the training cutt controller. The value is handed back
-// exactly as it arrived; the only thing this detour does is start and stop the wall clock measurement on
-// the edges the game itself wrote (C47).
+// Dumped: `set_IsPlayingCutt/1 -> void(bool)` on the training cutt controller. Run 10 installed it and it
+// printed nothing for a whole career (C49), so it no longer drives the run. It stays counted because a
+// client that does use the flag would show up here, and the value is handed back exactly as it arrived.
 extern "C" fn TrainingCutt_SetIsPlayingCutt(this: *mut Il2CppObject, playing: bool) {
     CUTT_SET_IS_PLAYING_CUTT.count();
-
-    if playing {
-        open_cut_run();
-    }
-    else {
-        close_cut_run();
-    }
 
     get_orig_fn!(TrainingCutt_SetIsPlayingCutt, SetIsPlayingCuttFn)(this, playing);
 }
@@ -673,6 +671,7 @@ extern "C" fn TrainingCutt_LateUpdateTrainingCutIn(this: *mut Il2CppObject) {
 
 extern "C" fn TrainingCutt_CleanUpCutt(this: *mut Il2CppObject) {
     CUTT_CLEAN_UP_CUTT.count();
+    close_cut_run();
 
     get_orig_fn!(TrainingCutt_CleanUpCutt, CuttVoidFn)(this);
 }
@@ -695,12 +694,14 @@ type PlayTrainingCutFn = extern "C" fn(this: *mut Il2CppObject, info: *mut Il2Cp
 // the game ends up playing.
 extern "C" fn TrainingCutt_PlayTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
     CUTT_PLAY_TRAINING_CUT.count();
+    open_cut_run();
 
     get_orig_fn!(TrainingCutt_PlayTrainingCut, PlayTrainingCutFn)(this, info)
 }
 
 extern "C" fn TrainingCutt_PlayScenarioTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
     CUTT_PLAY_SCENARIO_TRAINING_CUT.count();
+    open_cut_run();
 
     get_orig_fn!(TrainingCutt_PlayScenarioTrainingCut, PlayTrainingCutFn)(this, info)
 }
@@ -717,6 +718,7 @@ extern "C" fn TrainingCutt_TrainingAsync(this: *mut Il2CppObject, id: i32) -> *m
 
 extern "C" fn TrainingCutt_PlayTrainingSaboriAsync(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject {
     CUTT_PLAY_TRAINING_SABORI.count();
+    open_cut_run();
 
     get_orig_fn!(TrainingCutt_PlayTrainingSaboriAsync, TrainingIdCoroutineFn)(this, id)
 }
@@ -1083,7 +1085,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(main_view, SingleModeMain_CoroutineDoTweenTimeScale, "CoroutineDoTweenTimeScale", NO_PARAMS, CLASS, "SingleModeMainViewController::CoroutineDoTweenTimeScale");
     probe!(main_view, SingleModeMain_WaitTap, "WaitTap", NO_PARAMS, CLASS, "SingleModeMainViewController::WaitTap");
 
-    info!("Cutt probe: {installed} of {} observe only probes installed, cut runs measured from the game's own IsPlayingCutt flag and attributed to the view they start on", PROBES.len());
+    info!("Cutt probe: {installed} doors installed, {} of them carry a counted kind in the totals line, cut runs measured from the cut start doors to CleanUpCutt and attributed to the view they start on", PROBES.len());
 
     if !missing.is_empty() {
         info!("Cutt probe: not installed, no class or no matching overload: {}", missing.join(", "));
