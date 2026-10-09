@@ -232,6 +232,30 @@ pub fn find_nested_class(class: *mut Il2CppClass, name: &CStr) -> Result<*mut Il
     Err(Error::ClassNotFound(class_name.to_owned(), name.to_str().unwrap().to_owned()))
 }
 
+// A C# iterator or async method compiles to a class nested in the one that declares it, and a nested type
+// is not reachable by the namespace and name lookup that finds every other class: this client stores the
+// training cut's machine as Gallop.SingleModeMainTrainingCuttController/<PlayTrainingCut>d__70 while
+// printing it under the bare name. The number in that name is the compiler's and moves between builds, so
+// the walk matches a prefix and hands the name it landed on back for the log to show.
+pub unsafe fn find_nested_class_by_prefix(class: *mut Il2CppClass, prefix: &str) -> Option<(String, *mut Il2CppClass)> {
+    let mut iter: *mut c_void = null_mut();
+
+    loop {
+        let nested = il2cpp_class_get_nested_types(class, &mut iter);
+        if nested.is_null() {
+            return None;
+        }
+
+        let name = CStr::from_ptr((*nested).name);
+
+        if let Ok(name) = name.to_str() {
+            if name.starts_with(prefix) {
+                return Some((name.to_owned(), nested));
+            }
+        }
+    }
+}
+
 pub fn get_field_value<T>(obj: *mut Il2CppObject, field: *mut FieldInfo) -> T {
     let mut value = MaybeUninit::uninit();
     il2cpp_field_get_value(obj, field, unsafe { std::mem::transmute(&mut value) });

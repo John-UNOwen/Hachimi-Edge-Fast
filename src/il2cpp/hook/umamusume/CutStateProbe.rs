@@ -7,7 +7,7 @@ use crate::{
     core::Hachimi,
     il2cpp::{
         hook::umamusume::AnimationSpeed,
-        symbols::{get_field_from_name, get_field_ptr},
+        symbols::{find_nested_class_by_prefix, get_field_from_name, get_field_ptr},
         types::*,
     },
 };
@@ -23,13 +23,15 @@ use super::TrainingCuttProbe::{class_for_label, peak_seconds, report_due, CutPro
 // has never been read (C58).
 //
 // The state machine the C# compiler builds for
-// `SingleModeMainTrainingCuttController::PlayTrainingCut` holds that number, and this client's dump names
-// it together with the locals it captured:
+// `SingleModeMainTrainingCuttController::PlayTrainingCut` holds that number, and this client's dump prints
+// it whole once its name is on the allowlist, branch marker and captured locals included:
 //
-//   <PlayTrainingCut>d__70::field <timeScale>5__7 [float]
-//   <PlayTrainingCut>d__70::field <allTextWaitTime>5__12 [float]
-//   <PlayTrainingCut>d__70::field <isHighSpeedOnStart>5__9 [bool]
-//   <PlayTrainingCut>d__70::field <waitForFixedUpdate>5__10 [class<UnityEngine.WaitForFixedUpdate>]
+//   === <PlayTrainingCut>d__70 ===
+//     MoveNext/0 -> bool()
+//     field <>1__state [int]
+//     field <timeScale>5__7 [float]
+//     field <allTextWaitTime>5__12 [float]
+//     field <waitForFixedUpdate>5__10 [class<UnityEngine.WaitForFixedUpdate>]
 //
 // So a probe standing on that class reads the game's own timing instead of inferring it from wall clock
 // (A29), and a door on its `MoveNext` says which branch of the coroutine the game is sitting in, how long
@@ -44,15 +46,31 @@ use super::TrainingCuttProbe::{class_for_label, peak_seconds, report_due, CutPro
 // Installed only when debug_mode is on, like TrainingCuttProbe, and after the scaling modules so the class
 // lookup is the one they resolved.
 
-// The class exactly as this client names it. `get_class` wants the bare name for a type with no namespace,
-// which is how a compiler generated state machine is stored.
-const MACHINE_NAME: &str = "<PlayTrainingCut>d__70";
+// The class that owns the iterator. The machine the compiler built for its `PlayTrainingCut` is nested in
+// it, and a nested type is not what a namespace and name lookup answers: run 18 reported
+// `<PlayTrainingCut>d__70 is not in this client` while this client's own dump printed that class, its
+// `MoveNext/0 -> bool()` and its captured locals, because the class is stored as
+// Gallop.SingleModeMainTrainingCuttController/<PlayTrainingCut>d__70.
+const OWNER_LABEL: &str = "Gallop.SingleModeMainTrainingCuttController";
+
+// The number in a machine's name is the compiler's and moves when the owning class gains or loses an
+// iterator, so the class is matched on the half that is a fact about the code: the method it was built for.
+const MACHINE_PREFIX: &str = "<PlayTrainingCut>d__";
+
+// The name a prefix match landed on, kept for the log so a run says which machine it measured. Before init
+// resolved one there is no name to print, only the method the probe was looking for.
+static MACHINE_NAME: OnceLock<String> = OnceLock::new();
+
+fn machine_name() -> &'static str {
+    MACHINE_NAME.get().map(String::as_str).unwrap_or(MACHINE_PREFIX)
+}
+
 const TIME_SCALE_NAME: &CStr = c"<timeScale>5__7";
 const ALL_TEXT_WAIT_NAME: &CStr = c"<allTextWaitTime>5__12";
 const HIGH_SPEED_NAME: &CStr = c"<isHighSpeedOnStart>5__9";
-// The branch marker every C# state machine carries. It is private, so no dump filter has ever printed it,
-// and the probe reports a miss rather than guessing an offset.
-const STATE_NAME: &CStr = c"__state";
+// The branch marker, spelled the way this client's dump spells it: `field <>1__state [int]`. It is private,
+// so no field filter has ever printed it, and the probe reports a miss rather than guessing an offset.
+const STATE_NAME: &CStr = c"<>1__state";
 
 const BOOL: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN;
 const NO_PARAMS: &[Il2CppTypeEnum] = &[];
@@ -60,6 +78,16 @@ const NO_PARAMS: &[Il2CppTypeEnum] = &[];
 // A state machine's branch marker starts at -1 before its first move and ends at -2 or lower when it is
 // finished, so no real state is this value and it is safe to keep as "nothing sampled yet".
 pub(crate) const NO_STATE: i32 = i32::MIN;
+
+// Whether a nested class name is the machine this probe stands on: the method it was built for, then the
+// compiler's index, and nothing after it. `<PlayTrainingCutt>d__70` belongs to a different controller's
+// iterator and is refused, as is a display class the same method generated or a machine with no index.
+pub(crate) fn machine_name_matches(name: &str) -> bool {
+    match name.strip_prefix(MACHINE_PREFIX) {
+        Some(index) => !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()),
+        None => false,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Held {
@@ -291,7 +319,8 @@ fn machine_is_the_one_resolved(obj: *mut Il2CppObject) -> bool {
 
     if CLASS_MISMATCH_REPORTED.swap(1, atomic::Ordering::Relaxed) == 0 {
         let name = unsafe { std::ffi::CStr::from_ptr((*klass).name) }.to_string_lossy().into_owned();
-        info!("Cut state probe: PlayTrainingCut handed back a {name} object, not {MACHINE_NAME}");
+        let machine = machine_name();
+        info!("Cut state probe: PlayTrainingCut handed back a {name} object, not {machine}");
     }
 
     false
@@ -327,14 +356,29 @@ pub fn init(umamusume: *const Il2CppImage) {
 
     let _ = START.set(Instant::now());
 
-    let class = match class_for_label(umamusume, MACHINE_NAME) {
-        Some(class) => class,
+    let owner = match class_for_label(umamusume, OWNER_LABEL) {
+        Some(owner) => owner,
         None => {
-            info!("Cut state probe: {MACHINE_NAME} is not in this client, the training cut coroutine is not measured");
+            info!("Cut state probe: {OWNER_LABEL} is not in this client, the training cut coroutine is not measured");
             return;
         }
     };
 
+    // The machine is a nested type of the class that owns the iterator, and a nested type is not what the
+    // namespace and name lookup answers, so it is reached through its owner (C59).
+    let (name, class) = match unsafe { find_nested_class_by_prefix(owner, MACHINE_PREFIX) } {
+        Some((name, class)) if machine_name_matches(&name) => (name, class),
+        Some((name, _)) => {
+            info!("Cut state probe: {OWNER_LABEL} nests a {name} that is not the training cut coroutine, it is not measured");
+            return;
+        }
+        None => {
+            info!("Cut state probe: {OWNER_LABEL} nests no iterator built for PlayTrainingCut, the coroutine is not measured");
+            return;
+        }
+    };
+
+    let _ = MACHINE_NAME.set(name);
     MACHINE_CLASS.store(class, atomic::Ordering::Relaxed);
 
     unsafe {
@@ -347,16 +391,18 @@ pub fn init(umamusume: *const Il2CppImage) {
     let addr = unsafe { AnimationSpeed::resolve_method(class, "MoveNext", NO_PARAMS, BOOL) };
 
     if addr == 0 {
-        info!("Cut state probe: {MACHINE_NAME} has no MoveNext with the dumped signature, only the opening values can be read");
+        let machine = machine_name();
+        info!("Cut state probe: {machine} has no MoveNext with the dumped signature, only the opening values can be read");
         return;
     }
 
     new_hook!(addr, PlayTrainingCutStateMachine_MoveNext);
 
     let named = |field: *mut FieldInfo| if field.is_null() { "not found" } else { "resolved" };
+    let machine = machine_name();
 
     info!(
-        "Cut state probe: standing on {MACHINE_NAME}::MoveNext, timeScale {}, allTextWaitTime {}, isHighSpeedOnStart {}, branch marker {}",
+        "Cut state probe: standing on {machine}::MoveNext, a nested type of {OWNER_LABEL}, timeScale {}, allTextWaitTime {}, isHighSpeedOnStart {}, branch marker {}",
         unsafe { named(TIME_SCALE_FIELD) },
         unsafe { named(ALL_TEXT_WAIT_FIELD) },
         unsafe { named(HIGH_SPEED_FIELD) },
@@ -482,5 +528,21 @@ mod tests {
         assert!(report_due(30, -1, 12, 0, REPORT_INTERVAL_SECS));
         assert!(!report_due(35, 30, 18, 12, REPORT_INTERVAL_SECS));
         assert!(report_due(50, 30, 18, 12, REPORT_INTERVAL_SECS));
+    }
+
+    #[test]
+    fn the_machine_is_the_iterator_built_for_the_training_cut() {
+        assert!(machine_name_matches("<PlayTrainingCut>d__70"));
+        assert!(machine_name_matches("<PlayTrainingCut>d__7"));
+
+        // `TrainingCuttTeamRaceController` has an iterator whose name differs by one letter, the method this
+        // probe stands on also generates display classes, and a prefix with no compiler index behind it is
+        // not a machine. Each is refused so the door lands on one coroutine rather than on whatever matched
+        // first in the owner's nested type list.
+        assert!(!machine_name_matches("<PlayTrainingCutt>d__70"));
+        assert!(!machine_name_matches("<>c__DisplayClass70_0"));
+        assert!(!machine_name_matches("<PlayTrainingCut>d__70_1"));
+        assert!(!machine_name_matches("<PlayTrainingCut>d__"));
+        assert!(!machine_name_matches("MoveNext"));
     }
 }
