@@ -9,3 +9,6 @@ cargo_check_out.txt
 # local working memory and the knowledge bundle
 /LEDGER.md
 /knowledge/
+
+# captured run logs: the evidence the run notes in LEDGER.md are written from
+/run log/
