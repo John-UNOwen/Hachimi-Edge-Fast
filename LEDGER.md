@@ -635,7 +635,7 @@ The run 9 dump is 1,921,600 bytes over 27,463 lines and ends with `527 classes (
   bound is enforced by code now: `value_shape_for` refuses a `struct<...>` whose payload is over
   `MAX_INLINE_VALUE_BYTES = 4` in front of any value-shaped wrapper (item 25).
 
-## C. Safety review findings (C1 to C46)
+## C. Safety review findings (C1 to C51)
 
 - [~] **C1 Calls through address 0.** Closed for `def_method_wrapper_fn!`,
   `impl_addr_wrapper_fn!` and both field accessor macro families. Still open: `get_orig_fn!`
@@ -1297,19 +1297,18 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
   measurement note rather than a fix. `story_speed` was also left at 1.0..=10.0 even though the code would
   honour MAX_FACTOR, because 10 is the value the runs measured with.
 
-- [ ] **C47 The probe chose a cut run boundary that this client never calls.** Run 9 installed 18 of 19 probes and
+- [~] **C47 The probe chose a cut run boundary that this client never calls.** Run 9 installed 18 of 19 probes and
   printed `cut runs 0` on all 22 totals lines across 617 s of training, while `CutInTimelineController::UpdateSpeed`
   reached 3194 calls and `SkipRuntime(time)` 70, so the timeline was plainly running. `ResetCurrentTime` is in
   `Gallop.CutIn.Cutt.CutInTimelineController` (dump L26098) and was hooked, but a training cut-in does not go through
   it, and neither do `SetSpeed`, `get_CurrentTime`, `get_CurrentTimeScale`, `get_WaitingTime`, `SkipRuntimeFrames` or
   `SkipTimeDirect`. Evidence: `hachimi.log:550` and the totals lines L801 to L999. A boundary chosen from a class name
-  is a guess, and this is what a guess costs. The fix is the game's own state flag
-  `set_IsPlayingCutt/1 -> void(bool)` on `SingleModeMainTrainingCuttController` (dump L22929): observe the setter, treat
-  `true` as a cut opening and `false` as it closing, and read `GetTotalTime/0`, `GetTotalFrameCeil/0` and
-  `get_CurrentFrame/0` for the length the game itself believes it has (A29).
-  - Not yet done: the replacement boundary, and no scaling depends on it, so nothing else was exposed.
+  is a guess, and this is what a guess costs. The replacement named here, `set_IsPlayingCutt/1 -> void(bool)` on
+  `SingleModeMainTrainingCuttController`, was installed in `19e741c` and run 10 showed it is silent too (C49). The
+  boundary is still not found, so this stays open.
+  - Done: the replacement boundary installed. Not done: a boundary that the client actually calls.
 
-- [ ] **C48 A generic collection parameter does not match `CLASS`, so one probe never installed.**
+- [x] **C48 A generic collection parameter does not match `CLASS`, so one probe never installed.**
   `TrainingParamChangeUI::InitializePlateList` was the only probe of 19 that failed (`hachimi.log:551`, reported as
   "no class or no matching overload"). The dump gives it as
   `InitializePlateList/2 -> void(generic<System.Collections.Generic.List<Gallop.TrainingParamChangeUI.ChangeParameterInfo>:24B>, float)`
@@ -1319,9 +1318,46 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
   plain reference types and false for a generic instantiated one. Fix: let the probe's parameter matcher accept
   `GENERICINST` alongside `CLASS` for a reference slot, which is safe for an observe only hook because the probe never
   reads or writes the argument, it only matches the overload.
-  - Not yet done: the matcher change and the re-install of that probe. This also explains why other reference type
-    signatures in the fork may have been reported as missing overloads; none of the speed hooks is known to be a
-    casualty, because the ones that matter printed `new_hook!` lines.
+  - Fixed in `0e98898` and closed by run 10: the log reads `InitializePlateList parameter 0 is a generic
+    instantiation, bound as the pointer this wrapper declares` followed by
+    `new_hook!: TrainingParamChangeUI_InitializePlateList`, and the door reached 102 calls with an interval peak of
+    1.000. The exact overload walk still runs first, and only `resolve_generic_ref_method` and
+    `resolve_static_generic_ref_method` ask for the widening, so no scaling hook can bind a generic parameter.
+
+- [ ] **C49 The second boundary guess is also a door this client does not use.** Run 10 measured a real career and
+  still printed `cut runs 0`, while the same totals line showed 19 `PlayTrainingCut(info)`, 19
+  `PlayTrainingCutEndAsync(id, flag, flag)`, 35 `CleanUpCutt()`, 38 `TrainingCutStatus::PlayIn(duration, count, flag,
+  action)` with the duration 5.640, 18 tag `PlayCutIn(cards, done)`, 2274 `CutInTimelineController::UpdateSpeed()` and
+  19 `WaitTapAsync()`. `set_IsPlayingCutt(playing)` and `get_IsPlayingCutt()` printed nothing, and 29 of the 47
+  counted doors printed nothing at all, including the three `Update/FixedUpdate/LateUpdateTrainingCutIn` drivers,
+  `TrainingAsync`, `PlayScenarioTrainingCut`, `PlayTrainingSaboriAsync`, `IsValidTag` on both classes, `set_SkipFrame`,
+  `set_IsAutoPlay`, `get_IsAutoPlay`, `IsAutoPlay`, `SetSpeed`, `SkipTimeDirect`, `SkipRuntime(frames, keep)`,
+  `get_CurrentTime`, `get_CurrentTimeScale`, `get_WaitingTime`, `ResetCurrentTime`, `GetTotalFrameCeil`,
+  `get_CurrentFrame`, `WaitTap`, `CoroutineDoTweenTimeScale`, `ExistPlayingFrame`, `GetIntervalOutBegine` and
+  `WillRankUpInHighSpeedMode`. Evidence: the `Cutt probe totals at 458 s` line of the run 10 log. The pairing the data
+  supports is `PlayTrainingCut` open, `CleanUpCutt` close, and a run attributed to whichever door opened it.
+  - Not done: the pairing. Nothing is scaled through a run yet, so no behaviour is exposed to this.
+
+- [ ] **C50 The story cut-in engine runs all career and its entry door is not `CutInHelper::Play`.** Run 10's story
+  probe printed `cut-ins 0` while `CutInHelper::GetTotalTime()` was called 757 times with a peak total time of 5.667,
+  `ContextExtension::FixedUpdateForHighSpeed(helpers)` 4769 times, `SetTimeAll(helpers, time)` 1512 times peaking
+  5.667, `SkipPause(helpers)` 756, `CutInHelper::CleanupPlaying()` 36 and `CutInHelper::IsPlaying()` 54 with a peak of
+  1.000, so a cut-in was playing. `Play(timeline, parent)` and `OnPlayCutIn(timeline, parent)` were silent, as were
+  `CutInHelper::GetTargetSpeed`, `CutInHelper::FixedUpdateForHighSpeed(rate)`, `CutInHelper::SetCurrentFrame` and
+  `ContextExtension::GetCurrentTime`. Evidence: the `Story event probe totals at 441 s` line. Either the entry is a
+  derived `CutInHelper` override that the base hook cannot see, or the story and training cut-ins are driven from the
+  helper list rather than through `Play`. The next probe pass has to find the door that opens it, from a dump line,
+  before it pairs anything (C47).
+
+- [ ] **C51 Every training scaling door this fork installs was never called.** Run 10 printed
+  `TrainingFooter.GetItemAnimDuration=0 TrainingFooter.GetCloseAnimWaitTime=0 TrainingCuttClip.get_DelayTime=0
+  SingleModeUtils.GetHighSpeedPlayDuration=0 SingleModeUtils.GetCutTimeScale=0`, which is the third consecutive run
+  where the five `TRAINING_HIT_SLOTS` doors (`AnimationSpeed.rs:904` to `:910`) printed zero. What the training screen
+  actually runs through is `SingleModeTrainingCutInHelper::GetTargetSpeed` 598 calls peaking 11.280,
+  `SingleModeUtils::GetTrainingCutTimeScale` 76 calls peaking 11.280 (double its argument, matching run 9), and
+  `CutInTimelineController::UpdateSpeed` 2274 calls, none of which the mod scales. Any future training speed option
+  has to sit on those doors, and the rule against scaling only a getter applies to them: `GetTargetSpeed` has a
+  matching `set_` path on the same timeline, so a getter only change would compound (C22, C24).
 
 ## D. Fix order
 
@@ -1645,12 +1681,14 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     `GetTotalTime/0`, `GetTotalFrameCeil/0`, `get_CurrentFrame/0` and `get_Speed/0` on the timeline (A29) say how long
     the game thinks the cut is and how far it has got. Run 9 is the cost of not doing this first (C47). Attribute each
     run with `IsValidTag/2` (A28) so a friendship cut and a regular one stop sharing one number. All of it is installed
-    in `19e741c` and deployed in `v0.32.0-eb92734`; the run that reads it has not happened yet.
-40. [~] Re install the probe the matcher threw away. Accept `IL2CPP_TYPE_GENERICINST` in a reference parameter slot for
+    in `19e741c` and run 10 read it: `PlayTrainingCut` 19, `CleanUpCutt` 35, `PlayIn` duration 5.640, while
+    `set_IsPlayingCutt`, `get_IsPlayingCutt` and `IsValidTag` on both classes stayed silent (C49), so the boundary and
+    the friendship split are still open.
+40. [x] Re install the probe the matcher threw away. Accept `IL2CPP_TYPE_GENERICINST` in a reference parameter slot for
     the observe only probes so `TrainingParamChangeUI::InitializePlateList/2` resolves (C48). Landed in `0e98898`: the
     widening lives in `symbols::param_type_accepts`, runs only as a second pass behind the exact walk, and only the two
-    new `resolve_generic_ref_method` / `resolve_static_generic_ref_method` profiles ask for it. Whether that install line
-    now succeeds is the run's to report.
+    new `resolve_generic_ref_method` / `resolve_static_generic_ref_method` profiles ask for it. Run 10 closed it: the
+    install line printed, and the door reached 102 calls.
 41. [~] Use the game's own skip and autoplay doors on the training cut before adding any multiplier. Run 9 counted 31
     `WaitTapAsync` and 31 `FadeOutResultFlash`, `Skip` asked 16 times with false, and the cut already runs at up to
     8.334. `IsAutoPlay/0` on the cutt controller, `get_IsAutoPlay/0` with `set_IsAutoPlay/1` on the timeline,
@@ -1667,7 +1705,30 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     `StoryEventMissionViewController` or `StoryCharacterFade`, because no dump has ever printed their signatures and a
     hook written from a name is what C47 is. Those four names are in the `debug_mode` allowlist (`eb92734`) so the next
     run delivers them. Run 9 spent only 7.8 s on Story out of 617.5 s, so the run that answers this has to be a session
-    that actually plays a story event.
+    that actually plays a story event. Run 10 visited Story 3000 for 18.6 s over 13 visits and never opened
+    `ViewId.StoryEventMission`, so the story event half is still unmeasured, and the half that did measure found the cut-in
+    engine busy with its own entry door missing (C50).
+43. [ ] Find the door that opens a cut-in, on both sides, from a dump line rather than a name. The training pairing the
+    run 10 data supports is `PlayTrainingCut(info)` open to `CleanUpCutt()` close (19 and 35 calls), and the story side has
+    `CutInHelper::CleanupPlaying` closing 36 times with no opener at all (C49, C50). Nothing scales through a run, so this
+    is measurement work only.
+44. [ ] Measure the training screen's animations that are not the cut-in. `Gallop.SingleModeMainViewHpGauge` is dumped with
+    `SetProgressbarBlendTime/1 -> void(float)`, `PlayIn/0`, `PlayValue/1`, `PlayValue/5`, `PlayMaxValue/2` and
+    `field GAUGE_FADE_ANIMATION_DURATION [static const float]`; `Gallop.SingleModeLogItem` is dumped with
+    `PlayInAnimation/0`, `PlayInsertAnimation/2 -> void(int, class<Action>)`, `PlayBalloonAnimation/0` and two
+    `DG.Tweening.Sequence` fields; `Gallop.SingleModeMainViewTrainingFooter` has `GetCloseAnimWaitTime/0 -> static float()`
+    and `PlayOutOnClick/0`. None of them is hooked or counted, and the training screen is 317.1 s of the 472 s career.
+45. [ ] Put the training scaling on the doors the client actually calls. Run 10 printed all five `TRAINING_HIT_SLOTS` at
+    zero for the third run running while `GetTargetSpeed` 598 calls and `GetTrainingCutTimeScale` 76 calls peaked at 11.280
+    and `CutInTimelineController::UpdateSpeed` ran 2274 times (C51). Before anything is written through them: `GetTargetSpeed`
+    and `UpdateSpeed` are getters on a timeline that has `SetSpeed/1 -> void(float)` and `set_SkipFrame/1 -> void(int)`, so
+    the rule against scaling only a getter (AGENTS section 5) applies to whatever is built here.
+46. [ ] Measure the game's own speed settings instead of inferring them. `StoryDefine::NORMAL_TIME_SCALE`,
+    `HIGH_SPEED_TIME_SCALE_X4`, `HIGH_SPEED_TIME_SCALE_X16`, `HIGH_SPEED_TIME_SCALE_GRAND_LIVE`, `EVENT_WIPE_TIME_SCALE`,
+    `INSPIRATION_WIPE_TIME_SCALE` and `STORY_END_TIME_SCALE` are `public static const float` in the dump, and
+    `StoryManager::GetMaxHighSpeedType/0 -> static struct<HighSpeedType:4B>` is there too. Reading those fields once at
+    init, with no hook and no write, would say what speed the story and event wipes already run at. `get_TargetFps` came
+    back 20 for the training cut timeline in run 10, which is the first number of this kind the probe produced.
 
 ### Probe build `253458f`, deployed and waiting for a career run (2026-10-08)
 
@@ -1744,7 +1805,109 @@ What the next career run has to show before any training number is scaled, item 
    up past a readable size (C44).
 5. Whether a friendship training happened at all, which run 8 could not answer.
 
-### Probe v2 and the story event probe, deployed for run 10 (2026-10-08)
+### Run 10, career on `v0.32.0-eb92734`, the probe's first real measurement (2026-10-08)
+
+Build `v0.32.0-eb92734`, 29,502,464 bytes, SHA256
+`BAE4343DCD07215F6F3DEDF24F82ED2BBBA45F14BB98282F7D84F6041F4D6C87`. Process started 20:05:38, log 233,592
+bytes, first log line 00:05:44Z, last 00:20:01Z. `253 hooks armed in one pass, 0.075 s`, 10 `_addr is null`
+lines in the known C30/C34/C39/C40 set, no panic, no new install failure beyond none: `Cutt probe: 50 of 47
+observe only probes installed` (50 doors installed, 47 of them carry a counted probe, three feed the timeline
+self report) and `Story event probe: 14 of 14 observe only hooks installed`. Config snapshot unchanged.
+
+The career itself ran 00:05:46 to 00:13:38, 472 s. The rest of the log is the profile screen afterwards.
+
+| view | id | wall | visits |
+|---|---|---|---|
+| single mode training screen | 1101 | 317.1 s | 16 |
+| paddock | 1200 | 55.8 s | 9 |
+| race program detail | 1301 | 24.1 s | 1 |
+| story | 3000 | 18.6 s | 13 |
+| home hub | 101 | 16.3 s | 2 |
+| race | 400 | 14.7 s | 1 |
+| race program | 1300 | 10.2 s | 1 |
+| month start | 1100 | 7.5 s | 6 |
+| succession event | 1501 | 5.3 s | 1 |
+| loading | 2 | 3.7 s | 1 |
+| title | 1 | 2.1 s | 1 |
+
+36 `NowLoading::PlayFadeNowLoading` pairs, every duration 0.3 s, the clamped floor, nothing above it.
+
+**The game's own training cut numbers, first time in this fork's history:**
+
+```
+SingleModeMainTrainingCuttController::PlayTrainingCut(info)=19
+SingleModeMainTrainingCuttController::PlayTrainingCutEndAsync(id, flag, flag)=19
+SingleModeMainTrainingCuttController::CleanUpCutt()=35
+SingleModeMainTrainingCuttController::WaitTapAsync()=19
+SingleModeMainTrainingCuttController::FadeOutResultFlash()=19
+CutInTimelineController::GetTotalTime()=19 peak 5.640
+SingleModeMainViewTrainingCutStatus::PlayIn(duration, count, flag, action)=38 peak 5.640
+SingleModeMainViewTrainingCutStatus::PlayOut(flag, action)=22
+SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)=18
+SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)=18
+TrainingParamChangeUI::InitializePlateList(list, interval)=102 peak 1.000
+CutInTimelineController::UpdateSpeed()=2274
+CutInTimelineController::SkipRuntime(time)=50
+SingleModeTrainingCutInHelper::GetTargetSpeed()=598 peak 11.280
+SingleModeUtils::GetTrainingCutTimeScale(scale)=76 peak 11.280
+SingleModeTrainingCutInHelper::IsHighSpeedMode()=39
+CutInTimelineController::get_TargetFps() read 20
+```
+
+A training cut is 5.640 s of timeline authored at 20 fps, 19 of them in this career, each ended by
+`CleanUpCutt`, each with 18 tag cut-ins alongside. `GetTrainingCutTimeScale` again returned double its
+argument (5.640 in, 11.280 out), matching run 9's `[3.04, 6.08]`.
+
+**C49. The run boundary chosen for C47 is also not a door this client uses.** `cut runs 0` for the whole
+career while the 19 cuts above ran, because `set_IsPlayingCutt(playing)` and `get_IsPlayingCutt()` are both
+silent, as are `UpdateTrainingCutIn`, `FixedUpdateTrainingCutIn`, `LateUpdateTrainingCutIn`,
+`TrainingAsync`, `PlayScenarioTrainingCut`, `PlayTrainingSaboriAsync`, `IsValidTag` on both classes,
+`set_SkipFrame`, `set_IsAutoPlay`, `get_IsAutoPlay`, `IsAutoPlay`, `SetSpeed`, `SkipTimeDirect`,
+`SkipRuntime(frames, keep)`, `get_CurrentTime`, `get_CurrentTimeScale`, `get_WaitingTime`,
+`ResetCurrentTime`, `GetTotalFrameCeil`, `get_CurrentFrame`, `WaitTap`, `CoroutineDoTweenTimeScale`,
+`ExistPlayingFrame`, `GetIntervalOutBegine`, `WillRankUpInHighSpeedMode`. 29 of 47 counted doors printed no
+call line at all. The pairing that the data supports is `PlayTrainingCut` open to `CleanUpCutt` close.
+
+**C50. The story event probe's open door is not `CutInHelper::Play` either.** `Play(timeline, parent)` and
+`OnPlayCutIn(timeline, parent)` are silent, `cut-ins 0`, while the cut-in engine was busy all career:
+
+```
+CutInHelper::IsPlaying()=54 peak 1.000
+CutInHelper::GetTotalTime()=757 peak 5.667
+CutInHelper::CleanupPlaying()=36
+ContextExtension::SetTimeAll(helpers, time)=1512 peak 5.667
+ContextExtension::SkipPause(helpers)=756
+ContextExtension::FixedUpdateForHighSpeed(helpers)=4769
+ContextExtension::FixedUpdateForHighSpeed(helpers, rate)=598 peak 11.280
+ContextExtension::SkipRuntimeAll(helpers)=4
+```
+
+`ContextExtension::GetCurrentTime`, `CutInHelper::GetTargetSpeed`, `CutInHelper::FixedUpdateForHighSpeed(rate)`
+and `CutInHelper::SetCurrentFrame` are silent.
+
+**C51. The training scaling doors the mod already installs were never called.**
+`TrainingFooter.GetItemAnimDuration=0 TrainingFooter.GetCloseAnimWaitTime=0 TrainingCuttClip.get_DelayTime=0
+SingleModeUtils.GetHighSpeedPlayDuration=0 SingleModeUtils.GetCutTimeScale=0`. Whatever this fork has been
+scaling on the training screen is not the path the client takes; the path it takes runs through
+`GetTargetSpeed`, `GetTrainingCutTimeScale` and `CutInTimelineController::UpdateSpeed`, which are measured and
+not scaled.
+
+Story stayed quiet in this career, as its dwell shows: `IsStoryEndFrameOrGrandLiveWaitFrameSkipped=10284`,
+`get_WaitFrameCountUntilNextBlock=556`, `UpdateTimeScaleByHispeedType=229`, all the wait frame setters 0,
+story high speed mode engaged 0, 7 writes. No story event screen was visited, so the story event doors still
+have no data.
+
+The allowlist delivered what it was for. `introspect.log` for this run is 1,966,611 bytes for
+534 classes (34 from the allowlist), 15,772 methods, 11,455 fields, and it now contains full blocks for
+`Gallop.StoryViewController` (418 lines), `Gallop.StorySceneController` (133),
+`Gallop.StoryEventMissionViewController` (640), `Gallop.StoryCharacterFade` (61),
+`Gallop.SingleModeMainViewController`, `Gallop.SingleModeMainViewHpGauge` (74) and
+`Gallop.SingleModeLogItem` (109). C44 is still open: this is 1.97 MB at launch, and the next allowlist
+increase has to be watched against it.
+
+
+
+### The build run 10 carried (deployed 2026-10-08 19:56)
 
 Four commits, one per concern: `0e98898` (the generic parameter matcher), `19e741c` (the training cut probe
 rebuilt on the doors the run 9 dump named), `1840ef2` (`StoryEventProbe.rs` and its registration), `eb92734`
@@ -1797,26 +1960,22 @@ the resolver that answers them is the one whose wrapper declares a pointer.
 this step; it is scheduled for after the feature work, so the ABI and pairing claims above are backed by the
 dump and the tests, not yet by a reviewer.
 
-What run 10 has to show before any training or story number is scaled:
+What run 10 answered from that list:
 
-1. `Cutt probe: X of 47 observe only probes installed` and, in particular, that
-   `TrainingParamChangeUI::InitializePlateList` is no longer in the "no class or no matching overload" line
-   (C48).
-2. `Cutt probe: cut run N closed at T ms in view V B as K` lines. If `cut runs` is 0 again while
-   `set_IsPlayingCutt` shows calls, the flag is written somewhere the probe is not reading, and that is a new
-   finding rather than a fast game.
-3. `Cutt probe cut kinds:` with a `friendship cut` count, which is the number run 9 could not produce at all
-   (A28).
-4. `Cutt probe totals` carrying `CutInTimelineController::GetTotalTime` and `get_Speed` peaks, which say how
-   long the game thinks a cut is and what rate it already plays it at (A29).
-5. `Story event probe: X of 14 observe only hooks installed` and its two totals lines, on a session that
-   actually plays a story event, since run 9 spent 7.8 s on Story out of 617.5 s.
-6. `introspect.log` full dumps for the five story classes that were just allowlisted. The log was 1,921,600
-   bytes for 527 classes in run 9, so this run also has to show the dump stayed readable (C44).
+1. Answered. `Cutt probe: 50 of 47 observe only probes installed` (50 doors, 47 counted, three feeding the self
+   report), no "no class or no matching overload" line at all, and `InitializePlateList` installed and reached.
+2. Answered, and negatively: `cut runs 0` while the cuts ran, and `set_IsPlayingCutt` never showed a call (C49).
+3. Not answered. `Cutt probe cut kinds:` printed no kind, because `IsValidTag` on both classes was silent and no
+   run closed to attribute.
+4. Answered. `GetTotalTime()=19 peak 5.640` and `TrainingCutStatus::PlayIn` duration peak 5.640, with
+   `get_TargetFps` read as 20. `get_Speed` was silent.
+5. Partly answered. `Story event probe: 14 of 14 observe only hooks installed` and its totals lines printed, but no
+   story event screen was opened, and the cut-in entry door is missing (C50).
+6. Answered. 1,966,611 bytes for 534 classes with 34 allowlisted, and the four story classes present.
 
-In the fix order list, items 39, 40, 41 and 42 moved from `[ ]` to `[~]` in this edit: each is built, deployed and
-tested, and each still lacks the run that closes it. None of them is `[x]`, and item 34 stays `[ ]`. The list now
-reads 11 `[x]`, 16 `[~]`, 5 `[ ]`.
+Bracketed status after this edit: 12 `[x]`, 21 `[~]`, 54 `[ ]`, 3 `[latent]` as bullet items. In the fix order list
+item 40 moved to `[x]` on the strength of the run, items 39, 41 and 42 stay `[~]`, and items 43 to 46 are new `[ ]`.
+The fix order list now reads 12 `[x]`, 15 `[~]`, 9 `[ ]`.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
