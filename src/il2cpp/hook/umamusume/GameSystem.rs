@@ -43,6 +43,9 @@ fn apply_free_camera_live_pause_request() {
 }
 
 extern "C" fn GameSystem_Update(this: *mut Il2CppObject) {
+    // First thing in the detour, so the gap measured is the gap between two of the game's own ticks and
+    // not the gap this probe spent working inside one.
+    super::GameFrameProbe::observe_frame();
     crate::core::gui::race_slider_drain();
     Hachimi::instance().drain_skill_data_desc_rebuild();
     crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply_if_dirty();
@@ -52,6 +55,7 @@ extern "C" fn GameSystem_Update(this: *mut Il2CppObject) {
     // The training cut-in measurement reports on the same tick and on the same quiet path rule.
     super::TrainingCuttProbe::report_if_due();
     super::StoryEventProbe::report_if_due();
+    super::GameFrameProbe::report_if_due();
 
     #[cfg(target_os = "windows")]
     {

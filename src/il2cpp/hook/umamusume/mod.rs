@@ -90,6 +90,7 @@ pub mod SingleModeResultContentBase;
 mod StoryFrameProbe;
 mod TrainingCuttProbe;
 mod StoryEventProbe;
+mod GameFrameProbe;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -382,4 +383,6 @@ pub fn init() {
     // And for the cut-in a story or story event screen drops into its text, which runs through
     // `CutInHelper` and the static extension doors rather than the training cut controller.
     StoryEventProbe::init(image);
+    // No hooks, only the switch the frame clock in GameSystem_Update reads.
+    GameFrameProbe::init();
 }
