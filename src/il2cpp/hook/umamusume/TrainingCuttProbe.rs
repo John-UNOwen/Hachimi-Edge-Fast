@@ -353,8 +353,9 @@ pub(crate) fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
     }
 }
 
-// One view read per cut run, not per frame. `GetCurrentViewId` is the method the mod already resolves
-// for other features, and its wrapper refuses an unresolved address instead of jumping to 0 (C1).
+// Asked for by a cut run and, since the frame clock, by every game tick. `GetCurrentViewId` is the
+// method the mod already resolves for other features, and its wrapper refuses an unresolved address
+// instead of jumping to 0 (C1). The per tick caller is why `SceneManager::instance` caches its method.
 pub(crate) fn current_view_id() -> i32 {
     let scene_manager = SceneManager::instance();
 
