@@ -1640,27 +1640,34 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
     in run 8. Run 9 printed no call line for those five either, and their counters ride on the probe totals line from
     `v0.32.0-974da9c`.
 
-39. [ ] Rebuild the cut run boundary on the game's own state instead of a guessed method. `set_IsPlayingCutt/1` and
+39. [~] Rebuild the cut run boundary on the game's own state instead of a guessed method. `set_IsPlayingCutt/1` and
     `get_IsPlayingCutt/0` on `SingleModeMainTrainingCuttController` (A28) open and close a cut, and
     `GetTotalTime/0`, `GetTotalFrameCeil/0`, `get_CurrentFrame/0` and `get_Speed/0` on the timeline (A29) say how long
     the game thinks the cut is and how far it has got. Run 9 is the cost of not doing this first (C47). Attribute each
-    run with `IsValidTag/2` (A28) so a friendship cut and a regular one stop sharing one number.
-40. [ ] Re install the probe the matcher threw away. Accept `IL2CPP_TYPE_GENERICINST` in a reference parameter slot for
-    the observe only probes so `TrainingParamChangeUI::InitializePlateList/2` resolves (C48).
-41. [ ] Use the game's own skip and autoplay doors on the training cut before adding any multiplier. Run 9 counted 31
+    run with `IsValidTag/2` (A28) so a friendship cut and a regular one stop sharing one number. All of it is installed
+    in `19e741c` and deployed in `v0.32.0-eb92734`; the run that reads it has not happened yet.
+40. [~] Re install the probe the matcher threw away. Accept `IL2CPP_TYPE_GENERICINST` in a reference parameter slot for
+    the observe only probes so `TrainingParamChangeUI::InitializePlateList/2` resolves (C48). Landed in `0e98898`: the
+    widening lives in `symbols::param_type_accepts`, runs only as a second pass behind the exact walk, and only the two
+    new `resolve_generic_ref_method` / `resolve_static_generic_ref_method` profiles ask for it. Whether that install line
+    now succeeds is the run's to report.
+41. [~] Use the game's own skip and autoplay doors on the training cut before adding any multiplier. Run 9 counted 31
     `WaitTapAsync` and 31 `FadeOutResultFlash`, `Skip` asked 16 times with false, and the cut already runs at up to
     8.334. `IsAutoPlay/0` on the cutt controller, `get_IsAutoPlay/0` with `set_IsAutoPlay/1` on the timeline,
     `set_SkipFrame/1 -> void(int)`, and `field PLAY_SPEED_FOR_SKIP` beside `_forceTapWait` on `TrainingParamChangeUI`
     (A28, A29) are the paths the game itself uses. This is the same shape as the result screen auto skip in section 8
-    item 4: go through the game's own skip, never past it.
-42. [ ] Probe the story event the same way. `Gallop.StoryViewController` carries `SkipStory/0`, `SetTimelineIsPlaying/0`,
-    `OnSetCurrentTime/1 -> void(float)`, `SkipTrainingCutt/0`, `OnStartTrainingCutt/1`, `OnPreloadTrainingCutt/1`,
-    `GetOriginalRaceAnimationWaitTime/0 -> float()`, `FadeCharacterAysnc/3 -> IEnumerator(bool,
-    List<EventTimelineModelController>, float)` with a `public float duration` field on its coroutine,
-    `PlayParameterChangeAsync` with a `public float delay` field, and the constants `DELAY_AFTER_PARAMETER_CHANGE` and
-    `SINGLE_MODE_STILL_FADE_TIME`. Run 9 spent only 7.8 s on Story out of 617.5 s, so the story event is worth measuring
-    on a session that actually plays one, and the probe should read the same shape as `StoryFrameProbe`: counts, peaks,
-    and the game's own totals.
+    item 4: go through the game's own skip, never past it. The doors are counted now, and nothing is written through
+    them: the option was deliberately left unimplemented until a run says which door the game uses.
+42. [~] Probe the story event the same way. `StoryEventProbe.rs` (`1840ef2`) measures the cut-in a story or story event
+    plays through `Gallop.CutInHelper` (`Play`, `OnPlayCutIn`, `IsPlaying`, `GetTotalTime`, `GetTargetSpeed`,
+    `FixedUpdateForHighSpeed(rate)`, `SetCurrentFrame`, `CleanupPlaying`) and the static extension doors in
+    `Gallop.SingleModeTrainingCutHelperExtension.ContextExtension` (`SkipRuntimeAll`, `SkipPause`, `SetTimeAll`,
+    `GetCurrentTime`, both `FixedUpdateForHighSpeed` overloads), attributed by view with a `story event screen` bucket
+    added for `ViewId.StoryEventMission` 8102. It does not touch `Gallop.StoryViewController`, `StorySceneController`,
+    `StoryEventMissionViewController` or `StoryCharacterFade`, because no dump has ever printed their signatures and a
+    hook written from a name is what C47 is. Those four names are in the `debug_mode` allowlist (`eb92734`) so the next
+    run delivers them. Run 9 spent only 7.8 s on Story out of 617.5 s, so the run that answers this has to be a session
+    that actually plays a story event.
 
 ### Probe build `253458f`, deployed and waiting for a career run (2026-10-08)
 
@@ -1737,9 +1744,79 @@ What the next career run has to show before any training number is scaled, item 
    up past a readable size (C44).
 5. Whether a friendship training happened at all, which run 8 could not answer.
 
-Bracketed status totals after this edit: 11 `[x]`, 19 `[~]`, 47 `[ ]`, 3 `[latent]` as bullet items. In the
-fix order list, items 35, 37 and 38 moved to `[~]` in this edit and item 34 stays `[ ]` because the run
-that answers it has not happened yet.
+### Probe v2 and the story event probe, deployed for run 10 (2026-10-08)
+
+Four commits, one per concern: `0e98898` (the generic parameter matcher), `19e741c` (the training cut probe
+rebuilt on the doors the run 9 dump named), `1840ef2` (`StoryEventProbe.rs` and its registration), `eb92734`
+(the story classes added to the dump allowlist).
+
+Deployed as `cri_mana_vpx.dll` at the game root: `v0.32.0-eb92734`, 29,502,464 bytes, SHA256
+`BAE4343DCD07215F6F3DEDF24F82ED2BBBA45F14BB98282F7D84F6041F4D6C87`, replacing `v0.32.0-974da9c` (29,357,056
+bytes, `FCA6E48B0C8800EA6A1FF396FDC8CB9F340AD2952BFFAF3A86C42993CD169463`). The game was not running when the
+copy happened and `hachimi\config.json` was left alone. The release asset at the `v0.32.0-fork.1` tag stays the
+`d42b6d9` build; a fork.2 release is still deferred until a run has read this one.
+
+Nothing in any of it changes behaviour. Every hook hands its arguments to the original untouched, all of them
+arm only under `debug_mode`, and no new option was added: the scope for this step was measurement only, so the
+game's own skip and autoplay doors are counted rather than driven (item 41).
+
+What the training probe became, from 19 probes to 47:
+
+- The run boundary is `set_IsPlayingCutt/1 -> void(bool)`, the game's own statement that a cut is playing. An
+  open while one is already open closes the running one first, and a close with nothing open is dropped instead
+  of inventing a run. `ResetCurrentTime` stays counted, because run 9 proved a training cut never reaches it
+  (C47).
+- The friendship split is measured instead of guessed: `IsValidTag/2` on the cutt controller and the static
+  `IsValidTag/1` on `SingleModeMainViewTagTrainingCutInPlayer` record what the game answered, and
+  `PlayCutIn/2` on that player decides the kind of the cut that is open, because that is the door a friendship
+  cut is played through. A cut whose answer the game never gave is reported as unknown rather than called
+  regular. A new totals line prints `cut runs by kind` with the wall time of each.
+- The timeline is read for its own numbers: `GetTotalTime`, `GetSpeed`, `GetTotalFrameCeil`, `get_CurrentFrame`
+  and `get_TargetFps` (A29), so a length can come from the game instead of being inferred from wall clock. The
+  skip doors `set_SkipFrame/1` and `set_IsAutoPlay/1` are counted to answer whether the game uses them at all
+  (A30).
+- The doors the mod already scales on the training screen still ride on the totals line, and the new status
+  panel doors (`PlayIn/4` with its duration argument, `PlayOut/2`, `GetIntervalOutBegine/1`,
+  `WillRankUpInHighSpeedMode/0`, `ExistPlayingFrame/0`) are measured for the first time.
+- Labels in the totals line keep their argument list. `SkipRuntime(time)` and `SkipRuntime(frames, keep)` are two
+  different doors and the earlier line printed both under one name; the story probe's test caught the same
+  collision for its two `FixedUpdateForHighSpeed` overloads before it ever reached a log.
+- Buckets gained `story event screen` for `ViewId.StoryEventMission` 8102, so a story event cut-in is no longer
+  reported as "other".
+
+What the story event probe measures, 14 hooks, all of them signatures read out of the run 9 dump:
+`Gallop.CutInHelper` `Play`, `OnPlayCutIn`, `IsPlaying`, `GetTotalTime`, `GetTargetSpeed`,
+`FixedUpdateForHighSpeed(rate)`, `SetCurrentFrame`, `CleanupPlaying`, and the static doors in
+`Gallop.SingleModeTrainingCutHelperExtension.ContextExtension` `SkipRuntimeAll`, `SkipPause`, `SetTimeAll`,
+`GetCurrentTime` and both `FixedUpdateForHighSpeed` overloads. Its wall clock run is explicitly labelled as
+measured from `Play` to `CleanupPlaying`, because that is the pairing it is, and a close that lands before its
+open is dropped. The generic list parameters are exactly what item 40 unlocked: they report `GENERICINST`, and
+the resolver that answers them is the one whose wrapper declares a pointer.
+
+`cargo test --lib` is 76 passed. Both clippy legs are clean with `-D warnings`. No full review pass was run on
+this step; it is scheduled for after the feature work, so the ABI and pairing claims above are backed by the
+dump and the tests, not yet by a reviewer.
+
+What run 10 has to show before any training or story number is scaled:
+
+1. `Cutt probe: X of 47 observe only probes installed` and, in particular, that
+   `TrainingParamChangeUI::InitializePlateList` is no longer in the "no class or no matching overload" line
+   (C48).
+2. `Cutt probe: cut run N closed at T ms in view V B as K` lines. If `cut runs` is 0 again while
+   `set_IsPlayingCutt` shows calls, the flag is written somewhere the probe is not reading, and that is a new
+   finding rather than a fast game.
+3. `Cutt probe cut kinds:` with a `friendship cut` count, which is the number run 9 could not produce at all
+   (A28).
+4. `Cutt probe totals` carrying `CutInTimelineController::GetTotalTime` and `get_Speed` peaks, which say how
+   long the game thinks a cut is and what rate it already plays it at (A29).
+5. `Story event probe: X of 14 observe only hooks installed` and its two totals lines, on a session that
+   actually plays a story event, since run 9 spent 7.8 s on Story out of 617.5 s.
+6. `introspect.log` full dumps for the five story classes that were just allowlisted. The log was 1,921,600
+   bytes for 527 classes in run 9, so this run also has to show the dump stayed readable (C44).
+
+In the fix order list, items 39, 40, 41 and 42 moved from `[ ]` to `[~]` in this edit: each is built, deployed and
+tested, and each still lacks the run that closes it. None of them is `[x]`, and item 34 stays `[ ]`. The list now
+reads 11 `[x]`, 16 `[~]`, 5 `[ ]`.
 
 ## E. Merge with upstream v0.32.0 (`5f89a7e`)
 
