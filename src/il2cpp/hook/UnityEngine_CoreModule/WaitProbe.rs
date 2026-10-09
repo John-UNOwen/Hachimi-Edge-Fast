@@ -166,14 +166,25 @@ const ONE_FLOAT: &[Il2CppTypeEnum] = &[Il2CppTypeEnum_IL2CPP_TYPE_R4];
 const VOID: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_VOID;
 
 // Resolves the constructor of one yield class through the same signature matcher the scaling hooks use.
-// A class or an overload this client does not have reports zero and is left alone rather than guessed at.
-fn resolve_ctor(unity: *const Il2CppImage, namespace: &CStr, class: &CStr) -> usize {
+// `None` and `Some(0)` are different answers and the run reports them apart. The first says the class is not
+// in this build, which is what Unity does with an engine class a build cannot reach. The second says the
+// class is there and its constructor is not the one this wrapper declares.
+fn resolve_ctor(unity: *const Il2CppImage, namespace: &CStr, class: &CStr) -> Option<usize> {
     let class = match get_class(unity, namespace, class) {
         Ok(class) => class,
-        Err(_) => return 0,
+        Err(_) => return None,
     };
 
-    unsafe { AnimationSpeed::resolve_method(class, ".ctor", ONE_FLOAT, VOID) }
+    Some(unsafe { AnimationSpeed::resolve_method(class, ".ctor", ONE_FLOAT, VOID) })
+}
+
+// The word one door deserves, kept out of `init` so the wording a run reads is a testable thing.
+pub(crate) fn door_state(found: Option<usize>) -> &'static str {
+    match found {
+        None => "is not a class in this build",
+        Some(0) => "is there with no constructor this wrapper can stand on",
+        Some(_) => "armed",
+    }
 }
 
 pub fn init(unity: *const Il2CppImage) {
@@ -189,20 +200,21 @@ pub fn init(unity: *const Il2CppImage) {
     let scaled = resolve_ctor(unity, c"UnityEngine", c"WaitForSeconds");
     let realtime = resolve_ctor(unity, c"UnityEngine", c"WaitForSecondsRealTime");
 
-    if scaled != 0 {
-        new_hook!(scaled, WaitForSeconds_ctor);
+    if scaled.unwrap_or(0) != 0 {
+        let addr = scaled.unwrap_or(0);
+        new_hook!(addr, WaitForSeconds_ctor);
     }
 
-    if realtime != 0 {
-        new_hook!(realtime, WaitForSecondsRealTime_ctor);
+    if realtime.unwrap_or(0) != 0 {
+        let addr = realtime.unwrap_or(0);
+        new_hook!(addr, WaitForSecondsRealTime_ctor);
     }
 
-    match (scaled != 0, realtime != 0) {
-        (true, true) => info!("Wait probe: standing on both coroutine wait constructors"),
-        (true, false) => info!("Wait probe: standing on WaitForSeconds only, WaitForSecondsRealTime did not resolve"),
-        (false, true) => info!("Wait probe: standing on WaitForSecondsRealTime only, WaitForSeconds did not resolve"),
-        (false, false) => info!("Wait probe: no coroutine wait constructor resolved, waits are not measured"),
-    }
+    info!(
+        "Wait probe: UnityEngine.WaitForSeconds {}, UnityEngine.WaitForSecondsRealTime {}",
+        door_state(scaled),
+        door_state(realtime)
+    );
 }
 
 // Called from the GameSystem update tick beside the other probe reports. A run that armed no wait prints
@@ -264,5 +276,12 @@ mod tests {
         assert!(report_due(3, -1, 4, 0, REPORT_INTERVAL_SECS));
         assert!(!report_due(15, 3, 9, 4, REPORT_INTERVAL_SECS));
         assert!(report_due(24, 3, 9, 4, REPORT_INTERVAL_SECS));
+    }
+
+    #[test]
+    fn a_class_that_is_absent_and_a_constructor_that_refused_say_different_things() {
+        assert_eq!(door_state(Some(0x1000)), "armed");
+        assert_eq!(door_state(Some(0)), "is there with no constructor this wrapper can stand on");
+        assert_eq!(door_state(None), "is not a class in this build");
     }
 }
