@@ -174,6 +174,25 @@ fn elapsed_ms() -> i64 {
     }
 }
 
+// The per frame post update is the door that says a cut-in runtime is alive. Run 16 logged its last
+// training cut teardown at 09:02:41 and this door still firing at the end of the log, 17,600 calls
+// at 302 s and 21,427 at 322 s, with `ContextExtension::SetTimeAll(helpers, time)` pinned at the
+// cut's own 4.000 s: a runtime that was still being stepped and never terminated. Both high speed
+// options write settings such a runtime reads, and that run's write landed at 09:03:24 inside the
+// window, so a recent tick is the signal those writes wait for. One second is a whole second of
+// frames for a door that fires every frame, so a runtime that stopped advancing stops holding the
+// writes back forever.
+const CUT_IN_TICK_QUIET_MS: i64 = 1000;
+static CUT_IN_TICK_MS: AtomicI64 = AtomicI64::new(-1);
+
+fn a_cut_in_tick_is_recent(last_tick: i64, now: i64) -> bool {
+    last_tick >= 0 && now - last_tick <= CUT_IN_TICK_QUIET_MS
+}
+
+pub(crate) fn cut_in_engine_driving() -> bool {
+    a_cut_in_tick_is_recent(CUT_IN_TICK_MS.load(atomic::Ordering::Relaxed), elapsed_ms())
+}
+
 // A cut-in run only exists when the close lands after its open. A negative open means nothing was
 // playing, and a close that lands before the open is the game clearing a flag that was already clear.
 fn paired_run_milliseconds(opened: i64, now: i64) -> Option<i64> {
@@ -377,6 +396,10 @@ extern "C" fn TrainingCutInHelper_OnTerminateRuntime(this: *mut Il2CppObject, co
 // the time value it is stepped by. The argument is sampled as a peak and written back untouched.
 extern "C" fn TrainingCutInHelper_OnTimelineUpdatePost(this: *mut Il2CppObject, time: f32) {
     TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.observe_peak(&[time as f64], time);
+
+    // The stamp is not measurement. It is what `cut_in_engine_driving` answers from, and it is the
+    // reason the high speed option writes hold off while a cut-in runtime is being stepped.
+    CUT_IN_TICK_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
 
     get_orig_fn!(TrainingCutInHelper_OnTimelineUpdatePost, CutInRateFn)(this, time);
 }
@@ -641,6 +664,23 @@ mod tests {
 
     // Only the tests spell a view out by name; the probe itself reads the id from the game.
     use crate::il2cpp::hook::umamusume::{SceneDefine::ViewId, TrainingCuttProbe::ViewBucket};
+
+    #[test]
+    fn a_recent_cut_in_tick_is_what_holds_a_high_speed_write_back() {
+        // The quiet window is one second, and the door that stamps it fires every frame, so a
+        // runtime that is advancing is held and a runtime that stopped is not. Run 16 is the case
+        // the shape has to catch: its last cut teardown was 09:02:41 and the timeline door was
+        // still firing at 09:04:58, which is a tick 137 seconds old at the moment of the write.
+        assert!(a_cut_in_tick_is_recent(1_000, 1_000));
+        assert!(a_cut_in_tick_is_recent(1_000, 1_999));
+        assert!(!a_cut_in_tick_is_recent(1_000, 2_001));
+        assert!(!a_cut_in_tick_is_recent(1_000, 138_000));
+
+        // Nothing has been stamped, which is the menu and the loading screen. Holding a write back
+        // there would make an option that works look broken.
+        assert!(!a_cut_in_tick_is_recent(-1, 40_000));
+        assert!(!a_cut_in_tick_is_recent(-1, -1));
+    }
 
     #[test]
     fn a_cut_in_run_needs_an_open_that_the_close_follows() {

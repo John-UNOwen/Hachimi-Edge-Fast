@@ -2,7 +2,7 @@ use std::sync::atomic::{self, AtomicBool, AtomicI32};
 
 use crate::{
     core::Hachimi,
-    il2cpp::{hook::umamusume::{AnimationSpeed, SaveDataManager}, symbols::get_method_addr, types::*}
+    il2cpp::{hook::umamusume::{AnimationSpeed, SaveDataManager, StoryEventProbe, TrainingCuttProbe}, symbols::get_method_addr, types::*}
 };
 
 // Story and training High Speed are Gallop settings that the Global options screen does not
@@ -58,6 +58,7 @@ const UNSET: i32 = i32::MIN;
 // instead of re-asserting or restoring them at every scene change.
 static WAS_RAISED: AtomicBool = AtomicBool::new(false);
 static RESTORE_WAIT_WARNED: AtomicBool = AtomicBool::new(false);
+static CUT_HOLD_WARNED: AtomicBool = AtomicBool::new(false);
 static STORY_BASELINE: AtomicI32 = AtomicI32::new(UNSET);
 static TRAINING_BASELINE: AtomicI32 = AtomicI32::new(UNSET);
 static STORY_LAST_WRITTEN: AtomicI32 = AtomicI32::new(UNSET);
@@ -144,8 +145,27 @@ pub fn apply() {
 
     match plan_pass(enabled, WAS_RAISED.load(atomic::Ordering::Acquire)) {
         Pass::Idle => return,
+        // Run 16 is why this pass waits. Its raise landed at 09:00:22 and its restore at 09:03:24,
+        // both while a career screen was up, and the training cut runtime in that run was still
+        // being stepped every frame when the log ended, with this module's own numbers changing
+        // across that window. The settings live on the save loader and in StoryManager's saved
+        // setting, so a write taken at a menu or a story screen is the one the next turn reads, and
+        // a write taken inside a turn is the one run 16 measured. The pass runs again on the next
+        // game tick, so waiting for the screen to move costs a later write rather than losing one.
+        Pass::Raise | Pass::Restore if TrainingCuttProbe::on_a_career_screen() || StoryEventProbe::cut_in_engine_driving() => {
+            warn_cut_hold();
+            return;
+        }
         Pass::Raise => apply_raise(),
         Pass::Restore => apply_restore_with_loader(),
+    }
+}
+
+// Its own slot, so holding a write back does not spend the line that says the save loader is not
+// ready yet. It speaks once per session because the pass runs every few seconds.
+fn warn_cut_hold() {
+    if !CUT_HOLD_WARNED.swap(true, atomic::Ordering::AcqRel) {
+        warn!("HighSpeedSetting: left the story and training settings alone, a career screen was up or a cut in runtime was still being stepped");
     }
 }
 

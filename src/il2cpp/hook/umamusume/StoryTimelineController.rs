@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::{
     core::Hachimi,
     il2cpp::{
-        hook::umamusume::{AnimationSpeed, HighSpeedSetting},
+        hook::umamusume::{AnimationSpeed, HighSpeedSetting, StoryEventProbe},
         symbols::{get_method_addr, GCHandle},
         types::*,
     },
@@ -347,7 +347,21 @@ fn already_written_for_state(applied_generation: usize, state_generation: usize)
 // reported the mode as off, so an off value returns the static to the state the game was in
 // before the write. The pass runs once whatever it decides, the way AnimationSpeed's single
 // restore pass does.
+static RESTORE_HOLD_WARNED: AtomicBool = AtomicBool::new(false);
+
 fn restore_high_speed_type() {
+    // The owed write is not spent by a held pass. A restore that returns after the marker is
+    // consumed would leave this module's value on the static for the rest of the session, and
+    // putting the game's value back while a cut-in runtime is being stepped is the shape run 16
+    // measured, so the pass waits and the next game tick runs it again.
+    if StoryEventProbe::cut_in_engine_driving() {
+        if !RESTORE_HOLD_WARNED.swap(true, atomic::Ordering::AcqRel) {
+            warn!("StoryTimelineController: story high speed restore waiting, a cut in runtime is still being stepped");
+        }
+
+        return;
+    }
+
     if !HIGH_SPEED_WAS_SET.swap(false, atomic::Ordering::AcqRel) {
         return;
     }
@@ -464,6 +478,7 @@ const REASON_ALREADY_ON: usize = 1 << 2;
 const REASON_ATTEMPT: usize = 1 << 3;
 const REASON_ALREADY_WRITTEN: usize = 1 << 4;
 const REASON_NO_SETTER: usize = 1 << 5;
+const REASON_CUT_IN_RUNNING: usize = 1 << 6;
 
 static ENGAGE_REASONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -514,6 +529,15 @@ pub fn engage_high_speed_mode() {
     }
 
     ENGAGE_LAST_SEC.store(now, atomic::Ordering::Relaxed);
+
+    // A cut-in runtime that is still being stepped is the state run 16 stalled in, and this static
+    // is one of the values that runtime reads. The pass is re-run by the next game tick, so waiting
+    // for the cut costs a later write rather than a lost one, and the interval gate above is what
+    // keeps this check off the per tick path.
+    if StoryEventProbe::cut_in_engine_driving() {
+        note_engage(REASON_CUT_IN_RUNNING, "story high speed mode left alone, a cut in runtime is still being stepped");
+        return;
+    }
 
     let target = HighSpeedSetting::GetMaxHighSpeedType();
 

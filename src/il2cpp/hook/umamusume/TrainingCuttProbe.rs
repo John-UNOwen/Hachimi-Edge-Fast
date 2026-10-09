@@ -433,6 +433,17 @@ pub(crate) fn current_view_id() -> i32 {
     SceneManager::GetCurrentViewId(scene_manager)
 }
 
+// Whether the game is standing on one of the career screens this probe already counts as a training
+// session. `high_speed_settings` writes the game's own story and training HighSpeedType values, and
+// run 16 logged its raise at 09:00:22 and its restore at 09:03:24 with one of these screens up,
+// inside a window where a training cut runtime never terminated. Both values live on the save loader
+// and in StoryManager's saved setting, so the write the next turn reads is the one taken before the
+// turn, not the one taken during it. The ids come from the game's own `ViewId`, so a client that
+// moves one shows up here as a compile error rather than as a gate that quietly holds nothing.
+pub(crate) fn on_a_career_screen() -> bool {
+    VIEW_TRAINING.contains(&current_view_id())
+}
+
 // What the game last answered for "do these cards carry a friendship", kept so the cut that opens next
 // can be labelled with the answer that decided it (A28).
 const TAG_UNKNOWN: usize = 0;
@@ -2172,6 +2183,14 @@ mod tests {
         assert_eq!(bucket_for(ViewId::StoryEventMission as i32, false), ViewBucket::StoryEvent);
         assert_eq!(bucket_for(ViewId::GachaMain as i32, false), ViewBucket::Gacha);
         assert_eq!(bucket_for(ViewId::Title as i32, false), ViewBucket::Other);
+
+        // The set a high speed write is held off on has to be the same set the frame clock buckets
+        // as a training session, or the gate and the measurement disagree about what a turn is.
+        assert!(VIEW_TRAINING.contains(&(ViewId::SingleModeMain as i32)));
+        assert!(VIEW_TRAINING.contains(&(ViewId::SingleModeMonthStart as i32)));
+        assert!(VIEW_TRAINING.contains(&(ViewId::SingleModeResult as i32)));
+        assert!(!VIEW_TRAINING.contains(&(ViewId::Story as i32)));
+        assert!(!VIEW_TRAINING.contains(&(ViewId::Title as i32)));
 
         // A skill cut-in inside a race reaches the same timeline controller this probe hooks. It is not
         // a training animation, and the scene check has to win over a view id the table does not name.
