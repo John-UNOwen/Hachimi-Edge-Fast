@@ -54,6 +54,10 @@ extern "C" fn GameSystem_Update(this: *mut Il2CppObject) {
     super::StoryFrameProbe::report_if_due();
     // The training cut-in measurement reports on the same tick and on the same quiet path rule.
     super::TrainingCuttProbe::report_if_due();
+    // What the training cut's own coroutine was waiting on, and how long the game armed each coroutine
+    // wait for, on the same rule.
+    super::CutStateProbe::report_if_due();
+    crate::il2cpp::hook::UnityEngine_CoreModule::WaitProbe::report_if_due();
     super::StoryEventProbe::report_if_due();
     super::GameFrameProbe::report_if_due();
 

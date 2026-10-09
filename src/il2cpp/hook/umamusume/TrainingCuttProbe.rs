@@ -1426,7 +1426,13 @@ extern "C" fn TrainingCutt_PlayTrainingCut(this: *mut Il2CppObject, info: *mut I
     CUTT_PLAY_TRAINING_CUT.count();
     open_cut_run();
 
-    get_orig_fn!(TrainingCutt_PlayTrainingCut, PlayTrainingCutFn)(this, info)
+    // The coroutine the game just built is the state machine of the whole cut, and the values it captured
+    // are the ones the game computed for this cut. They are read after the original ran, and the object is
+    // handed back exactly as it came (CutStateProbe).
+    let coroutine = get_orig_fn!(TrainingCutt_PlayTrainingCut, PlayTrainingCutFn)(this, info);
+    super::CutStateProbe::note_play_training_cut(coroutine);
+
+    coroutine
 }
 
 extern "C" fn TrainingCutt_PlayScenarioTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {

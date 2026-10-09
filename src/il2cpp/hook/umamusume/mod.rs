@@ -89,6 +89,7 @@ pub mod AnimationSpeed;
 pub mod SingleModeResultContentBase;
 mod StoryFrameProbe;
 mod TrainingCuttProbe;
+mod CutStateProbe;
 mod StoryEventProbe;
 mod GameFrameProbe;
 mod LowResolutionCamera;
@@ -379,6 +380,11 @@ pub fn init() {
     // Also diagnostic only: the same shape of measurement for the training screen's cut-in, so a
     // friendship training animation has a number in front of any decision to speed it up.
     TrainingCuttProbe::init(image);
+
+    // And the same again one level down, on the coroutine the training turn waits on: the values the game
+    // computed for the cut, and the branch of that coroutine the game sits in while the turn takes its
+    // time. Observe only, and installed after the door it reads the coroutine object from.
+    CutStateProbe::init(image);
 
     // And for the cut-in a story or story event screen drops into its text, which runs through
     // `CutInHelper` and the static extension doors rather than the training cut controller.

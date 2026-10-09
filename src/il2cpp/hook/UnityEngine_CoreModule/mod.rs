@@ -32,6 +32,7 @@ pub mod Screen;
 pub mod SceneManager;
 pub mod Scene;
 pub mod Time;
+pub mod WaitProbe;
 
 pub const HideFlags_DontUnloadUnusedAsset: i32 = 32;
 
@@ -67,6 +68,10 @@ pub fn init() {
     Shader::init(image);
     Screen::init(image);
     Time::init(image);
+
+    // Diagnostic only, and only when debug_mode is on: counts the waits a coroutine parks on, which is the
+    // half of a training turn that neither the tween clock nor `time_scale` reaches.
+    WaitProbe::init(image);
 
     #[cfg(target_os = "android")]
     {
