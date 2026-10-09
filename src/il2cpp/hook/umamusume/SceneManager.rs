@@ -2,7 +2,7 @@ use std::sync::atomic::{self, AtomicBool};
 use crate::{
     core::{Hachimi, game::Region},
     il2cpp::{
-        symbols::{get_field_from_name, get_method_addr, SingletonLike},
+        symbols::{get_field_from_name, get_method, get_method_addr, SingletonLike},
         types::*
     }
 };
@@ -23,10 +23,25 @@ pub fn class() -> *mut Il2CppClass {
     unsafe { CLASS }
 }
 
+// `get_Instance` resolved once, kept as a number because a static cannot hold a raw pointer. The frame
+// clock asks for the singleton once per game tick, and `SingletonLike::new` finds the method by walking
+// the class's method table, which is a lookup per tick for no information the class does not already give.
+static mut GET_INSTANCE_METHOD: usize = 0;
+
 pub fn instance() -> *mut Il2CppObject {
-    let Some(singleton) = SingletonLike::new(class()) else {
-        return 0 as _;
+    let cached = unsafe { GET_INSTANCE_METHOD };
+
+    // The uncached route stays available for a call that arrives before init resolved anything.
+    let singleton = if cached != 0 {
+        SingletonLike::from_method_ptr(cached)
+    }
+    else {
+        match SingletonLike::new(class()) {
+            Some(singleton) => singleton,
+            None => return 0 as _,
+        }
     };
+
     singleton.instance()
 }
 
@@ -153,6 +168,9 @@ pub fn init(umamusume: *const Il2CppImage) {
 
     unsafe {
         CLASS = SceneManager;
+        GET_INSTANCE_METHOD = get_method(SceneManager, c"get_Instance", 0)
+            .map(|method| method as usize)
+            .unwrap_or(0);
         GETCURRENTVIEWID_ADDR = get_method_addr(SceneManager, c"GetCurrentViewId", 0);
         GETCURRENTSCENEID_ADDR = get_method_addr(SceneManager, c"GetCurrentSceneId", 0);
         PHOTOCHECKOBJECT_FIELD = get_field_from_name(SceneManager, c"PhotoCheckObject");

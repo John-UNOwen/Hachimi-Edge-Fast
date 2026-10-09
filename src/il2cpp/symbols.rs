@@ -640,6 +640,15 @@ impl SingletonLike {
         })
     }
 
+    /// Rebuilds a `SingletonLike` from a `MethodInfo` pointer kept as a `usize`. A path that asks for a
+    /// singleton on every game tick cannot hold the pointer in a static (a raw pointer is not `Sync`),
+    /// but it can hold the number, and that lets the method be resolved once instead of by name per call.
+    pub const fn from_method_ptr(method: usize) -> Self {
+        Self {
+            get_instance_method: method as *const MethodInfo
+        }
+    }
+
     pub fn instance(&self) -> *mut Il2CppObject {
         let mut exc: *mut Il2CppException = null_mut();
         let obj = il2cpp_runtime_invoke(
