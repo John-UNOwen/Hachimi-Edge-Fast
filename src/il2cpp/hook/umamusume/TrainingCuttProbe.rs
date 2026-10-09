@@ -77,6 +77,17 @@ const FRAMES_AND_FLAG: &[Il2CppTypeEnum] = &[I4, BOOL];
 const LIST_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, CLASS];
 // `PlayOut/2 -> void(bool, class<System.Action>)`.
 const FLAG_AND_ACTION: &[Il2CppTypeEnum] = &[BOOL, CLASS];
+// `InitializeFlash/4 -> void(generic<List<ChangeParameterInfo>>, float, bool, class<Canvas>)` and
+// `PlayParameterChangeAsync/2 -> IEnumerator(generic<List<ChangeParameterInfo>>, float)`. Both are
+// reference plus float doors, and the generic half only resolves through the generic matcher (C48).
+const LIST_AND_INTERVAL: &[Il2CppTypeEnum] = &[CLASS, R4];
+const LIST_INTERVAL_FLAG_AND_CANVAS: &[Il2CppTypeEnum] = &[CLASS, R4, BOOL, CLASS];
+// `Initialize/15 -> void(class<RectTransform>, generic<List<ChangeParameterInfo>>, class<Canvas>,
+// class<Action>, float, float, bool, bool, class<HpGauge>, class<MotivationButton>, int, class<Action>,
+// bool, bool, bool)`: the door the caller sets the cascade up through, and the only place the two
+// cascade intervals can be seen as the caller hands them. No struct travels here, which is what makes a
+// fifteen argument wrapper safe to declare (A5).
+const PLATE_INITIALIZE_ARGS: &[Il2CppTypeEnum] = &[CLASS, CLASS, CLASS, CLASS, R4, R4, BOOL, BOOL, CLASS, CLASS, I4, CLASS, BOOL, BOOL, BOOL];
 
 pub(crate) fn bit(flag: bool) -> f64 {
     if flag { 1.0 } else { 0.0 }
@@ -265,7 +276,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 55] = [
+static PROBES: [&CutProbe; 66] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -321,6 +332,17 @@ static PROBES: [&CutProbe; 55] = [
     &PLATE_PLAY_ICON,
     &PLATE_IS_GROUP_PLAY,
     &PLATE_UPDATE,
+    &PLATE_START_SEQUENCE,
+    &PLATE_START_GROUP_TYPEWRITE,
+    &PLATE_START_TYPEWRITE,
+    &PLATE_ON_NEXT_TYPEWRITE,
+    &PLATE_ON_END_TYPE_WRITE,
+    &PLATE_ON_ALL_TYPEWRITE_END,
+    &PLATE_ON_TAP_SCREEN,
+    &PLATE_TAP_BUTTON_ORDER,
+    &PLATE_INITIALIZE_FLASH,
+    &PLATE_INITIALIZE,
+    &STORY_PLAY_PARAMETER_CHANGE,
 ];
 
 // One cut-in run, opened by `ResetCurrentTime` and closed by the next one. The wall clock between the
@@ -475,23 +497,42 @@ static PLATE_GET_IS_AUTO_PLAY: CutProbe = CutProbe::counted("TrainingParamChange
 
 // The plate cascade as the class that builds it exposes it. Run 13 put 10.3 s inside a training cut with
 // six `InitializePlateList(list, interval)` calls at 1.0 s and twelve gauge plays, and the cut timeline
-// reporting 2.4 s of total length, so the wall is the cascade rather than the timeline. Three doors say
-// how the cascade is built: `PlayIcon/2 -> void(int, class<ChangeParameterInfo>)` is the per plate play,
-// `IsGroupPlay/1 -> bool(class<ChangeParameterInfo>)` answers whether the plates were built as one type
-// written group or one at a time, and `Update/0` says whether this UI has a per frame path at all. The
-// two floats the class keeps for itself, `_delay` and `_tapWait`, are read on the spot at the plate list
-// door and never written: a duration hook has to know which number the cascade actually waits on before
-// anything scales it.
+// reporting 2.4 s of total length, so the wall is the cascade rather than the timeline. Run 14 then
+// scaled that interval 20x, reached it 22 times with `1.0 -> 0.05`, and the wall did not move: cut run 1
+// took 12,965 ms with 9,669 ms of it between the cut-in ending and the status playing out, while
+// `PlayIcon` was never reached and `IsGroupPlay` was reached 104 times and `Update` 1,560. So the
+// interval this fork scales is not what paces a cascade the game builds as a group (C54), and the doors
+// below stand on the chain that does: `StartSequence`, `StartGroupTypewrite`, `StartTypewrite(index)`,
+// `OnNextTypewrite`, `OnEndTypeWrite(index)`, `OnAllTypewriteEnd`, `OnTapScreen`, `SetTapButtonOrder`,
+// plus the two entry doors that hand the cascade its timings, `InitializeFlash(list, interval, flag,
+// canvas)` and the owner coroutine `StoryViewController::PlayParameterChangeAsync(list, delay)`. All of
+// them are counted and their arguments handed back untouched: this round is about naming the number the
+// cascade waits on, not shortening one.
 static PLATE_PLAY_ICON: CutProbe = CutProbe::counted("TrainingParamChangeUI::PlayIcon(index, info)");
 static PLATE_IS_GROUP_PLAY: CutProbe = CutProbe::counted("TrainingParamChangeUI::IsGroupPlay(info)");
 static PLATE_UPDATE: CutProbe = CutProbe::counted("TrainingParamChangeUI::Update()");
+static PLATE_START_SEQUENCE: CutProbe = CutProbe::counted("TrainingParamChangeUI::StartSequence()");
+static PLATE_START_GROUP_TYPEWRITE: CutProbe = CutProbe::counted("TrainingParamChangeUI::StartGroupTypewrite()");
+static PLATE_START_TYPEWRITE: CutProbe = CutProbe::counted("TrainingParamChangeUI::StartTypewrite(index)");
+static PLATE_ON_NEXT_TYPEWRITE: CutProbe = CutProbe::counted("TrainingParamChangeUI::OnNextTypewrite()");
+static PLATE_ON_END_TYPE_WRITE: CutProbe = CutProbe::counted("TrainingParamChangeUI::OnEndTypeWrite(index)");
+static PLATE_ON_ALL_TYPEWRITE_END: CutProbe = CutProbe::counted("TrainingParamChangeUI::OnAllTypewriteEnd()");
+static PLATE_ON_TAP_SCREEN: CutProbe = CutProbe::counted("TrainingParamChangeUI::OnTapScreen()");
+static PLATE_TAP_BUTTON_ORDER: CutProbe = CutProbe::counted("TrainingParamChangeUI::SetTapButtonOrder(order)");
+static PLATE_INITIALIZE_FLASH: CutProbe = CutProbe::peaked("TrainingParamChangeUI::InitializeFlash(list, interval, flag, canvas)");
+static PLATE_INITIALIZE: CutProbe = CutProbe::peaked("TrainingParamChangeUI::Initialize(content, list, canvas, action, first, second, ...)");
+static STORY_PLAY_PARAMETER_CHANGE: CutProbe = CutProbe::peaked("StoryViewController::PlayParameterChangeAsync(list, delay)");
 
 def_field_value_accessors!(get plate_ui_delay, PLATE_UI_DELAY_FIELD, f32);
 def_field_value_accessors!(get plate_ui_tap_wait, PLATE_UI_TAP_WAIT_FIELD, f32);
+def_field_value_accessors!(get plate_ui_group_interval, PLATE_UI_GROUP_INTERVAL_FIELD, f32);
+def_field_value_accessors!(get plate_ui_sequence_interval, PLATE_UI_SEQUENCE_INTERVAL_FIELD, f32);
 
-// The spacing of the events that put a stat number on screen, measured only inside an open cut so that a
-// spacing across two turns cannot be read as part of a cut. Two doors feed it: the gauge play run 13
-// proved the game reaches, and the plate class's own per plate play, which is not yet proven.
+// The spacing of the events that put a stat number on screen, measured only inside one window so that a
+// spacing across two turns cannot be read as part of a cut. Run 14 showed the window cannot be the cut
+// alone: it printed `gauge plays 0` and `plate icon plays 0` while the same run counted 21 gauge plays
+// and 22 plate list calls, because the cascade runs mostly between cuts (C55). The cascade window below
+// is the second window a spacing may count in.
 static GAUGE_PLAY_LAST_MS: AtomicI64 = AtomicI64::new(-1);
 static GAUGE_PLAY_RUNS: AtomicUsize = AtomicUsize::new(0);
 static GAUGE_PLAY_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
@@ -500,6 +541,20 @@ static PLATE_PLAY_LAST_MS: AtomicI64 = AtomicI64::new(-1);
 static PLATE_PLAY_RUNS: AtomicUsize = AtomicUsize::new(0);
 static PLATE_PLAY_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static PLATE_PLAY_WORST_MS: AtomicI64 = AtomicI64::new(0);
+
+// One cascade of stat plates: opened by the first `InitializePlateList` after the previous one ended,
+// closed by `OnAllTypewriteEnd` or by the cut teardown. Run 14 measured the wall clock *between* plate
+// list calls (21 steps, 5,129.3 ms mean) but never how long one cascade took, which is the difference
+// between a cascade that runs for 5 s and a game that starts a new cascade every 5 s. The typewrite
+// spacing is the same question one level down: how far apart the plates inside one cascade arrive.
+static PLATE_PASS_OPEN_MS: AtomicI64 = AtomicI64::new(-1);
+static PLATE_PASS_RUNS: AtomicUsize = AtomicUsize::new(0);
+static PLATE_PASS_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static PLATE_PASS_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static PLATE_TYPEWRITE_LAST_MS: AtomicI64 = AtomicI64::new(-1);
+static PLATE_TYPEWRITE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static PLATE_TYPEWRITE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static PLATE_TYPEWRITE_WORST_MS: AtomicI64 = AtomicI64::new(0);
 
 // A span from a door the game reached to the point the run ended, guarded against a request that never
 // happened or landed after the close. Kept apart from the callers so the guard is a test.
@@ -522,15 +577,32 @@ fn gap_legs(close_ms: i64, first_plate_ms: i64, last_plate_ms: i64, open_ms: i64
     Some((before, plate, after))
 }
 
-/// The spacing between two stat plate events, or none when they do not both sit inside one open cut. An
-/// event from before the cut opened has no partner inside it, and the first event after the open has no
-/// partner yet; either one read as a spacing would charge the idle between turns to the cut.
+/// The spacing between two stat plate events, or none when they do not both sit inside one window. An
+/// event from before the window opened has no partner inside it, and the first event after the open has
+/// no partner yet; either one read as a spacing would charge the idle between turns to the cut.
 fn play_cadence_ms(opened_ms: i64, last_ms: i64, now_ms: i64) -> Option<i64> {
     if opened_ms < 0 || last_ms < opened_ms {
         return None;
     }
 
     span_from(last_ms, now_ms)
+}
+
+/// Which window a plate spacing belongs to: the open cut, or the open plate cascade, whichever already
+/// held the earlier event. Run 14 measured no spacing at all with the cut as the only window while the
+/// run counted 21 gauge plays and 22 plate list calls, because the cascade is built in the idle between
+/// cuts as often as inside one (C55). A window that holds neither event reports -1 and the spacing is
+/// dropped rather than guessed at.
+fn cadence_window_open_ms(cut_open_ms: i64, pass_open_ms: i64, last_ms: i64) -> i64 {
+    if cut_open_ms >= 0 && last_ms >= cut_open_ms {
+        return cut_open_ms;
+    }
+
+    if pass_open_ms >= 0 && last_ms >= pass_open_ms {
+        return pass_open_ms;
+    }
+
+    -1
 }
 
 fn elapsed_ms() -> i64 {
@@ -661,6 +733,10 @@ fn close_cut_run() {
     // carried into it.
     GAP_PLATE_FIRST_MS.store(-1, atomic::Ordering::Relaxed);
     GAP_PLATE_LAST_MS.store(-1, atomic::Ordering::Relaxed);
+
+    // The teardown is also where a cascade that never reported its typewrite end stops being open. A
+    // window left open would charge the next turn's first plate event to the cascade before it.
+    close_plate_pass();
 
     if runs <= PROBE_DETAIL_LIMIT {
         let tap = match tap_ms {
@@ -828,7 +904,13 @@ extern "C" fn TrainingCutt_FadeOutResultFlash(this: *mut Il2CppObject) {
 pub(crate) fn note_plate_call(this: *mut Il2CppObject, interval: f32) {
     if START.get().is_some() {
         PLATE_INITIALIZE_LIST.observe_peak(
-            &[interval as f64, plate_ui_delay(this) as f64, plate_ui_tap_wait(this) as f64],
+            &[
+                interval as f64,
+                plate_ui_delay(this) as f64,
+                plate_ui_tap_wait(this) as f64,
+                plate_ui_group_interval(this) as f64,
+                plate_ui_sequence_interval(this) as f64,
+            ],
             interval,
         );
     }
@@ -837,6 +919,7 @@ pub(crate) fn note_plate_call(this: *mut Il2CppObject, interval: f32) {
     }
 
     record_plate_step();
+    open_plate_pass();
 }
 
 // `PlayIcon/2 -> void(int, class<Gallop.TrainingParamChangeUI.ChangeParameterInfo>)`: the per plate play
@@ -869,6 +952,139 @@ extern "C" fn TrainingParamChangeUI_Update(this: *mut Il2CppObject) {
     get_orig_fn!(TrainingParamChangeUI_Update, PlateUpdateFn)(this);
 }
 
+// The chain the plate class walks once the list exists: `StartSequence/0`, `StartGroupTypewrite/0`,
+// `StartTypewrite/1 -> void(int)`, `OnNextTypewrite/0`, `OnEndTypeWrite/1 -> void(int)`,
+// `OnAllTypewriteEnd/0`, `OnTapScreen/0` and `SetTapButtonOrder/1 -> void(int)`. Run 14 reached
+// `IsGroupPlay` 104 times and `Update` 1,560 while `PlayIcon` was never reached at all, so the group
+// path is the one this client walks and these are the doors that pace it. Every argument is handed back
+// untouched. `OnTapScreen` matters for a different reason: if the cascade advances on taps, the wall
+// clock between two plates is partly the player's reaction and no duration hook owns it.
+type PlateVoidFn = extern "C" fn(this: *mut Il2CppObject);
+extern "C" fn TrainingParamChangeUI_StartSequence(this: *mut Il2CppObject) {
+    PLATE_START_SEQUENCE.count();
+
+    get_orig_fn!(TrainingParamChangeUI_StartSequence, PlateVoidFn)(this);
+}
+
+extern "C" fn TrainingParamChangeUI_StartGroupTypewrite(this: *mut Il2CppObject) {
+    PLATE_START_GROUP_TYPEWRITE.count();
+    open_plate_pass();
+
+    get_orig_fn!(TrainingParamChangeUI_StartGroupTypewrite, PlateVoidFn)(this);
+}
+
+extern "C" fn TrainingParamChangeUI_StartTypewrite(this: *mut Il2CppObject, index: i32) {
+    PLATE_START_TYPEWRITE.observe(&[index as f64]);
+    record_typewrite_cadence();
+
+    get_orig_fn!(TrainingParamChangeUI_StartTypewrite, PlateIntFn)(this, index);
+}
+
+extern "C" fn TrainingParamChangeUI_OnNextTypewrite(this: *mut Il2CppObject) {
+    PLATE_ON_NEXT_TYPEWRITE.count();
+
+    get_orig_fn!(TrainingParamChangeUI_OnNextTypewrite, PlateVoidFn)(this);
+}
+
+extern "C" fn TrainingParamChangeUI_OnEndTypeWrite(this: *mut Il2CppObject, index: i32) {
+    PLATE_ON_END_TYPE_WRITE.observe(&[index as f64]);
+
+    get_orig_fn!(TrainingParamChangeUI_OnEndTypeWrite, PlateIntFn)(this, index);
+}
+
+extern "C" fn TrainingParamChangeUI_OnAllTypewriteEnd(this: *mut Il2CppObject) {
+    PLATE_ON_ALL_TYPEWRITE_END.count();
+    close_plate_pass();
+
+    get_orig_fn!(TrainingParamChangeUI_OnAllTypewriteEnd, PlateVoidFn)(this);
+}
+
+extern "C" fn TrainingParamChangeUI_OnTapScreen(this: *mut Il2CppObject) {
+    PLATE_ON_TAP_SCREEN.count();
+
+    get_orig_fn!(TrainingParamChangeUI_OnTapScreen, PlateVoidFn)(this);
+}
+
+type PlateIntFn = extern "C" fn(this: *mut Il2CppObject, value: i32);
+extern "C" fn TrainingParamChangeUI_SetTapButtonOrder(this: *mut Il2CppObject, order: i32) {
+    PLATE_TAP_BUTTON_ORDER.observe(&[order as f64]);
+
+    get_orig_fn!(TrainingParamChangeUI_SetTapButtonOrder, PlateIntFn)(this, order);
+}
+
+// `InitializeFlash/4 -> void(generic<List<ChangeParameterInfo>>, float, bool, class<Canvas>)`: the sibling
+// cascade of flash objects the same UI builds, and the second door that takes a timing from its caller.
+// The float is recorded and handed back untouched this round: `TrainingParamChangeA2U.ANIMATION_TIME_HIGH_
+// SPEED` is a compile time constant, so this argument is the only route to the flash pacing that a hook
+// can take, and a route has to be measured before it is shortened.
+type PlateFlashFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32, flag: bool, canvas: *mut Il2CppObject);
+extern "C" fn TrainingParamChangeUI_InitializeFlash(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32, flag: bool, canvas: *mut Il2CppObject) {
+    PLATE_INITIALIZE_FLASH.observe_peak(&[interval as f64, bit(flag)], interval);
+
+    get_orig_fn!(TrainingParamChangeUI_InitializeFlash, PlateFlashFn)(this, list, interval, flag, canvas);
+}
+
+// `Initialize/15`, the setup door. Its two floats are recorded in the order the dump spells them and
+// handed back untouched. Read together with the plate list door, which prints `_delay`, `_tapWait`,
+// `_groupInterval` and `_sequenceInterval` as the cascade is built, this says which argument the game
+// stores in which field. That mapping is the difference between scaling the number the cascade waits on
+// and scaling the one it only borrows, which is what run 14 could not tell (C54).
+type PlateInitializeFn = extern "C" fn(
+    this: *mut Il2CppObject,
+    content: *mut Il2CppObject,
+    list: *mut Il2CppObject,
+    canvas: *mut Il2CppObject,
+    action: *mut Il2CppObject,
+    first: f32,
+    second: f32,
+    flag_first: bool,
+    flag_second: bool,
+    hp_gauge: *mut Il2CppObject,
+    motivation_button: *mut Il2CppObject,
+    order: i32,
+    on_end: *mut Il2CppObject,
+    flag_third: bool,
+    flag_fourth: bool,
+    flag_fifth: bool,
+);
+extern "C" fn TrainingParamChangeUI_Initialize(
+    this: *mut Il2CppObject,
+    content: *mut Il2CppObject,
+    list: *mut Il2CppObject,
+    canvas: *mut Il2CppObject,
+    action: *mut Il2CppObject,
+    first: f32,
+    second: f32,
+    flag_first: bool,
+    flag_second: bool,
+    hp_gauge: *mut Il2CppObject,
+    motivation_button: *mut Il2CppObject,
+    order: i32,
+    on_end: *mut Il2CppObject,
+    flag_third: bool,
+    flag_fourth: bool,
+    flag_fifth: bool,
+) {
+    PLATE_INITIALIZE.observe_peak(&[first as f64, second as f64], first);
+
+    get_orig_fn!(TrainingParamChangeUI_Initialize, PlateInitializeFn)(
+        this, content, list, canvas, action, first, second, flag_first, flag_second, hp_gauge, motivation_button, order, on_end, flag_third, flag_fourth, flag_fifth,
+    );
+}
+
+// `PlayParameterChangeAsync/2 -> IEnumerator(generic<List<ChangeParameterInfo>>, float)`, on
+// `Gallop.StoryViewController`: the owner coroutine that runs the stat change presentation, and the dump
+// spells its float as a `delay` inside the coroutine state machine. It is the level above the plate list,
+// so its value is the one that says whether the wait between two cascades belongs to the plates or to the
+// controller that queues them. The pointer the coroutine object comes back on is the game's and is handed
+// back untouched.
+type PlayParameterChangeFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, delay: f32) -> *mut Il2CppObject;
+extern "C" fn StoryViewController_PlayParameterChangeAsync(this: *mut Il2CppObject, list: *mut Il2CppObject, delay: f32) -> *mut Il2CppObject {
+    STORY_PLAY_PARAMETER_CHANGE.observe_peak(&[delay as f64], delay);
+
+    get_orig_fn!(StoryViewController_PlayParameterChangeAsync, PlayParameterChangeFn)(this, list, delay)
+}
+
 // The wall clock between two `InitializePlateList` calls is what the interval the game passed actually
 // buys. Run 11 read the float as 1.5 and 1.0 across 370 calls and never said what those seconds cost,
 // which is the difference between a duration this fork can scale and a number it must not touch.
@@ -896,9 +1112,10 @@ fn record_plate_step() {
     }
 }
 
-// One stat plate event. The spacing to the previous one is recorded only when both sit inside the same
-// open cut. The gauge play run 13 proved the game reaches and the plate class's own per plate play share
-// one recorder so the two doors are compared on one report line rather than each inventing a window.
+// One stat plate event. The spacing to the previous one is recorded only when both sit inside one window,
+// the open cut or the open cascade. The gauge play run 13 proved the game reaches and the plate class's
+// own per plate play share one recorder so the two doors are compared on one report line rather than each
+// inventing a window.
 fn record_play_cadence(last_ms: &AtomicI64, runs: &AtomicUsize, total_ms: &AtomicI64, worst_ms: &AtomicI64) {
     let now = elapsed_ms();
 
@@ -906,13 +1123,55 @@ fn record_play_cadence(last_ms: &AtomicI64, runs: &AtomicUsize, total_ms: &Atomi
         return;
     }
 
-    let opened_ms = RUN_OPENED_MS.load(atomic::Ordering::Relaxed);
     let previous_ms = last_ms.swap(now, atomic::Ordering::Relaxed);
+    let opened_ms = cadence_window_open_ms(
+        RUN_OPENED_MS.load(atomic::Ordering::Relaxed),
+        PLATE_PASS_OPEN_MS.load(atomic::Ordering::Relaxed),
+        previous_ms,
+    );
 
     if let Some(step_ms) = play_cadence_ms(opened_ms, previous_ms, now) {
         runs.fetch_add(1, atomic::Ordering::Relaxed);
         total_ms.fetch_add(step_ms, atomic::Ordering::Relaxed);
         worst_ms.fetch_max(step_ms, atomic::Ordering::Relaxed);
+    }
+}
+
+// A cascade of plates is open from its first plate list call to its last typewrite end. It is not the
+// same window as a cut: run 14 built most of its plates in the idle between cuts, which is exactly why
+// the cut window alone measured nothing.
+fn open_plate_pass() {
+    if PLATE_PASS_OPEN_MS.load(atomic::Ordering::Relaxed) < 0 {
+        PLATE_PASS_OPEN_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+    }
+}
+
+fn close_plate_pass() {
+    let opened = PLATE_PASS_OPEN_MS.swap(-1, atomic::Ordering::Relaxed);
+    PLATE_TYPEWRITE_LAST_MS.store(-1, atomic::Ordering::Relaxed);
+
+    if let Some(span_ms) = span_from(opened, elapsed_ms()) {
+        PLATE_PASS_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        PLATE_PASS_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
+        PLATE_PASS_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
+    }
+}
+
+// How far apart the plates of one cascade arrive. The window is the cascade itself, so a spacing between
+// two cascades is charged to the passes clock instead of to this one.
+fn record_typewrite_cadence() {
+    let now = elapsed_ms();
+
+    if now < 0 {
+        return;
+    }
+
+    let previous_ms = PLATE_TYPEWRITE_LAST_MS.swap(now, atomic::Ordering::Relaxed);
+
+    if let Some(step_ms) = play_cadence_ms(PLATE_PASS_OPEN_MS.load(atomic::Ordering::Relaxed), previous_ms, now) {
+        PLATE_TYPEWRITE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        PLATE_TYPEWRITE_MS_TOTAL.fetch_add(step_ms, atomic::Ordering::Relaxed);
+        PLATE_TYPEWRITE_WORST_MS.fetch_max(step_ms, atomic::Ordering::Relaxed);
     }
 }
 
@@ -1274,15 +1533,24 @@ pub fn init(umamusume: *const Il2CppImage) {
     let hp_gauge = class_for_label(umamusume, "Gallop.SingleModeMainViewHpGauge");
     let main_view = class_for_label(umamusume, "Gallop.SingleModeMainViewController");
     let tag_player = class_for_label(umamusume, "Gallop.SingleModeMainViewTagTrainingCutInPlayer");
+    // The class that owns the stat change presentation for a training turn: its coroutine
+    // `PlayParameterChangeAsync/2` is the level above the plate list door.
+    let story_view = class_for_label(umamusume, "Gallop.StoryViewController");
 
-    // The plate UI keeps its cascade timing in two instance floats. They are resolved next to the door
+    // The plate UI keeps its cascade timing in four instance floats. They are resolved next to the door
     // that reads them, and nothing here writes them: a duration hook has to know which number the
-    // cascade waits on before it is allowed to shorten one. A client that has neither field leaves the
-    // handle null, and the accessor reports a zero rather than a value it never read.
+    // cascade waits on before it is allowed to shorten one. Run 13 read `_delay` at 0.16666746139526367
+    // and `_tapWait` at 0.0 next to a caller handed interval of 1.0, which is how the two cascade
+    // intervals got added to the read: a wall clock between two plate list calls that a 20x shorter
+    // interval did not move (C54) means the number to look at is not the one the caller passes. A client
+    // that has none of these fields leaves the handles null, and the accessors report a zero rather than
+    // a value they never read.
     unsafe {
         if let Some(class) = plate_ui {
             PLATE_UI_DELAY_FIELD = get_field_from_name(class, c"_delay");
             PLATE_UI_TAP_WAIT_FIELD = get_field_from_name(class, c"_tapWait");
+            PLATE_UI_GROUP_INTERVAL_FIELD = get_field_from_name(class, c"_groupInterval");
+            PLATE_UI_SEQUENCE_INTERVAL_FIELD = get_field_from_name(class, c"_sequenceInterval");
         }
     }
 
@@ -1445,6 +1713,17 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(plate_ui, TrainingParamChangeUI_PlayIcon, "PlayIcon", INT_AND_INFO, VOID, "TrainingParamChangeUI::PlayIcon");
     probe!(plate_ui, TrainingParamChangeUI_IsGroupPlay, "IsGroupPlay", ONE_INFO, BOOL, "TrainingParamChangeUI::IsGroupPlay");
     probe!(plate_ui, TrainingParamChangeUI_Update, "Update", NO_PARAMS, VOID, "TrainingParamChangeUI::Update");
+    probe!(plate_ui, TrainingParamChangeUI_StartSequence, "StartSequence", NO_PARAMS, VOID, "TrainingParamChangeUI::StartSequence");
+    probe!(plate_ui, TrainingParamChangeUI_StartGroupTypewrite, "StartGroupTypewrite", NO_PARAMS, VOID, "TrainingParamChangeUI::StartGroupTypewrite");
+    probe!(plate_ui, TrainingParamChangeUI_StartTypewrite, "StartTypewrite", ONE_INT, VOID, "TrainingParamChangeUI::StartTypewrite");
+    probe!(plate_ui, TrainingParamChangeUI_OnNextTypewrite, "OnNextTypewrite", NO_PARAMS, VOID, "TrainingParamChangeUI::OnNextTypewrite");
+    probe!(plate_ui, TrainingParamChangeUI_OnEndTypeWrite, "OnEndTypeWrite", ONE_INT, VOID, "TrainingParamChangeUI::OnEndTypeWrite");
+    probe!(plate_ui, TrainingParamChangeUI_OnAllTypewriteEnd, "OnAllTypewriteEnd", NO_PARAMS, VOID, "TrainingParamChangeUI::OnAllTypewriteEnd");
+    probe!(plate_ui, TrainingParamChangeUI_OnTapScreen, "OnTapScreen", NO_PARAMS, VOID, "TrainingParamChangeUI::OnTapScreen");
+    probe!(plate_ui, TrainingParamChangeUI_SetTapButtonOrder, "SetTapButtonOrder", ONE_INT, VOID, "TrainingParamChangeUI::SetTapButtonOrder");
+    generic_probe!(plate_ui, TrainingParamChangeUI_InitializeFlash, "InitializeFlash", LIST_INTERVAL_FLAG_AND_CANVAS, VOID, "TrainingParamChangeUI::InitializeFlash");
+    generic_probe!(plate_ui, TrainingParamChangeUI_Initialize, "Initialize", PLATE_INITIALIZE_ARGS, VOID, "TrainingParamChangeUI::Initialize");
+    generic_probe!(story_view, StoryViewController_PlayParameterChangeAsync, "PlayParameterChangeAsync", LIST_AND_INTERVAL, CLASS, "StoryViewController::PlayParameterChangeAsync");
 
     // The gauge animation is the largest piece of the training screen that run 11 measured no part of.
     probe!(hp_gauge, HpGauge_PlayIn, "PlayIn", NO_PARAMS, VOID, "SingleModeMainViewHpGauge::PlayIn");
@@ -1612,11 +1891,26 @@ pub fn report_if_due() {
     let icon_runs = PLATE_PLAY_RUNS.load(atomic::Ordering::Relaxed);
 
     info!(
-        "Cutt probe plate cadence: gauge plays {gauge_runs} inside an open cut mean {:.1} ms worst {} ms, plate icon plays {icon_runs} inside an open cut mean {:.1} ms worst {} ms",
+        "Cutt probe plate cadence: gauge plays {gauge_runs} inside a cut or a cascade mean {:.1} ms worst {} ms, plate icon plays {icon_runs} inside a cut or a cascade mean {:.1} ms worst {} ms",
         mean_ms(GAUGE_PLAY_MS_TOTAL.load(atomic::Ordering::Relaxed), gauge_runs),
         GAUGE_PLAY_WORST_MS.load(atomic::Ordering::Relaxed),
         mean_ms(PLATE_PLAY_MS_TOTAL.load(atomic::Ordering::Relaxed), icon_runs),
         PLATE_PLAY_WORST_MS.load(atomic::Ordering::Relaxed)
+    );
+
+    // How long one cascade of stat plates takes, and how far apart its plates arrive. Run 14 answered
+    // neither: it counted 22 plate list calls 5,129.3 ms apart and said nothing about the time inside one
+    // cascade, which is the difference between a cascade that runs for seconds and a controller that
+    // starts a new one every few seconds. Those two need different doors (C54).
+    let pass_runs = PLATE_PASS_RUNS.load(atomic::Ordering::Relaxed);
+    let typewrite_runs = PLATE_TYPEWRITE_RUNS.load(atomic::Ordering::Relaxed);
+
+    info!(
+        "Cutt probe plate cascade: {pass_runs} cascades closed mean {:.1} ms worst {} ms, typewrite starts {typewrite_runs} inside a cascade mean {:.1} ms worst {} ms",
+        mean_ms(PLATE_PASS_MS_TOTAL.load(atomic::Ordering::Relaxed), pass_runs),
+        PLATE_PASS_WORST_MS.load(atomic::Ordering::Relaxed),
+        mean_ms(PLATE_TYPEWRITE_MS_TOTAL.load(atomic::Ordering::Relaxed), typewrite_runs),
+        PLATE_TYPEWRITE_WORST_MS.load(atomic::Ordering::Relaxed)
     );
     info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");
     info!("Cutt probe training scaling points reached:{doors}");
@@ -1690,6 +1984,28 @@ mod tests {
         assert_eq!(play_cadence_ms(-1, 1_200, 1_400), None);
         assert_eq!(play_cadence_ms(1_000, -1, 1_400), None);
         assert_eq!(play_cadence_ms(1_000, 1_200, 2_100), Some(900));
+    }
+
+    #[test]
+    fn a_plate_spacing_counts_in_the_window_that_already_held_the_earlier_event() {
+        // Run 14 measured no spacing at all with the cut as the only window while 21 gauge plays and 22
+        // plate list calls happened, because the cascade is often built between cuts (C55). The tighter
+        // window wins when both hold the event, because a cascade inside a cut is the shorter span.
+        assert_eq!(cadence_window_open_ms(1_000, 400, 1_200), 1_000);
+        assert_eq!(cadence_window_open_ms(2_000, 400, 1_200), 400);
+        // An event from before both windows opened is inside neither, and a window that never opened
+        // cannot hold anything.
+        assert_eq!(cadence_window_open_ms(2_000, 1_500, 1_200), -1);
+        assert_eq!(cadence_window_open_ms(-1, -1, 1_200), -1);
+    }
+
+    #[test]
+    fn a_spacing_between_two_cascades_is_not_charged_to_either_typewrite_clock() {
+        // The typewrite clock only measures plates inside one cascade. A spacing that reaches back past
+        // the open shows as none so the idle between cascades stays on the passes clock.
+        assert_eq!(play_cadence_ms(500, 600, 900), Some(300));
+        assert_eq!(play_cadence_ms(700, 600, 900), None);
+        assert_eq!(play_cadence_ms(-1, 600, 900), None);
     }
 
     #[test]
