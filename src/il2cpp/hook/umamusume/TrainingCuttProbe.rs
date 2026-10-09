@@ -70,9 +70,6 @@ const ONE_INT: &[Il2CppTypeEnum] = &[I4];
 // `PlayIcon/2 -> void(int, class<Gallop.TrainingParamChangeUI.ChangeParameterInfo>)`.
 const INT_AND_INFO: &[Il2CppTypeEnum] = &[I4, CLASS];
 const ONE_ACTION: &[Il2CppTypeEnum] = &[CLASS];
-// Dumped as `void(generic<System.Collections.Generic.List<...>:24B>, float)`. The dump spells the
-// first parameter as a generic, and the generic resolver is what answers it (C48).
-const LIST_AND_FLOAT: &[Il2CppTypeEnum] = &[CLASS, R4];
 const ID_AND_FLAGS: &[Il2CppTypeEnum] = &[VALUETYPE, BOOL, BOOL];
 const RESULT_AND_LIST: &[Il2CppTypeEnum] = &[VALUETYPE, CLASS];
 const FRAMES_AND_FLAG: &[Il2CppTypeEnum] = &[I4, BOOL];
@@ -821,20 +818,25 @@ extern "C" fn TrainingCutt_FadeOutResultFlash(this: *mut Il2CppObject) {
     get_orig_fn!(TrainingCutt_FadeOutResultFlash, FadeOutResultFlashFn)(this);
 }
 
-type InitializePlateListFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32);
-// `InitializePlateList/2 -> void(class<Gallop.SingleModeTrainingCutInHelper list>, float)`: the list
-// travels as a pointer and is passed straight through, and only the float is recorded.
-extern "C" fn TrainingParamChangeUI_InitializePlateList(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
-    // The plate UI keeps two cascade floats of its own. Read here, next to the interval the caller
-    // handed, so one line says which number the cascade actually waits on. A field the client does not
-    // have reads zero and is reported as zero rather than skipped.
-    PLATE_INITIALIZE_LIST.observe_peak(
-        &[interval as f64, plate_ui_delay(this) as f64, plate_ui_tap_wait(this) as f64],
-        interval,
-    );
-    record_plate_step();
+// The plate list door is hooked by AnimationSpeed, because a duration this fork scales has to stand
+// where it also works with debug_mode off (the plate scaling points of runs 12 and 13 were only reachable
+// because the probe happened to be installed). The clocks stay here, so that hook reports each call it
+// scales to this function. The plate UI's own two floats are read next to the interval the caller handed,
+// so one line says which number the cascade waits on; the field handles only exist when this module was
+// installed, so they are only asked for then. A probe that was never installed still counts the calls and
+// keeps the peak, and records no wall clock because it has no clock to read.
+pub(crate) fn note_plate_call(this: *mut Il2CppObject, interval: f32) {
+    if START.get().is_some() {
+        PLATE_INITIALIZE_LIST.observe_peak(
+            &[interval as f64, plate_ui_delay(this) as f64, plate_ui_tap_wait(this) as f64],
+            interval,
+        );
+    }
+    else {
+        PLATE_INITIALIZE_LIST.sample(interval);
+    }
 
-    get_orig_fn!(TrainingParamChangeUI_InitializePlateList, InitializePlateListFn)(this, list, interval);
+    record_plate_step();
 }
 
 // `PlayIcon/2 -> void(int, class<Gallop.TrainingParamChangeUI.ChangeParameterInfo>)`: the per plate play
@@ -1436,7 +1438,9 @@ pub fn init(umamusume: *const Il2CppImage) {
 
     // Run 9's one install failure: the parameter is a generic instantiation, which the exact walk has never
     // answered (C48). The wrapper declares a pointer for it and never reads through it.
-    generic_probe!(plate_ui, TrainingParamChangeUI_InitializePlateList, "InitializePlateList", LIST_AND_FLOAT, VOID, "TrainingParamChangeUI::InitializePlateList");
+    // `InitializePlateList` is not probed here any more: AnimationSpeed hooks that address to scale the
+    // interval, and a probe cannot hook an address a second time. Its clocks are fed by
+    // `note_plate_call`, which the scaling hook reports to.
     probe!(plate_ui, PlateUI_GetIsAutoPlay, "get_IsAutoPlay", NO_PARAMS, BOOL, "TrainingParamChangeUI::get_IsAutoPlay");
     probe!(plate_ui, TrainingParamChangeUI_PlayIcon, "PlayIcon", INT_AND_INFO, VOID, "TrainingParamChangeUI::PlayIcon");
     probe!(plate_ui, TrainingParamChangeUI_IsGroupPlay, "IsGroupPlay", ONE_INFO, BOOL, "TrainingParamChangeUI::IsGroupPlay");

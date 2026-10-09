@@ -18,6 +18,7 @@ use once_cell::sync::Lazy;
 
 use crate::core::Hachimi;
 use crate::core::hachimi::Config;
+use crate::il2cpp::hook::umamusume::TrainingCuttProbe;
 use crate::il2cpp::{
     api::{
         il2cpp_class_from_name, il2cpp_class_get_field_from_name, il2cpp_class_get_method_from_name,
@@ -902,9 +903,10 @@ pub fn hit_calls(slot: usize) -> usize {
 // These two are doors the run 11 log shows the game reaching, with the duration each was handed:
 // `PlayIn/4` 106 times at 2.4 s, and the gauge's progress bar blend time on a class run 11 measured
 // frames on but no animation door of.
-pub const TRAINING_HIT_SLOTS: [(usize, &str); 2] = [
+pub const TRAINING_HIT_SLOTS: [(usize, &str); 3] = [
     (7, "SingleModeMainViewTrainingCutStatus.PlayIn"),
     (11, "SingleModeMainViewHpGauge.SetProgressbarBlendTime"),
+    (12, "TrainingParamChangeUI.InitializePlateList"),
 ];
 
 // These getters hand out a hardcoded duration or a playback scale, and are the only way
@@ -1262,6 +1264,24 @@ extern "C" fn HpGauge_SetBlendTimeSpeed(this: *mut Il2CppObject, time: f32) {
     get_orig_fn!(HpGauge_SetBlendTimeSpeed, HpGaugeSetBlendTimeFn)(this, scaled);
 }
 
+// The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
+// waited for a tap and 10,034 ms was the cut playing before it asked, while the cut's own timeline
+// reported 2.4 s of total length. The door on that path carrying a duration is `InitializePlateList`,
+// reached six times in the session on a float of 1.0, next to twelve gauge plays whose duration this
+// group had already cut from 2.4 s to 0.12 s. The list is a generic parameter and travels as a pointer
+// untouched (C48), and only the float is scaled. The door used to stand in TrainingCuttProbe, which
+// installs nothing unless debug_mode is on, and a speed option has to work for a player who never turns
+// that switch: the scaling points run 12 and 13 were only reachable because the probe happened to be on.
+type PlateInitializeListFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32);
+extern "C" fn TrainingParamChangeUI_InitializePlateListSpeed(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
+    let scaled = scale_duration(interval, Group::Screens);
+
+    hit(12, "TrainingParamChangeUI.InitializePlateList", interval, scaled);
+    TrainingCuttProbe::note_plate_call(this, interval);
+
+    get_orig_fn!(TrainingParamChangeUI_InitializePlateListSpeed, PlateInitializeListFn)(this, list, scaled);
+}
+
 // One float argument in a fixed position, so the wrapper cannot misread it. This is the
 // grand result screen's own entry point for its hardcoded DURATION constant.
 type GrandResultFadeInFromRightFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32);
@@ -1279,6 +1299,8 @@ extern "C" fn TeamStadiumGrandResult_FadeInContentFromRight(this: *mut Il2CppObj
 const GETTER_CLASSES: &[&str] = &[
     "CountupModifier", "TextModifier", "StoryTimelineController",
     "TeamStadiumGrandResultViewController", "SingleModeMainViewTrainingCutStatus", "SingleModeMainViewHpGauge",
+    // Not a getter class: this one is looked up for the plate cascade door below.
+    "TrainingParamChangeUI",
 ];
 
 fn install_getters(umamusume: *const Il2CppImage) {
@@ -1337,6 +1359,20 @@ fn install_getters(umamusume: *const Il2CppImage) {
         ) };
 
         if addr != 0 { new_hook!(addr, HpGauge_SetBlendTimeSpeed); }
+    }
+
+    // The plate cascade door. `InitializePlateList/2 -> void(generic<System.Collections.Generic.List<
+    // Gallop.TrainingParamChangeUI.ChangeParameterInfo>>, float)` needs the generic resolver, the same
+    // one the probe used before this hook took the address over (C48). One door, one scaling: the probe
+    // is told about the call so its plate clocks keep working, and it is not hooked a second time.
+    if let Some(class) = classes.get("TrainingParamChangeUI").copied() {
+        let addr = unsafe { resolve_generic_ref_method(
+            class, "InitializePlateList",
+            &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_R4],
+            Il2CppTypeEnum_IL2CPP_TYPE_VOID,
+        ) };
+
+        if addr != 0 { new_hook!(addr, TrainingParamChangeUI_InitializePlateListSpeed); }
     }
 }
 
