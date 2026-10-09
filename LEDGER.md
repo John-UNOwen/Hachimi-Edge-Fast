@@ -1344,10 +1344,19 @@ android link claim C42 repeated is withdrawn above, and 59 is the count every en
   5.667, `SkipPause(helpers)` 756, `CutInHelper::CleanupPlaying()` 36 and `CutInHelper::IsPlaying()` 54 with a peak of
   1.000, so a cut-in was playing. `Play(timeline, parent)` and `OnPlayCutIn(timeline, parent)` were silent, as were
   `CutInHelper::GetTargetSpeed`, `CutInHelper::FixedUpdateForHighSpeed(rate)`, `CutInHelper::SetCurrentFrame` and
-  `ContextExtension::GetCurrentTime`. Evidence: the `Story event probe totals at 441 s` line. Either the entry is a
-  derived `CutInHelper` override that the base hook cannot see, or the story and training cut-ins are driven from the
-  helper list rather than through `Play`. The next probe pass has to find the door that opens it, from a dump line,
-  before it pairs anything (C47).
+  `ContextExtension::GetCurrentTime`. Evidence: the `Story event probe totals at 441 s` line.
+  - Cause found in the same run's dump. `Gallop.SingleModeTrainingCutInHelper` does not call the two argument `Play`
+    on its base; it declares its own set, and those are the doors the probe never asked for: `Play/0 -> void()` (dump
+    L26598), `OnPlayCutIn/0 -> void()` (L26599), `OnStartCutIn/0 -> bool()` (L26600), `OnPlayMainCutIn/0 -> void()`
+    (L26602), `OnEndCutIn/0 -> void()` (L26603), `CleanupPlaying/0` (L26604), `OnTerminateRuntime/1 ->
+    void(CutInTimelineController)` (L26595), `OnTimelineUpdatePost/1 -> void(float)` (L26607), `SnapShot/0` (L26593)
+    and `SetDrawSnapShot/0` (L26594). The base `Gallop.CutInHelper` carries the lifecycle and the pause doors the fork
+    has never looked at either: `OnStart/0` (L26462), `OnEnd/0` (L26463), `OnEndCutIn/0` (L26438), `StopRequest/0`
+    (L26428), `Pause/2 -> void(bool, bool)` (L26430), `IsPause/0 -> bool()` (L26431), `OnRestart/0` (L26434) and its
+    state property `get_Status/0` with `set_Status/1 -> void(struct<Gallop.CutInHelper.CutInStatus:4B>)` (L26409,
+    L26410), a 4 byte enum of the kind A5 confirms travels safely in a general register.
+  - Not done: the pairing. `Pause/2` with `IsPause/0` and `StopRequest/0` are also the game's own pause and stop doors
+    for a cut-in, which is what item 41 has been looking for on this screen.
 
 - [ ] **C51 Every training scaling door this fork installs was never called.** Run 10 printed
   `TrainingFooter.GetItemAnimDuration=0 TrainingFooter.GetCloseAnimWaitTime=0 TrainingCuttClip.get_DelayTime=0
