@@ -45,10 +45,35 @@ use super::TrainingCuttProbe::{class_for_label, peak_seconds, report_due, CutPro
 // held through 66 s of menu, not a wait inside a cut. The clock is therefore windowed per cut, closed on the
 // same door `cut run N closed` uses, and the stretch the hole clock measures is read off the coroutine too.
 //
+// Run 20 read the windowed clock and answered the first half of the question. The windowed line is honest:
+// a fast turn is 31 to 45 `MoveNext` steps with 9 branch changes over 10 branches and a longest hold of 531
+// to 633 ms, and a slow turn is 240 and 284 steps with the same 9 changes over the same 10 branches and a
+// longest hold of 7201 ms at branch 6 and 8567 ms at branch 6. Inside the hole the coroutine was driven the
+// whole time, 198 steps in 6583 ms and 236 steps in 7881 ms, one step every 33 ms with no gap over 34 ms,
+// and its branch moved once, from 5 to 6. So the driver did not stop: the coroutine is parked in one branch,
+// re-entering the same wait about thirty times a second, and the branch it sits in is a fact about this
+// client's build rather than about a duration. Nothing else in the fork moves that stretch: run 20 wrote
+// `PlayIn 4.167 -> 0.20834999` and `InitializePlateList 1 -> 0.05` and the hole measured 6583 and 7881 ms
+// anyway, which is the fourth run in a row the hole sits at 5 to 8 s regardless of what the fork handed the
+// game (C58).
+//
+// What is left is the name of the wait. This client's dump prints the slot that holds it:
+//
+//   field <>2__current [object<System.Object>]
+//   field <waitForFixedUpdate>5__10 [class<UnityEngine.WaitForFixedUpdate>]
+//
+// `<>2__current` is whatever the coroutine handed Unity when it last yielded, so naming its class says what
+// the cut is waiting on. A `UnityEngine.Coroutine` says it is waiting on a nested coroutine, which is the
+// shape `SingleModeMainViewController::SendCommandAsync/6 -> IEnumerator(...)` has, and a wait on that is a
+// round trip this fork must not answer (C3, C6, C31). A `UnityEngine.WaitForFixedUpdate` says it is polling
+// on the fixed update clock, which the game's own high speed machinery can still reach. A `yield return
+// null`, which reads back as no object at all, says it is waiting on a condition the game checks every frame.
+//
 // Everything here is observe only. The wrappers hand the original its arguments and its return value back
 // and write nothing, so a measurement made on a value cannot change it. A field handle is only used after
 // it was resolved by name against the class this probe resolved, and the object it is read from is checked
-// against that class first.
+// against that class first. The class of a yield object is only named at report time, never on the step, so
+// the door that runs while the engine is playing a cut does no formatting and allocates nothing.
 //
 // Installed only when debug_mode is on, like TrainingCuttProbe, and after the scaling modules so the class
 // lookup is the one they resolved.
@@ -78,6 +103,9 @@ const HIGH_SPEED_NAME: &CStr = c"<isHighSpeedOnStart>5__9";
 // The branch marker, spelled the way this client's dump spells it: `field <>1__state [int]`. It is private,
 // so no field filter has ever printed it, and the probe reports a miss rather than guessing an offset.
 const STATE_NAME: &CStr = c"<>1__state";
+// The object the coroutine handed Unity when it last yielded, `field <>2__current [object<System.Object>]`.
+// It is the iterator's own slot and the compiler always writes it, so the census has a name to ask for.
+const CURRENT_NAME: &CStr = c"<>2__current";
 
 const BOOL: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN;
 const NO_PARAMS: &[Il2CppTypeEnum] = &[];
@@ -145,6 +173,43 @@ pub(crate) fn step_gap(previous_ms: i64, now_ms: i64) -> Option<i64> {
     }
 
     Some(now_ms - previous_ms)
+}
+
+// A class pointer used as a key, so the census can keep one without a map and without a string. Zero is not
+// a class pointer anywhere, and it is what a `yield return null` leaves in `<>2__current`, so "the coroutine
+// yielded no object at all" has a value of its own rather than being mixed in with a class.
+pub(crate) const NO_YIELD: usize = 0;
+
+// One run of the same yield object: the class the coroutine handed over, and how many `MoveNext` calls in a
+// row found that same class. A parked branch re-enters one await, so its steps all carry the same yield
+// object and the streak is the measurement; a coroutine walking a body hands over a different object each
+// time and produces many streaks of one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Yielded {
+    pub class: usize,
+    pub steps: usize,
+}
+
+// The streak a step leaves behind. The first step of a machine, or a step that found a different object than
+// the one before it, starts a streak of one; a step that found the same object grows the streak instead of
+// starting a new one, which is what makes 198 steps in one branch read as one wait rather than 198 waits.
+pub(crate) fn streak_of(previous_class: usize, previous_steps: usize, class: usize) -> Yielded {
+    let steps = if previous_steps > 0 && previous_class == class { previous_steps + 1 } else { 1 };
+
+    Yielded { class, steps }
+}
+
+// The streak worth reporting. A tie keeps the one already recorded, so a window that saw one long wait does
+// not trade it for a later streak of the same length.
+pub(crate) fn longer_streak(current: Yielded, recorded: Yielded) -> Yielded {
+    if current.steps > recorded.steps { current } else { recorded }
+}
+
+// Whether a streak belongs to a window: it has to have started after that window opened, and a window that
+// is not open carries no mark. A streak that began before the hole opened is charged to the stretch before
+// it, which is the rule the gap attribution in `observe_step` runs on.
+pub(crate) fn started_in(opened_ms: i64, started_ms: i64) -> bool {
+    opened_ms >= 0 && started_ms >= 0 && started_ms >= opened_ms
 }
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -216,6 +281,21 @@ static HOLE_CHANGES: AtomicUsize = AtomicUsize::new(0);
 static HOLE_STATES_SEEN: AtomicU64 = AtomicU64::new(0);
 static HOLE_GAP_WORST_MS: AtomicI64 = AtomicI64::new(0);
 static CUTS_CLOSED: AtomicUsize = AtomicUsize::new(0);
+
+// The yield census. The streak the coroutine is in right now, and the longest streak each window charged.
+// `YIELD_STARTED_MS` is when the current streak's first step ran, which is what decides the window a streak
+// belongs to when it closes.
+static YIELD_CLASS: AtomicUsize = AtomicUsize::new(NO_YIELD);
+static YIELD_STEPS: AtomicUsize = AtomicUsize::new(0);
+static YIELD_STARTED_MS: AtomicI64 = AtomicI64::new(-1);
+static CUT_YIELD_CLASS: AtomicUsize = AtomicUsize::new(NO_YIELD);
+static CUT_YIELD_STEPS: AtomicUsize = AtomicUsize::new(0);
+static CUT_YIELD_STREAKS: AtomicUsize = AtomicUsize::new(0);
+static CUT_YIELD_NOTHING: AtomicUsize = AtomicUsize::new(0);
+static HOLE_YIELD_CLASS: AtomicUsize = AtomicUsize::new(NO_YIELD);
+static HOLE_YIELD_STEPS: AtomicUsize = AtomicUsize::new(0);
+static HOLE_YIELD_STREAKS: AtomicUsize = AtomicUsize::new(0);
+static HOLE_YIELD_NOTHING: AtomicUsize = AtomicUsize::new(0);
 // The machine class this probe resolved, and whether it has already reported a surprise. The snapshot is
 // taken from a door that hands back a coroutine object, and a door that hands back a different class than
 // the one these field handles belong to must say so instead of reading slots it has no claim on.
@@ -226,6 +306,7 @@ static mut TIME_SCALE_FIELD: *mut FieldInfo = std::ptr::null_mut();
 static mut ALL_TEXT_WAIT_FIELD: *mut FieldInfo = std::ptr::null_mut();
 static mut HIGH_SPEED_FIELD: *mut FieldInfo = std::ptr::null_mut();
 static mut STATE_FIELD: *mut FieldInfo = std::ptr::null_mut();
+static mut CURRENT_FIELD: *mut FieldInfo = std::ptr::null_mut();
 
 // A field handle this probe resolved by name on the class `obj` was made from is that object's own slot,
 // so the read is one load and nothing has to be interpreted. Only float and bool instance fields are read
@@ -252,6 +333,77 @@ unsafe fn read_state(obj: *mut Il2CppObject) -> i32 {
     }
 
     unsafe { *get_field_ptr::<i32>(obj, STATE_FIELD) }
+}
+
+// A reference field holds a pointer, so the read is one load and a null there is a value rather than a
+// failure: `yield return null` leaves no object in `<>2__current`, and "the coroutine waited on no object" is
+// one of the answers this probe is after.
+unsafe fn read_object(obj: *mut Il2CppObject, field: *mut FieldInfo) -> *mut Il2CppObject {
+    if obj.is_null() || field.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    unsafe { *get_field_ptr::<*mut Il2CppObject>(obj, field) }
+}
+
+// The class behind the object the coroutine handed Unity. Only the pointer is taken on the step; naming it
+// allocates, and it happens once per report instead.
+unsafe fn yield_class_of(this: *mut Il2CppObject) -> usize {
+    let yielded = unsafe { read_object(this, CURRENT_FIELD) };
+
+    if yielded.is_null() {
+        return NO_YIELD;
+    }
+
+    (unsafe { *(*yielded).__bindgen_anon_1.klass.as_ref() }) as usize
+}
+// The name of a class the census recorded, spelled the way `introspect.log` spells it. The class metadata a
+// managed object points at is the same metadata the dump walks, and the classes a coroutine hands Unity are
+// engine types that outlive the cut, so reading the two strings off it is reading the same bytes the dump
+// printed for them.
+unsafe fn yield_name(class: usize) -> String {
+    if class == NO_YIELD {
+        return "nothing".to_string();
+    }
+
+    let klass = unsafe { &*(class as *const Il2CppClass) };
+    let name = unsafe { CStr::from_ptr(klass.name) }.to_string_lossy().into_owned();
+    // `namespaze` is how the Il2CppClass layout spells it, the same field `introspect.log` prints through
+    // `il2cpp_class_get_namespace`.
+    let namespace = unsafe { CStr::from_ptr(klass.namespaze) }.to_string_lossy().into_owned();
+
+    if namespace.is_empty() { name } else { format!("{namespace}.{name}") }
+}
+
+// Charges a streak that just closed to the windows it started in. Attribution is by where the streak began,
+// because a streak that began before the hole opened is a wait of the stretch before the hole, and a window
+// that is not open is charged nothing.
+fn fold_yield_streak(streak: Yielded, started_ms: i64) {
+    if streak.steps == 0 {
+        return;
+    }
+
+    if started_in(CUT_OPEN_MS.load(atomic::Ordering::Relaxed), started_ms) {
+        CUT_YIELD_STREAKS.fetch_add(1, atomic::Ordering::Relaxed);
+        let recorded = Yielded {
+            class: CUT_YIELD_CLASS.load(atomic::Ordering::Relaxed),
+            steps: CUT_YIELD_STEPS.load(atomic::Ordering::Relaxed),
+        };
+        let longest = longer_streak(streak, recorded);
+        CUT_YIELD_CLASS.store(longest.class, atomic::Ordering::Relaxed);
+        CUT_YIELD_STEPS.store(longest.steps, atomic::Ordering::Relaxed);
+    }
+
+    if started_in(HOLE_OPEN_MS.load(atomic::Ordering::Relaxed), started_ms) {
+        HOLE_YIELD_STREAKS.fetch_add(1, atomic::Ordering::Relaxed);
+        let recorded = Yielded {
+            class: HOLE_YIELD_CLASS.load(atomic::Ordering::Relaxed),
+            steps: HOLE_YIELD_STEPS.load(atomic::Ordering::Relaxed),
+        };
+        let longest = longer_streak(streak, recorded);
+        HOLE_YIELD_CLASS.store(longest.class, atomic::Ordering::Relaxed);
+        HOLE_YIELD_STEPS.store(longest.steps, atomic::Ordering::Relaxed);
+    }
 }
 
 // The largest value this window saw. Every door here runs on the game thread, so a load and a store is
@@ -370,6 +522,37 @@ fn observe_step(this: *mut Il2CppObject) {
     }
 
     LAST_STEP_MS.store(now, atomic::Ordering::Relaxed);
+
+    // What the coroutine handed Unity when it last yielded. `<>2__current` is the slot `get_Current` reads
+    // and the object Unity holds the coroutine on, so a branch that never moves shows the same class on
+    // every step and the streak is the length of the wait, while a coroutine walking its body hands over a
+    // different object each step and produces many streaks of one.
+    let yielded_class = unsafe { yield_class_of(this) };
+    let streak_started_ms = YIELD_STARTED_MS.load(atomic::Ordering::Relaxed);
+    let previous_streak = Yielded {
+        class: YIELD_CLASS.load(atomic::Ordering::Relaxed),
+        steps: YIELD_STEPS.load(atomic::Ordering::Relaxed),
+    };
+    let streak = streak_of(previous_streak.class, previous_streak.steps, yielded_class);
+
+    if streak.steps == 1 && previous_streak.steps > 0 {
+        fold_yield_streak(previous_streak, streak_started_ms);
+    }
+
+    YIELD_CLASS.store(yielded_class, atomic::Ordering::Relaxed);
+    YIELD_STEPS.store(streak.steps, atomic::Ordering::Relaxed);
+
+    if streak.steps == 1 {
+        YIELD_STARTED_MS.store(now, atomic::Ordering::Relaxed);
+    }
+
+    if yielded_class == NO_YIELD {
+        CUT_YIELD_NOTHING.fetch_add(1, atomic::Ordering::Relaxed);
+
+        if in_hole >= 0 {
+            HOLE_YIELD_NOTHING.fetch_add(1, atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 type MoveNextFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
@@ -437,6 +620,16 @@ pub(crate) fn note_play_training_cut(obj: *mut Il2CppObject) {
     CUT_GAP_WORST_MS.store(0, atomic::Ordering::Relaxed);
     CUT_TIME_SCALE_PEAK.store(0, atomic::Ordering::Relaxed);
     CUT_ALL_TEXT_WAIT_PEAK.store(0, atomic::Ordering::Relaxed);
+    CUT_YIELD_CLASS.store(NO_YIELD, atomic::Ordering::Relaxed);
+    CUT_YIELD_STEPS.store(0, atomic::Ordering::Relaxed);
+    CUT_YIELD_STREAKS.store(0, atomic::Ordering::Relaxed);
+    CUT_YIELD_NOTHING.store(0, atomic::Ordering::Relaxed);
+
+    // The new machine has yielded nothing yet, so the census starts with it instead of carrying the previous
+    // cut's streak into a machine that never ran those steps.
+    YIELD_CLASS.store(NO_YIELD, atomic::Ordering::Relaxed);
+    YIELD_STEPS.store(0, atomic::Ordering::Relaxed);
+    YIELD_STARTED_MS.store(-1, atomic::Ordering::Relaxed);
 
     unsafe {
         if let Some(value) = read_f32(obj, TIME_SCALE_FIELD) {
@@ -475,6 +668,14 @@ fn mean_of(total: i64, count: usize) -> f64 {
     }
 }
 
+// The streak the census is in right now, which is the one a window close has to charge before it empties.
+fn open_yield_streak() -> Yielded {
+    Yielded {
+        class: YIELD_CLASS.load(atomic::Ordering::Relaxed),
+        steps: YIELD_STEPS.load(atomic::Ordering::Relaxed),
+    }
+}
+
 // Opens the coroutine window over the hole `TrainingCuttProbe` measured, from the training cut-in ending to
 // the status panel playing out. The two probes share the pairing so the hole in the wall clock and the
 // coroutine inside it are the same stretch.
@@ -485,16 +686,25 @@ pub(crate) fn note_hole_open() {
     HOLE_CHANGES.store(0, atomic::Ordering::Relaxed);
     HOLE_STATES_SEEN.store(0, atomic::Ordering::Relaxed);
     HOLE_GAP_WORST_MS.store(0, atomic::Ordering::Relaxed);
+    HOLE_YIELD_CLASS.store(NO_YIELD, atomic::Ordering::Relaxed);
+    HOLE_YIELD_STEPS.store(0, atomic::Ordering::Relaxed);
+    HOLE_YIELD_STREAKS.store(0, atomic::Ordering::Relaxed);
+    HOLE_YIELD_NOTHING.store(0, atomic::Ordering::Relaxed);
 }
 
 // Says what the cut's own coroutine did while the status panel was being held off. Zero steps and a branch
 // that never moved says the driver stopped calling the coroutine, which a fork may not answer. Many steps
 // with a branch that never moved says the coroutine is being driven every frame while it waits on a
-// condition, which is the case a duration door or a setting could still reach.
+// condition, and the yield census says which condition it is handing Unity.
 pub(crate) fn note_hole_closed(span_ms: i64) {
-    if HOLE_OPEN_MS.swap(-1, atomic::Ordering::Relaxed) < 0 {
+    if HOLE_OPEN_MS.load(atomic::Ordering::Relaxed) < 0 {
         return;
     }
+
+    // The streak that has not closed yet is folded while the window is still open, so it is charged to the
+    // window it started in the same way a streak that closed on its own was.
+    fold_yield_streak(open_yield_streak(), YIELD_STARTED_MS.load(atomic::Ordering::Relaxed));
+    HOLE_OPEN_MS.store(-1, atomic::Ordering::Relaxed);
 
     let steps = steps_between(HOLE_STEPS_AT_START.load(atomic::Ordering::Relaxed), MOVENEXT.calls());
     let changes = HOLE_CHANGES.load(atomic::Ordering::Relaxed);
@@ -502,20 +712,34 @@ pub(crate) fn note_hole_closed(span_ms: i64) {
     let worst_gap = HOLE_GAP_WORST_MS.load(atomic::Ordering::Relaxed);
     let open_branch = HOLE_START_STATE.load(atomic::Ordering::Relaxed);
     let close_branch = LAST_STATE.load(atomic::Ordering::Relaxed);
+    let yields = HOLE_YIELD_STREAKS.load(atomic::Ordering::Relaxed);
+    let yield_steps = HOLE_YIELD_STEPS.load(atomic::Ordering::Relaxed);
+    let nothing = HOLE_YIELD_NOTHING.load(atomic::Ordering::Relaxed);
+    let yielded = unsafe { yield_name(HOLE_YIELD_CLASS.load(atomic::Ordering::Relaxed)) };
 
     info!(
-        "Cut state probe cut hole {span_ms} ms with the cut coroutine in it: branch {open_branch} at the cut-in end, {close_branch} at the play out, {steps} MoveNext steps, {changes} branch changes over {distinct} branches, worst gap between steps {worst_gap} ms"
+        "Cut state probe cut hole {span_ms} ms with the cut coroutine in it: branch {open_branch} at the cut-in end, {close_branch} at the play out, {steps} MoveNext steps, {changes} branch changes over {distinct} branches, worst gap between steps {worst_gap} ms, {yielded} yielded {yield_steps} times in a row over {yields} yields, {nothing} steps yielding nothing"
     );
+
+    HOLE_YIELD_CLASS.store(NO_YIELD, atomic::Ordering::Relaxed);
+    HOLE_YIELD_STEPS.store(0, atomic::Ordering::Relaxed);
+    HOLE_YIELD_STREAKS.store(0, atomic::Ordering::Relaxed);
+    HOLE_YIELD_NOTHING.store(0, atomic::Ordering::Relaxed);
 }
 
 // Closes the window a cut's coroutine had, one line per training cut, paired with `cut run N closed`
 // because both open at `PlayTrainingCut` and close at `CleanUpCutt`. The window is then folded into the
 // run totals the periodic report reads.
 pub(crate) fn note_cut_run_closed() {
-    let opened_ms = CUT_OPEN_MS.swap(-1, atomic::Ordering::Relaxed);
+    let opened_ms = CUT_OPEN_MS.load(atomic::Ordering::Relaxed);
     let Some(wall_ms) = cut_wall_ms(opened_ms, elapsed_ms()) else {
         return;
     };
+
+    // The streak still open is folded before any window closes, because the windows are what decide where it
+    // belongs and the cut's own mark is what it is charged against.
+    fold_yield_streak(open_yield_streak(), YIELD_STARTED_MS.load(atomic::Ordering::Relaxed));
+    CUT_OPEN_MS.store(-1, atomic::Ordering::Relaxed);
 
     let cuts = CUTS_CLOSED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
     let steps = CUT_STEPS.load(atomic::Ordering::Relaxed);
@@ -531,6 +755,13 @@ pub(crate) fn note_cut_run_closed() {
     // A value never sampled keeps the bits of zero, and the bits of zero are the value zero.
     let time_scale = f32::from_bits(CUT_TIME_SCALE_PEAK.load(atomic::Ordering::Relaxed));
     let all_text_wait = f32::from_bits(CUT_ALL_TEXT_WAIT_PEAK.load(atomic::Ordering::Relaxed));
+    let yields = CUT_YIELD_STREAKS.load(atomic::Ordering::Relaxed);
+    let yield_steps = CUT_YIELD_STEPS.load(atomic::Ordering::Relaxed);
+    let nothing = CUT_YIELD_NOTHING.load(atomic::Ordering::Relaxed);
+    let yielded = unsafe { yield_name(CUT_YIELD_CLASS.load(atomic::Ordering::Relaxed)) };
+    // A branch that never moves charges every step it drives with the whole stretch since the branch last
+    // changed, so the holds of a parked coroutine overlap and their mean is a charge, not a duration. The
+    // longest hold is the one that reads as a wait, and the gap mean is the cadence the engine drove it at.
     let hold_mean = mean_of(hold_ms, holds);
     let gap_mean = mean_of(gap_ms, gaps);
 
@@ -552,9 +783,16 @@ pub(crate) fn note_cut_run_closed() {
     CUT_GAP_WORST_MS.store(0, atomic::Ordering::Relaxed);
     CUT_TIME_SCALE_PEAK.store(0, atomic::Ordering::Relaxed);
     CUT_ALL_TEXT_WAIT_PEAK.store(0, atomic::Ordering::Relaxed);
+    CUT_YIELD_CLASS.store(NO_YIELD, atomic::Ordering::Relaxed);
+    CUT_YIELD_STEPS.store(0, atomic::Ordering::Relaxed);
+    CUT_YIELD_STREAKS.store(0, atomic::Ordering::Relaxed);
+    CUT_YIELD_NOTHING.store(0, atomic::Ordering::Relaxed);
+    YIELD_CLASS.store(NO_YIELD, atomic::Ordering::Relaxed);
+    YIELD_STEPS.store(0, atomic::Ordering::Relaxed);
+    YIELD_STARTED_MS.store(-1, atomic::Ordering::Relaxed);
 
     info!(
-        "Cut state probe cut {cuts} coroutine over {wall_ms} ms: {steps} MoveNext steps, {changes} branch changes over {distinct} branches, holds {holds} mean {hold_mean:.1} ms worst {worst_hold} ms at branch {worst_branch}, gaps {gaps} mean {gap_mean:.1} ms worst {worst_gap} ms, timeScale peak {time_scale:.4}, allTextWaitTime peak {all_text_wait:.4}"
+        "Cut state probe cut {cuts} coroutine over {wall_ms} ms: {steps} MoveNext steps, {changes} branch changes over {distinct} branches, holds {holds} charged mean {hold_mean:.1} ms longest {worst_hold} ms at branch {worst_branch}, gaps {gaps} mean {gap_mean:.1} ms worst {worst_gap} ms, {yielded} yielded {yield_steps} times in a row over {yields} yields, {nothing} steps yielding nothing, timeScale peak {time_scale:.4}, allTextWaitTime peak {all_text_wait:.4}"
     );
 }
 
@@ -595,6 +833,7 @@ pub fn init(umamusume: *const Il2CppImage) {
         ALL_TEXT_WAIT_FIELD = get_field_from_name(class, ALL_TEXT_WAIT_NAME);
         HIGH_SPEED_FIELD = get_field_from_name(class, HIGH_SPEED_NAME);
         STATE_FIELD = get_field_from_name(class, STATE_NAME);
+        CURRENT_FIELD = get_field_from_name(class, CURRENT_NAME);
     }
 
     let addr = unsafe { AnimationSpeed::resolve_method(class, "MoveNext", NO_PARAMS, BOOL) };
@@ -611,11 +850,12 @@ pub fn init(umamusume: *const Il2CppImage) {
     let machine = machine_name();
 
     info!(
-        "Cut state probe: standing on {machine}::MoveNext, a nested type of {OWNER_LABEL}, timeScale {}, allTextWaitTime {}, isHighSpeedOnStart {}, branch marker {}",
+        "Cut state probe: standing on {machine}::MoveNext, a nested type of {OWNER_LABEL}, timeScale {}, allTextWaitTime {}, isHighSpeedOnStart {}, branch marker {}, yield slot {}",
         unsafe { named(TIME_SCALE_FIELD) },
         unsafe { named(ALL_TEXT_WAIT_FIELD) },
         unsafe { named(HIGH_SPEED_FIELD) },
-        unsafe { named(STATE_FIELD) }
+        unsafe { named(STATE_FIELD) },
+        unsafe { named(CURRENT_FIELD) }
     );
 }
 
@@ -655,8 +895,16 @@ pub fn report_if_due() {
     let since_change = now_sec * 1000 - LAST_CHANGE_MS.load(atomic::Ordering::Relaxed);
     let open_hold = if since_change < 0 { 0 } else { since_change };
 
+    // The wait the coroutine is in right now, which is the half a cut that never closed would otherwise
+    // leave unreported.
+    let streak = open_yield_streak();
+    let yielding = match streak.steps {
+        0 => String::from("nothing sampled yet"),
+        steps => format!("{} for {steps} steps in a row", unsafe { yield_name(streak.class) }),
+    };
+
     info!(
-        "Cut state probe training cut coroutine at {now_sec} s: MoveNext {totals} steps over {distinct} distinct branches, branch changes {changes}, branch holds {holds} mean {hold_mean:.1} ms worst {worst_hold} ms at branch {worst_branch}, still in branch {last_branch} for {open_hold} ms, gaps between steps {gaps}"
+        "Cut state probe training cut coroutine at {now_sec} s: MoveNext {totals} steps over {distinct} distinct branches, branch changes {changes}, branch holds {holds} mean {hold_mean:.1} ms worst {worst_hold} ms at branch {worst_branch}, still in branch {last_branch} for {open_hold} ms, still yielding {yielding}, gaps between steps {gaps}"
     );
     info!(
         "Cut state probe training cut values: timeScale peak {:.4}, allTextWaitTime peak {:.4}, isHighSpeedOnStart true in {high_speed_on} of {high_speed_reads} reads, worst gap between steps {worst_gap} ms mean {gap_mean:.1} ms",
@@ -772,5 +1020,44 @@ mod tests {
     fn a_mean_of_nothing_is_zero_rather_than_a_divide_by_zero() {
         assert_eq!(mean_of(6_150, 6), 1_025.0);
         assert_eq!(mean_of(0, 0), 0.0);
+    }
+
+    #[test]
+    fn a_step_that_finds_the_same_yield_object_grows_the_streak() {
+        // Run 20's two slow turns sat in branch 6 for 198 and 236 `MoveNext` calls, every one of them
+        // handing Unity the same object, so the census has to read that as one wait of 198 steps rather than
+        // 198 waits of one step.
+        assert_eq!(streak_of(NO_YIELD, 0, 0x1234), Yielded { class: 0x1234, steps: 1 });
+        assert_eq!(streak_of(0x1234, 197, 0x1234), Yielded { class: 0x1234, steps: 198 });
+
+        // A different object starts a fresh streak, and no object at all is a value in its own right: a
+        // `yield return null` leaves `<>2__current` empty, and two of those in a row are one streak.
+        assert_eq!(streak_of(0x1234, 198, 0x9abc), Yielded { class: 0x9abc, steps: 1 });
+        assert_eq!(streak_of(NO_YIELD, 0, NO_YIELD), Yielded { class: NO_YIELD, steps: 1 });
+        assert_eq!(streak_of(NO_YIELD, 5, NO_YIELD), Yielded { class: NO_YIELD, steps: 6 });
+    }
+
+    #[test]
+    fn the_longest_streak_is_the_one_a_window_reports() {
+        let parked = Yielded { class: 0x1234, steps: 236 };
+
+        assert_eq!(longer_streak(parked, Yielded { class: 0x9abc, steps: 12 }), parked);
+        assert_eq!(longer_streak(Yielded { class: 0x9abc, steps: 3 }, parked), parked);
+
+        // A tie keeps what the window already recorded, so a cut does not relabel its longest wait with a
+        // later streak of the same length.
+        assert_eq!(longer_streak(Yielded { class: 0x9abc, steps: 236 }, parked), parked);
+    }
+
+    #[test]
+    fn a_streak_is_charged_to_the_window_it_started_in() {
+        assert!(started_in(1_000, 1_000));
+        assert!(started_in(1_000, 4_500));
+
+        // A wait that began before the hole opened is a wait of the stretch before the hole, and a window
+        // that is not open has no mark to charge against.
+        assert!(!started_in(1_000, 999));
+        assert!(!started_in(-1, 4_500));
+        assert!(!started_in(1_000, -1));
     }
 }
