@@ -76,11 +76,23 @@ const FULL_DUMP_NAMES: &[&str] = &[
     // dump does name and not these (C47: a probe on a guessed signature measures nothing).
     "StoryViewController", "StorySceneController", "StoryEventMissionViewController",
     "StoryCharacterFade", "StoryTimelineController",
+    // The coroutines the training screen waits on. A compiler generated state machine appears in a log only
+    // as the owner of whichever of its captured locals matched a field filter, so its methods, its branch
+    // marker and the locals no filter names have never been printed. These are the names the career run of
+    // 2026-10-09 printed on their field reference lines, spelled exactly as that client spells them, and the
+    // first half of C58 has to be read out of them.
+    "<PlayTrainingCut>d__70", "<PlayCutt>d__52", "<PlayFlashAndTypewriter>d__13",
+    "<InitializeFlash>d__109", "<PlayParameterChangeAsync>d__350", "<InitializeEachPlayIn>d__13",
+    "<InitializeEachPlayIn>d__14", "<PlayTrainingTipsEventWipe>d__52", "<PlayGaugeUpAnimation>d__33",
+    "<PlayGaugeUpAnimation>d__38", "<CoroutineGaugeUpAnimation>d__21", "<CoroutineGaugeUpAnimation>d__43",
+    "<CoroutineAppendParamUpResultSequence>d__8", "<PlayResultCutinCoroutine>d__46",
 ];
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
-/// is bounded, so the log grows by these classes and not by whatever else matches a filter.
-const MAX_ALLOWLIST_CLASSES: usize = 40;
+/// is bounded, so the log grows by these classes and not by whatever else matches a filter. It is now the
+/// whole list, so the budget carries a little headroom: a client that renames a state machine takes the
+/// slot rather than crowding a name this fork is measured against out.
+const MAX_ALLOWLIST_CLASSES: usize = 44;
 
 fn as_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
