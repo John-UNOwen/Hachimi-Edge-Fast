@@ -416,6 +416,32 @@ static PLATE_STEP_RUNS: AtomicUsize = AtomicUsize::new(0);
 static PLATE_STEP_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static PLATE_STEP_WORST_MS: AtomicI64 = AtomicI64::new(0);
 
+// A gap is not one thing. Run 12 measured four of them at a 14,897.8 ms mean with a 31,867 ms worst and
+// said nothing about where the wall went, and a wall that is not split cannot be aimed at. These legs cut
+// each gap at the plate list calls seen inside it: the wait before the plate list, the plate list pass
+// itself, and the time from its last call to the next cut opening. All three come from one clock and
+// always add up to the gap, so whatever is left over shows as a leg instead of being guessed at. A gap
+// with no plate list call between its ends is counted apart rather than given invented legs.
+static GAP_PLATE_FIRST_MS: AtomicI64 = AtomicI64::new(-1);
+static GAP_PLATE_LAST_MS: AtomicI64 = AtomicI64::new(-1);
+static GAP_LEG_BEFORE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static GAP_LEG_BEFORE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static GAP_LEG_BEFORE_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static GAP_LEG_PLATE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static GAP_LEG_PLATE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static GAP_LEG_PLATE_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static GAP_LEG_AFTER_RUNS: AtomicUsize = AtomicUsize::new(0);
+static GAP_LEG_AFTER_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static GAP_LEG_AFTER_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static GAP_WITHOUT_PLATE_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+// The open wall splits at the tap request: what the cut played before it asked, and what it waited for
+// after. Run 12 read cuts that stayed open between 2,500 and 10,600 ms while the tap wait inside them was
+// 436.5 ms mean, so the wall is almost none tap.
+static WALL_OPEN_TO_TAP_RUNS: AtomicUsize = AtomicUsize::new(0);
+static WALL_OPEN_TO_TAP_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static WALL_OPEN_TO_TAP_WORST_MS: AtomicI64 = AtomicI64::new(0);
+
 // The animation doors run 11 never looked at, on the classes that hold the gauge and the param plates.
 // Counting only: an argument is recorded and handed back untouched.
 static HP_GAUGE_PLAY_IN: CutProbe = CutProbe::counted("SingleModeMainViewHpGauge::PlayIn()");
@@ -433,6 +459,17 @@ fn span_from(requested: i64, now: i64) -> Option<i64> {
     }
 
     Some(now - requested)
+}
+
+/// One gap cut into its three legs at the plate list calls seen inside it. Every mark is read from the
+/// same clock, so a mark out of order means the pairing is wrong and the gap is left whole: a leg made
+/// from bad marks is worse than a gap nobody explained.
+fn gap_legs(close_ms: i64, first_plate_ms: i64, last_plate_ms: i64, open_ms: i64) -> Option<(i64, i64, i64)> {
+    let before = span_from(close_ms, first_plate_ms)?;
+    let plate = span_from(first_plate_ms, last_plate_ms)?;
+    let after = span_from(last_plate_ms, open_ms)?;
+
+    Some((before, plate, after))
 }
 
 fn elapsed_ms() -> i64 {
@@ -475,7 +512,9 @@ fn open_cut_run() {
 
     // The idle between one cut closing and the next opening is the part of a training turn the cut
     // clocks never covered: run 11 put 138,604 ms of cuts inside 1,210,471 ms of training frames.
-    if let Some(gap_ms) = span_from(RUN_CLOSED_MS.swap(-1, atomic::Ordering::Relaxed), now) {
+    let closed_ms = RUN_CLOSED_MS.swap(-1, atomic::Ordering::Relaxed);
+
+    if let Some(gap_ms) = span_from(closed_ms, now) {
         let gaps = CUT_GAP_RUNS.fetch_add(1, atomic::Ordering::Relaxed) + 1;
 
         CUT_GAP_MS_TOTAL.fetch_add(gap_ms, atomic::Ordering::Relaxed);
@@ -484,6 +523,33 @@ fn open_cut_run() {
 
         if gaps <= PROBE_DETAIL_LIMIT {
             info!("Cutt probe: cut gap {gap_ms} ms from the previous close to this open on view {view} {}", BUCKET_NAMES[bucket as usize]);
+        }
+
+        record_gap_legs(closed_ms, now);
+    }
+}
+
+// The gap belongs to the plate list door the probe already stands on, so splitting it costs no new hook:
+// a `InitializePlateList` call between a close and the next open says the game was building param plates
+// during that idle, and the time on either side of those calls is the time it was not.
+fn record_gap_legs(close_ms: i64, open_ms: i64) {
+    let first_plate = GAP_PLATE_FIRST_MS.swap(-1, atomic::Ordering::Relaxed);
+    let last_plate = GAP_PLATE_LAST_MS.swap(-1, atomic::Ordering::Relaxed);
+
+    match gap_legs(close_ms, first_plate, last_plate, open_ms) {
+        Some((before, plate, after)) => {
+            GAP_LEG_BEFORE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+            GAP_LEG_BEFORE_MS_TOTAL.fetch_add(before, atomic::Ordering::Relaxed);
+            GAP_LEG_BEFORE_WORST_MS.fetch_max(before, atomic::Ordering::Relaxed);
+            GAP_LEG_PLATE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+            GAP_LEG_PLATE_MS_TOTAL.fetch_add(plate, atomic::Ordering::Relaxed);
+            GAP_LEG_PLATE_WORST_MS.fetch_max(plate, atomic::Ordering::Relaxed);
+            GAP_LEG_AFTER_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+            GAP_LEG_AFTER_MS_TOTAL.fetch_add(after, atomic::Ordering::Relaxed);
+            GAP_LEG_AFTER_WORST_MS.fetch_max(after, atomic::Ordering::Relaxed);
+        }
+        None => {
+            GAP_WITHOUT_PLATE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         }
     }
 }
@@ -529,6 +595,11 @@ fn close_cut_run() {
     }
 
     RUN_CLOSED_MS.store(now, atomic::Ordering::Relaxed);
+
+    // A new gap begins at this close, so the plate list marks of the previous one are dropped rather than
+    // carried into it.
+    GAP_PLATE_FIRST_MS.store(-1, atomic::Ordering::Relaxed);
+    GAP_PLATE_LAST_MS.store(-1, atomic::Ordering::Relaxed);
 
     if runs <= PROBE_DETAIL_LIMIT {
         let tap = match tap_ms {
@@ -664,9 +735,19 @@ extern "C" fn TrainingCutt_WaitTapAsync(this: *mut Il2CppObject) -> *mut Il2CppO
     CUTT_WAIT_TAP_ASYNC.count();
 
     // Where the tap wait clock starts. Only while a run is open, so a request outside a measured cut
-    // cannot be charged to one.
+    // cannot be charged to one, and the last request of a cut is still the one its wait is measured from.
+    // The first request also splits that cut's wall: what it played before asking is measured here, and
+    // what it waited after asking is the tap wait.
     if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) >= 0 {
-        RUN_TAP_REQUESTED_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+        let now = elapsed_ms();
+
+        if now >= 0 && RUN_TAP_REQUESTED_MS.swap(now, atomic::Ordering::Relaxed) < 0 {
+            if let Some(played_ms) = span_from(RUN_OPENED_MS.load(atomic::Ordering::Relaxed), now) {
+                WALL_OPEN_TO_TAP_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+                WALL_OPEN_TO_TAP_MS_TOTAL.fetch_add(played_ms, atomic::Ordering::Relaxed);
+                WALL_OPEN_TO_TAP_WORST_MS.fetch_max(played_ms, atomic::Ordering::Relaxed);
+            }
+        }
     }
 
     get_orig_fn!(TrainingCutt_WaitTapAsync, WaitTapAsyncFn)(this)
@@ -704,6 +785,16 @@ fn record_plate_step() {
         PLATE_STEP_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         PLATE_STEP_MS_TOTAL.fetch_add(step_ms, atomic::Ordering::Relaxed);
         PLATE_STEP_WORST_MS.fetch_max(step_ms, atomic::Ordering::Relaxed);
+    }
+
+    // The same door is the split point of the gap when no cut is open. A plate list pass during a cut
+    // belongs to that cut's wall, so it is not charged to the idle between cuts.
+    if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) < 0 && RUN_CLOSED_MS.load(atomic::Ordering::Relaxed) >= 0 {
+        if GAP_PLATE_FIRST_MS.load(atomic::Ordering::Relaxed) < 0 {
+            GAP_PLATE_FIRST_MS.store(now, atomic::Ordering::Relaxed);
+        }
+
+        GAP_PLATE_LAST_MS.store(now, atomic::Ordering::Relaxed);
     }
 }
 
@@ -1359,8 +1450,31 @@ pub fn report_if_due() {
         mean_ms(plate_ms, plate_runs),
         PLATE_STEP_WORST_MS.load(atomic::Ordering::Relaxed)
     );
-    info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");
-    info!("Cutt probe training scaling points reached:{doors}");
+
+    // The gap and the wall above, split at the doors inside them. This is the line that says whether the
+    // next lever should aim at the plate list, at what the game does after the plate list, or at the cut
+    // itself, and it costs no hook because all three marks come from doors the probe already stands on.
+    let leg_runs = GAP_LEG_BEFORE_RUNS.load(atomic::Ordering::Relaxed);
+
+    info!(
+        "Cutt probe gap legs: {leg_runs} of {gap_runs} gaps held a plate list pass, before it mean {:.1} ms worst {} ms, the pass itself mean {:.1} ms worst {} ms, after it mean {:.1} ms worst {} ms, {} gaps held none",
+        mean_ms(GAP_LEG_BEFORE_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
+        GAP_LEG_BEFORE_WORST_MS.load(atomic::Ordering::Relaxed),
+        mean_ms(GAP_LEG_PLATE_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
+        GAP_LEG_PLATE_WORST_MS.load(atomic::Ordering::Relaxed),
+        mean_ms(GAP_LEG_AFTER_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
+        GAP_LEG_AFTER_WORST_MS.load(atomic::Ordering::Relaxed),
+        GAP_WITHOUT_PLATE_RUNS.load(atomic::Ordering::Relaxed)
+    );
+
+    let played_runs = WALL_OPEN_TO_TAP_RUNS.load(atomic::Ordering::Relaxed);
+
+    info!(
+        "Cutt probe cut wall legs: {played_runs} of {runs} closes asked for a tap, the cut played mean {:.1} ms worst {} ms before it asked",
+        mean_ms(WALL_OPEN_TO_TAP_MS_TOTAL.load(atomic::Ordering::Relaxed), played_runs),
+        WALL_OPEN_TO_TAP_WORST_MS.load(atomic::Ordering::Relaxed)
+    );
+    info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");    info!("Cutt probe training scaling points reached:{doors}");
 }
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -1379,6 +1493,33 @@ mod tests {
         assert_eq!(f32::from_bits(peak_merge(after, 3.0)), 3.0);
         assert_eq!(peak_merge(after, f32::NAN), after);
         assert_eq!(peak_merge(after, -8.0), after);
+    }
+
+    #[test]
+    fn a_gap_splits_at_the_plate_list_calls_inside_it() {
+        // The shape run 12 read four times: a close, a plate list pass during the idle, then the next cut
+        // opening. The three legs are the whole gap, so whatever the plate list was not doing stays
+        // visible as time on one side of it instead of disappearing into a mean.
+        let legs = gap_legs(1_000, 2_000, 6_000, 9_000).expect("a gap with a plate list pass between its ends has legs");
+
+        assert_eq!(legs, (1_000, 4_000, 3_000), "before the plate list, the pass itself, after it");
+        assert_eq!(legs.0 + legs.1 + legs.2, 9_000 - 1_000, "the legs are the gap, with nothing invented and nothing lost");
+    }
+
+    #[test]
+    fn a_plate_list_mark_out_of_order_leaves_the_gap_whole() {
+        // Every mark comes from one clock, so a mark outside the gap is a pairing this probe did not earn.
+        // A leg made from it would move the claim rather than support it.
+        assert_eq!(gap_legs(1_000, 500, 6_000, 9_000), None, "a plate list call before the close is not in the gap");
+        assert_eq!(gap_legs(1_000, 2_000, 12_000, 9_000), None, "a plate list call after the next open is not in the gap");
+        assert_eq!(gap_legs(-1, 2_000, 6_000, 9_000), None, "a gap with no close is not a gap");
+    }
+
+    #[test]
+    fn a_gap_with_no_plate_list_pass_counts_as_one_gap() {
+        // The caller counts these apart so the report cannot read three legs of zero as an explanation of
+        // an idle the probe never saw a door in.
+        assert_eq!(gap_legs(1_000, -1, -1, 9_000), None);
     }
 
     #[test]
