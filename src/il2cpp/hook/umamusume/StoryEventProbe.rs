@@ -9,8 +9,8 @@ use crate::{
         hook::umamusume::{
             AnimationSpeed, SceneManager,
             TrainingCuttProbe::{
-                bucket_for, class_for_label, current_view_id, flag_bit, peak_seconds, report_due, CutProbe,
-                BUCKET_COUNT, BUCKET_NAMES, REPORT_INTERVAL_SECS,
+                bucket_for, class_for_label, current_view_id, flag_bit, note_cut_in_end, peak_seconds,
+                report_due, CutProbe, BUCKET_COUNT, BUCKET_NAMES, REPORT_INTERVAL_SECS,
             },
         },
         types::*,
@@ -415,6 +415,10 @@ extern "C" fn TrainingCutInHelper_OnPlayMainCutIn(this: *mut Il2CppObject) {
 extern "C" fn TrainingCutInHelper_OnEndCutIn(this: *mut Il2CppObject) {
     TRAINING_CUT_IN_ON_END_CUT_IN.count();
     close_story_run(3);
+    // The training cut-in finishing is the near end of the wall a slow training turn spends. The far end
+    // is the status panel playing out, a door `TrainingCuttProbe` owns, so the mark is handed over rather
+    // than measured twice.
+    note_cut_in_end();
 
     get_orig_fn!(TrainingCutInHelper_OnEndCutIn, CutInVoidFn)(this);
 }

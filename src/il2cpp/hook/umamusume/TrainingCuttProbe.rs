@@ -88,6 +88,12 @@ const LIST_INTERVAL_FLAG_AND_CANVAS: &[Il2CppTypeEnum] = &[CLASS, R4, BOOL, CLAS
 // cascade intervals can be seen as the caller hands them. No struct travels here, which is what makes a
 // fifteen argument wrapper safe to declare (A5).
 const PLATE_INITIALIZE_ARGS: &[Il2CppTypeEnum] = &[CLASS, CLASS, CLASS, CLASS, R4, R4, BOOL, BOOL, CLASS, CLASS, I4, CLASS, BOOL, BOOL, BOOL];
+// `CommonSendCommandAsync/2 -> IEnumerator(struct<SingleModeDefine.CommandType:4B>, struct<TrainingDefine.TrainingCommandId:4B>)`
+// and `SendCommandAsync/6 -> static IEnumerator(same two structs, int, int, generic<Action<SingleModeCommandResult>>, generic<Action<Cute.Http.ErrorType, int>>)`.
+// Both structs are four byte value types, which travel in a general purpose register (A5), and the two
+// generic callbacks match CLASS through the generic matcher (C48).
+const TWO_COMMAND_IDS: &[Il2CppTypeEnum] = &[VALUETYPE, VALUETYPE];
+const COMMAND_SEND_ARGS: &[Il2CppTypeEnum] = &[VALUETYPE, VALUETYPE, I4, I4, CLASS, CLASS];
 
 pub(crate) fn bit(flag: bool) -> f64 {
     if flag { 1.0 } else { 0.0 }
@@ -239,6 +245,18 @@ static CUTT_FADE_OUT_RESULT_FLASH: CutProbe = CutProbe::counted("SingleModeMainT
 static PLATE_INITIALIZE_LIST: CutProbe = CutProbe::peaked("TrainingParamChangeUI::InitializePlateList(list, interval)");
 static MAIN_COROUTINE_DOTWEEN_SCALE: CutProbe = CutProbe::counted("SingleModeMainViewController::CoroutineDoTweenTimeScale()");
 static MAIN_WAIT_TAP: CutProbe = CutProbe::counted("SingleModeMainViewController::WaitTap()");
+// The training turn's own flow, on `Gallop.SingleModeMainViewController`: the click that opens a turn,
+// the two coroutines that send the turn's command, the coroutine the view walks back through, and the
+// door that plays the remaining turn change animation. `SendCommandAsync/6` is dumped with
+// `Action<SingleModeCommandResult>` and `Action<Cute.Http.ErrorType, int>`, which is the fork's evidence
+// that a training turn is driven by a request. Whether the silent wait inside a turn belongs to that
+// request or to the client's own pacing decides whether anything in it may be shortened at all (C3, C6,
+// C12, C31), so every door here is counted and its arguments and coroutine pointer handed back untouched.
+static MAIN_ON_CLICK_TRAINING: CutProbe = CutProbe::counted("SingleModeMainViewController::OnClickTraining()");
+static MAIN_COMMON_SEND_COMMAND_ASYNC: CutProbe = CutProbe::counted("SingleModeMainViewController::CommonSendCommandAsync(command, id)");
+static MAIN_SEND_COMMAND_ASYNC: CutProbe = CutProbe::counted("SingleModeMainViewController::SendCommandAsync(command, id, int, int, on_result, on_error)");
+static MAIN_BACK_FROM_TRAINING: CutProbe = CutProbe::counted("SingleModeMainViewController::BackFromTraining()");
+static MAIN_TRY_REMAIN_TURN_CHANGE: CutProbe = CutProbe::counted("SingleModeMainViewController::TryPlayRemainTurnChangeAnimation()");
 
 // The doors the run 9 dump turned from guesses into signatures (A28, A29). The cut in progress flag is
 // the boundary v1 was missing, and the driver trio is what actually spends the frames.
@@ -276,7 +294,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 66] = [
+static PROBES: [&CutProbe; 71] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -343,6 +361,11 @@ static PROBES: [&CutProbe; 66] = [
     &PLATE_INITIALIZE_FLASH,
     &PLATE_INITIALIZE,
     &STORY_PLAY_PARAMETER_CHANGE,
+    &MAIN_ON_CLICK_TRAINING,
+    &MAIN_COMMON_SEND_COMMAND_ASYNC,
+    &MAIN_SEND_COMMAND_ASYNC,
+    &MAIN_BACK_FROM_TRAINING,
+    &MAIN_TRY_REMAIN_TURN_CHANGE,
 ];
 
 // One cut-in run, opened by `ResetCurrentTime` and closed by the next one. The wall clock between the
@@ -556,6 +579,16 @@ static PLATE_TYPEWRITE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static PLATE_TYPEWRITE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static PLATE_TYPEWRITE_WORST_MS: AtomicI64 = AtomicI64::new(0);
 
+// The wall between a training cut-in finishing and the status panel playing out. Both training heavy runs
+// put nearly all of a slow turn here: 9,740 ms in run 14 and 7,221 ms in run 15, with no door reached in
+// between, while the frame clock drew the whole way through at about 175 frames a second. The mark is
+// made by the story event probe's training cut-in door and consumed by the status play out door, so a cut
+// reports at most one hole and a cut that plays out at once reports none.
+static CUT_HOLE_FROM_MS: AtomicI64 = AtomicI64::new(-1);
+static CUT_HOLE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static CUT_HOLE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static CUT_HOLE_WORST_MS: AtomicI64 = AtomicI64::new(0);
+
 // A span from a door the game reached to the point the run ended, guarded against a request that never
 // happened or landed after the close. Kept apart from the callers so the guard is a test.
 fn span_from(requested: i64, now: i64) -> Option<i64> {
@@ -737,6 +770,10 @@ fn close_cut_run() {
     // The teardown is also where a cascade that never reported its typewrite end stops being open. A
     // window left open would charge the next turn's first plate event to the cascade before it.
     close_plate_pass();
+
+    // A hole is only a hole inside one cut, so a cut-in end that never reached a play out is dropped
+    // here rather than paired with the next cut's.
+    CUT_HOLE_FROM_MS.store(-1, atomic::Ordering::Relaxed);
 
     if runs <= PROBE_DETAIL_LIMIT {
         let tap = match tap_ms {
@@ -962,13 +999,13 @@ extern "C" fn TrainingParamChangeUI_Update(this: *mut Il2CppObject) {
 type PlateVoidFn = extern "C" fn(this: *mut Il2CppObject);
 extern "C" fn TrainingParamChangeUI_StartSequence(this: *mut Il2CppObject) {
     PLATE_START_SEQUENCE.count();
+    open_plate_pass();
 
     get_orig_fn!(TrainingParamChangeUI_StartSequence, PlateVoidFn)(this);
 }
 
 extern "C" fn TrainingParamChangeUI_StartGroupTypewrite(this: *mut Il2CppObject) {
     PLATE_START_GROUP_TYPEWRITE.count();
-    open_plate_pass();
 
     get_orig_fn!(TrainingParamChangeUI_StartGroupTypewrite, PlateVoidFn)(this);
 }
@@ -1137,9 +1174,12 @@ fn record_play_cadence(last_ms: &AtomicI64, runs: &AtomicUsize, total_ms: &Atomi
     }
 }
 
-// A cascade of plates is open from its first plate list call to its last typewrite end. It is not the
-// same window as a cut: run 14 built most of its plates in the idle between cuts, which is exactly why
-// the cut window alone measured nothing.
+// A cascade of plates is open from its plate list call and the sequence start that follows it, to its
+// last typewrite end. It is not the same window as a cut: run 14 built most of its plates in the idle
+// between cuts, which is exactly why the cut window alone measured nothing. The group start does not open
+// a window of its own. Run 15 called `StartGroupTypewrite` 58 times against 17 `StartSequence` calls, so
+// opening per group reported 19 windows and a 15,141 ms worst cascade for a chain whose own
+// Initialize to OnAllTypewriteEnd span was between 215 ms and 930 ms.
 fn open_plate_pass() {
     if PLATE_PASS_OPEN_MS.load(atomic::Ordering::Relaxed) < 0 {
         PLATE_PASS_OPEN_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
@@ -1172,6 +1212,25 @@ fn record_typewrite_cadence() {
         PLATE_TYPEWRITE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         PLATE_TYPEWRITE_MS_TOTAL.fetch_add(step_ms, atomic::Ordering::Relaxed);
         PLATE_TYPEWRITE_WORST_MS.fetch_max(step_ms, atomic::Ordering::Relaxed);
+    }
+}
+
+// Marks the moment a training cut-in finished. The door for it lives in `StoryEventProbe` because that is
+// where the cut-in helper doors are, and the hole it opens is measured here because the other end of it,
+// the status panel playing out, is a door this probe owns.
+pub(crate) fn note_cut_in_end() {
+    CUT_HOLE_FROM_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+}
+
+// Closes the hole at the status play out. The mark is swapped out rather than read so a cut that calls
+// `PlayOut` twice, which run 15 did twice, charges the wait once.
+fn record_cut_hole() {
+    let from_ms = CUT_HOLE_FROM_MS.swap(-1, atomic::Ordering::Relaxed);
+
+    if let Some(span_ms) = span_from(from_ms, elapsed_ms()) {
+        CUT_HOLE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        CUT_HOLE_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
+        CUT_HOLE_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
     }
 }
 
@@ -1223,6 +1282,7 @@ extern "C" fn PlateUI_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
 }
 
 type CoroutineReturnFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObject;
+type CoroutineVoidFn = extern "C" fn(this: *mut Il2CppObject);
 extern "C" fn SingleModeMain_CoroutineDoTweenTimeScale(this: *mut Il2CppObject) -> *mut Il2CppObject {
     MAIN_COROUTINE_DOTWEEN_SCALE.count();
 
@@ -1233,6 +1293,51 @@ extern "C" fn SingleModeMain_WaitTap(this: *mut Il2CppObject) -> *mut Il2CppObje
     MAIN_WAIT_TAP.count();
 
     get_orig_fn!(SingleModeMain_WaitTap, CoroutineReturnFn)(this)
+}
+
+// `OnClickTraining/0 -> void()`: the click that opens a training turn. Run 15 logged 17 plate cascades
+// and 5 cuts, so the turn count and the reveal count are not the same thing, and the hole clock needs to
+// know which side of the click it is on.
+extern "C" fn SingleModeMain_OnClickTraining(this: *mut Il2CppObject) {
+    MAIN_ON_CLICK_TRAINING.count();
+
+    get_orig_fn!(SingleModeMain_OnClickTraining, CoroutineVoidFn)(this);
+}
+
+extern "C" fn SingleModeMain_BackFromTraining(this: *mut Il2CppObject) -> *mut Il2CppObject {
+    MAIN_BACK_FROM_TRAINING.count();
+
+    get_orig_fn!(SingleModeMain_BackFromTraining, CoroutineReturnFn)(this)
+}
+
+type RemainTurnChangeFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
+extern "C" fn SingleModeMain_TryRemainTurnChange(this: *mut Il2CppObject) -> bool {
+    let value = get_orig_fn!(SingleModeMain_TryRemainTurnChange, RemainTurnChangeFn)(this);
+    MAIN_TRY_REMAIN_TURN_CHANGE.sample(flag_bit(value));
+
+    value
+}
+
+// `CommonSendCommandAsync/2 -> IEnumerator(struct<SingleModeDefine.CommandType:4B>, struct<TrainingDefine.TrainingCommandId:4B>)`:
+// the turn's command going out. Two four byte structs travel in general registers (A5) and the coroutine
+// object the method returns is the game's, so both arguments and the pointer pass through unchanged. The
+// two integers are recorded because the dump spells them as part of the command, and a run that shows a
+// command send at the start of a hole is a run that says the hole is a request the fork must not shorten.
+type CommonSendCommandFn = extern "C" fn(this: *mut Il2CppObject, command: i32, id: i32) -> *mut Il2CppObject;
+extern "C" fn SingleModeMain_CommonSendCommandAsync(this: *mut Il2CppObject, command: i32, id: i32) -> *mut Il2CppObject {
+    MAIN_COMMON_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64]);
+
+    get_orig_fn!(SingleModeMain_CommonSendCommandAsync, CommonSendCommandFn)(this, command, id)
+}
+
+// `SendCommandAsync/6 -> static IEnumerator(CommandType, TrainingCommandId, int, int, Action<SingleModeCommandResult>, Action<Cute.Http.ErrorType, int>)`,
+// the static sibling the view also has. It has no hidden `this` (A3), which is why its wrapper declares
+// only the six dumped arguments.
+type SendCommandFn = extern "C" fn(command: i32, id: i32, first: i32, second: i32, on_result: *mut Il2CppObject, on_error: *mut Il2CppObject) -> *mut Il2CppObject;
+extern "C" fn SingleModeMain_SendCommandAsync(command: i32, id: i32, first: i32, second: i32, on_result: *mut Il2CppObject, on_error: *mut Il2CppObject) -> *mut Il2CppObject {
+    MAIN_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64, first as f64, second as f64]);
+
+    get_orig_fn!(SingleModeMain_SendCommandAsync, SendCommandFn)(command, id, first, second, on_result, on_error)
 }
 
 type SetIsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
@@ -1463,6 +1568,7 @@ extern "C" fn CuttTimeline_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
 type StatusPlayOutFn = extern "C" fn(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject);
 extern "C" fn TrainingCutStatus_PlayOut(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject) {
     STATUS_PLAY_OUT.observe(&[bit(flag)]);
+    record_cut_hole();
 
     get_orig_fn!(TrainingCutStatus_PlayOut, StatusPlayOutFn)(this, flag, action);
 }
@@ -1733,6 +1839,13 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(cut_status, TrainingCutStatus_PlayEnd, "PlayEnd", NO_PARAMS, VOID, "SingleModeMainViewTrainingCutStatus::PlayEnd");
     probe!(main_view, SingleModeMain_CoroutineDoTweenTimeScale, "CoroutineDoTweenTimeScale", NO_PARAMS, CLASS, "SingleModeMainViewController::CoroutineDoTweenTimeScale");
     probe!(main_view, SingleModeMain_WaitTap, "WaitTap", NO_PARAMS, CLASS, "SingleModeMainViewController::WaitTap");
+    probe!(main_view, SingleModeMain_OnClickTraining, "OnClickTraining", NO_PARAMS, VOID, "SingleModeMainViewController::OnClickTraining");
+    probe!(main_view, SingleModeMain_BackFromTraining, "BackFromTraining", NO_PARAMS, CLASS, "SingleModeMainViewController::BackFromTraining");
+    probe!(main_view, SingleModeMain_TryRemainTurnChange, "TryPlayRemainTurnChangeAnimation", NO_PARAMS, BOOL, "SingleModeMainViewController::TryPlayRemainTurnChangeAnimation");
+    probe!(main_view, SingleModeMain_CommonSendCommandAsync, "CommonSendCommandAsync", TWO_COMMAND_IDS, CLASS, "SingleModeMainViewController::CommonSendCommandAsync");
+    // `SendCommandAsync/6` is static and carries two generic callbacks, so it needs the static generic
+    // matcher (A3 for the missing `this`, C48 for the generic arguments).
+    static_generic_probe!(main_view, SingleModeMain_SendCommandAsync, "SendCommandAsync", COMMAND_SEND_ARGS, CLASS, "SingleModeMainViewController::SendCommandAsync");
 
     info!("Cutt probe: {installed} doors installed, {} of them carry a counted kind in the totals line, cut runs measured from the cut start doors to CleanUpCutt and attributed to the view they start on", PROBES.len());
 
@@ -1911,6 +2024,13 @@ pub fn report_if_due() {
         PLATE_PASS_WORST_MS.load(atomic::Ordering::Relaxed),
         mean_ms(PLATE_TYPEWRITE_MS_TOTAL.load(atomic::Ordering::Relaxed), typewrite_runs),
         PLATE_TYPEWRITE_WORST_MS.load(atomic::Ordering::Relaxed)
+    );
+    let hole_runs = CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed);
+
+    info!(
+        "Cutt probe cut holes: {hole_runs} holes mean {:.1} ms worst {} ms from the training cut-in ending to the status play out",
+        mean_ms(CUT_HOLE_MS_TOTAL.load(atomic::Ordering::Relaxed), hole_runs),
+        CUT_HOLE_WORST_MS.load(atomic::Ordering::Relaxed)
     );
     info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");
     info!("Cutt probe training scaling points reached:{doors}");
