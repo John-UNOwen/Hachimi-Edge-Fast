@@ -91,6 +91,12 @@ impl WaitRecorder {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
         let ms = (seconds * MS_PER_SECOND) as i64;
 
+        // Run 25 read a 12404 ms hold in one branch of the training cut coroutine while the cut-in's own
+        // clock sat frozen at 2.4 of 2.4 seconds, so the wait is not the animation. The census of a hole is
+        // the one place that can say whether the wait is a chain of yields this fork can reach, and the only
+        // door that knows is this one. Costs a hash entry while a hole window stands open, nothing else.
+        crate::il2cpp::hook::umamusume::note_hole_census_value(self.name, seconds);
+
         if ms > 0 {
             self.total_ms.fetch_add(ms, atomic::Ordering::Relaxed);
             self.peak_ms.fetch_max(ms, atomic::Ordering::Relaxed);
@@ -286,6 +292,14 @@ mod tests {
         assert!(report_due(3, -1, 4, 0, REPORT_INTERVAL_SECS));
         assert!(!report_due(15, 3, 9, 4, REPORT_INTERVAL_SECS));
         assert!(report_due(24, 3, 9, 4, REPORT_INTERVAL_SECS));
+    }
+
+    #[test]
+    fn a_wait_is_censused_under_the_name_the_report_prints() {
+        // The hole census now carries these doors, and a reader has to be able to match a census entry to
+        // the histogram line. Different labels would make a wait inside a hole look like some other door.
+        assert_eq!(WAIT_SECONDS.name, "UnityEngine.WaitForSeconds");
+        assert_eq!(WAIT_REALTIME.name, "UnityEngine.WaitForSecondsRealTime");
     }
 
     #[test]

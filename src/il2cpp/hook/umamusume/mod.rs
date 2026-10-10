@@ -89,6 +89,10 @@ pub mod AnimationSpeed;
 pub mod SingleModeResultContentBase;
 mod StoryFrameProbe;
 mod TrainingCuttProbe;
+// The wait doors in `UnityEngine_CoreModule::WaitProbe` are outside this assembly's module tree, and one
+// function is the only thing they need: a hole census that cannot see the yields the game armed inside it
+// would report a 12 s wait as an unexplained gap. The module itself stays private.
+pub(crate) use TrainingCuttProbe::note_hole_census_value;
 mod CutStateProbe;
 mod StoryEventProbe;
 mod GameFrameProbe;

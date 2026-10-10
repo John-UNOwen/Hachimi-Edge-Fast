@@ -282,7 +282,9 @@ fn note_hole_census(name: &'static str) {
     }
 }
 
-fn note_hole_census_value(name: &'static str, value: f32) {
+// Shared with the wait doors outside this module: a hole that holds no animation may still be holding a
+// `WaitForSeconds`, and the census line is where that shows up.
+pub(crate) fn note_hole_census_value(name: &'static str, value: f32) {
     if !HOLE_CENSUS_OPEN.load(atomic::Ordering::Relaxed) {
         return;
     }
