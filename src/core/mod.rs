@@ -12,8 +12,8 @@ pub mod gui;
 pub use gui::Gui;
 
 pub mod plurals;
-pub mod speed_preset;
-pub use speed_preset::SpeedPreset;
+pub mod settings_preset;
+pub use settings_preset::SettingsPreset;
 mod template_filters;
 
 #[macro_use] pub mod interceptor;
