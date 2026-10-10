@@ -157,6 +157,7 @@ pub struct Gui {
     menu_visible: bool,
     menu_anim_time: Option<Instant>,
     menu_fps_value: i32,
+    menu_preset_name: String,
 
     #[cfg(target_os = "windows")]
     menu_vsync_value: i32,
@@ -2915,6 +2916,7 @@ impl Gui {
             menu_visible: false,
             menu_anim_time: None,
             menu_fps_value: fps_value,
+            menu_preset_name: String::new(),
 
             #[cfg(target_os = "windows")]
             menu_vsync_value: hachimi.vsync_count.load(atomic::Ordering::Relaxed),
@@ -3686,6 +3688,69 @@ impl Gui {
                     if ui.button(t!("menu.check_for_updates")).clicked() {
                         Hachimi::instance().updater.clone().check_for_updates(|_| {});
                     }
+
+                    // The preset picker lives in the menu rather than in the Config Editor: an arm is
+                    // switched between training turns, which is not while reading sliders. A preset is
+                    // the whole config, so restoring one restores graphics and translation too, and
+                    // the log line it prints is what says which arm the run was on.
+                    {
+                        use crate::core::settings_preset::SettingsPreset;
+
+                        let mut config = hachimi.config.load().as_ref().clone();
+                        let current = if config.settings_preset_name.is_empty() {
+                            t!("menu.speed_preset_none").to_string()
+                        } else {
+                            config.settings_preset_name.clone()
+                        };
+                        let presets = SettingsPreset::all_presets(&config);
+                        let mut chosen: Option<usize> = None;
+
+                        ui.label(t!("menu.speed_preset"));
+                        egui::ComboBox::new(ui.id().with("settings_preset"), "")
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                for (index, preset) in presets.iter().enumerate() {
+                                    if ui.selectable_label(config.settings_preset_name == preset.name, preset.name.as_str()).clicked() {
+                                        chosen = Some(index);
+                                    }
+                                }
+                            });
+
+                        if let Some(index) = chosen {
+                            presets[index].apply_to(&mut config);
+                            info!("{}", presets[index].log_line());
+                            save_and_reload_config(config.clone());
+                            self.config = config.clone();
+                        }
+
+                        let typed = self.menu_preset_name.clone();
+                        // Wrapped rather than a plain row: the menu panel can be as narrow as 96 px,
+                        // and a row that cannot fit would clip the button rather than the label.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.menu_preset_name).hint_text(t!("menu.speed_preset_name_hint")).desired_width(70.0));
+
+                            if ui.small_button(t!("menu.speed_preset_save")).clicked() && !typed.trim().is_empty() {
+                                let preset = SettingsPreset::capture(typed.trim(), &config);
+                                info!("Settings preset saved: {}", preset.log_line());
+                                SettingsPreset::save(&mut config, &preset);
+                                save_and_reload_config(config.clone());
+                                self.config = config.clone();
+                            }
+                        });
+
+                        // Delete only appears for a name that is actually a saved snapshot. The three
+                        // built-in arms are derived from the live config, so there is nothing here to
+                        // delete and no button that would do nothing.
+                        if config.settings_presets.iter().any(|saved| saved.name == config.settings_preset_name)
+                            && ui.small_button(t!("menu.speed_preset_delete")).clicked()
+                        {
+                            let name = config.settings_preset_name.clone();
+                            SettingsPreset::remove(&mut config, &name);
+                            save_and_reload_config(config.clone());
+                            self.config = config.clone();
+                        }
+                    }
+
                     ui.separator();
 
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -5880,56 +5945,6 @@ impl ConfigEditor {
         // Performance tab: frame caps, the speed groups that shorten Gallop animations,
         // the story text and choice pacing, and the spring physics update mode.
         if show_all || tab == ConfigEditorTab::Performance {
-            // The preset row. The speed options only become believable once they are measured against
-            // each other, and that needs the arms switched between turns instead of twelve sliders
-            // edited twice by hand. Clicking an arm saves the config and marks the levers dirty, so
-            // the next `GameSystem_Update` re-applies the group factors while the game is running.
-            if should_show_option(search, &t!("config_editor.speed_preset")) {
-                use crate::core::speed_preset::SpeedPreset;
-
-                let presets = SpeedPreset::all_presets(config);
-                let mut chosen: Option<String> = None;
-
-                ui.label(t!("config_editor.speed_preset"));
-                ui.horizontal(|ui| {
-                    for preset in presets.iter() {
-                        if ui.selectable_label(config.speed_preset_name == preset.name, preset.name.as_str()).clicked() {
-                            chosen = Some(preset.name.clone());
-                        }
-                    }
-                });
-                ui.end_row();
-
-                if let Some(name) = chosen {
-                    if let Some(preset) = presets.iter().find(|preset| preset.name == name) {
-                        preset.apply_to(config);
-                        log::info!("{}", preset.log_line());
-                        save_and_reload_config(config.clone());
-                    }
-                }
-
-                if should_show_option(search, &t!("config_editor.speed_preset_name")) {
-                    ui.label(t!("config_editor.speed_preset_name"));
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut config.speed_preset_name).hint_text(t!("config_editor.speed_preset_name_hint")).desired_width(150.0));
-
-                        let typed = config.speed_preset_name.clone();
-
-                        if ui.button(t!("config_editor.speed_preset_save")).clicked() {
-                            let preset = SpeedPreset::capture(&typed, config);
-                            log::info!("Speed preset saved: {}", preset.log_line());
-                            SpeedPreset::save(config, &preset);
-                            save_and_reload_config(config.clone());
-                        }
-
-                        if ui.button(t!("config_editor.speed_preset_delete")).clicked() && SpeedPreset::remove(config, &typed) {
-                            save_and_reload_config(config.clone());
-                        }
-                    });
-                    ui.end_row();
-                }
-            }
-
             if should_show_option(search, &t!("config_editor.target_fps")) {
                 Self::option_slider(ui, &t!("config_editor.target_fps"), &mut config.target_fps, 30..=690);
             }
