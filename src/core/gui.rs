@@ -5973,9 +5973,15 @@ impl ConfigEditor {
                 // This lever multiplies the clock a tween is measured on - the delta channel
                 // `DOTween/TweenManager.rs` hands DOTween, not the `independent_time` channel a time
                 // scale independent tween is advanced by (C5) - so the group sliders under it are
-                // bounded against it rather than against nothing: `AnimationSpeed::duration_factor`
-                // lets a group shorten a duration only by what is left under MAX_TWEEN_SPEED_PRODUCT, and
-                // at the top of this slider the group factors add nothing to the same completion (C58).
+                // bounded against it rather than against nothing: `AnimationSpeed::duration_factor_at`
+                // lets a group shorten a duration only by what is left under MAX_TWEEN_SPEED_PRODUCT on a
+                // door whose completion that clock measures, and at the top of this slider the group factors
+                // add nothing to the same completion (C58). A door whose completion the clock layer is
+                // measured not to reach keeps its whole group factor instead: the bound is a ceiling on a
+                // pair, never a slowdown of a value one layer reaches. The channel this slider multiplies is
+                // the game's `Time.deltaTime`, which already carries the `Time.timeScale` this fork's write
+                // layer fills, so the clock the group factors are priced against is this lever capped by what
+                // the scale under it leaves: `AnimationSpeed::delta_clock`.
                 ui.add(egui::Slider::new(&mut config.ui_animation_scale, AnimationSpeed::MIN_UI_ANIMATION_SCALE..=AnimationSpeed::MAX_UI_ANIMATION_SCALE).step_by(0.1));
                 ui.end_row();
             }
@@ -5991,10 +5997,16 @@ impl ConfigEditor {
             }
 
             // These group sliders shorten the duration a game method is handed, while the slider above
-            // multiplies the clock the tween runs on. `AnimationSpeed::duration_factor` bounds the pair
-            // at MAX_TWEEN_SPEED_PRODUCT on one completion, so raising both to 20 leaves the group
-            // factors with nothing to take (C58, ledger item 62). The story group's time scale half is a
-            // different quantity and answers to MAX_TIME_SCALE instead.
+            // multiplies the clock the tween runs on. `AnimationSpeed::duration_factor_at` bounds the pair at
+            // MAX_TWEEN_SPEED_PRODUCT on one completion both layers reach, so raising both to 20 leaves the
+            // group factors with nothing to take (C58, ledger item 62). Which door that reaches is the pace
+            // written at the door and printed by `AnimationSpeed::note_pair_ceiling`; a completion the clock
+            // layer does not measure keeps its group's whole factor, because a ceiling on a pair is not a
+            // reason to slow one layer. The clock the group factors are priced against is that slider over the
+            // whole `Time.timeScale` this fork's write layer left in the game under it - the delta argument
+            // already carries it - so the ceiling prices the channel a completion runs on and not a list of
+            // levers. The story group's time scale half is a different quantity, the story timeline's own clip
+            // clock, and answers to MAX_TIME_SCALE instead.
             if should_show_option(search, &t!("config_editor.transition_speed")) {
                 ui.label(t!("config_editor.transition_speed"));
                 ui.add(egui::Slider::new(&mut config.transition_speed, 1.0..=20.0).step_by(0.5));
