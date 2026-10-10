@@ -3,7 +3,7 @@ use std::sync::{Condvar, Mutex};
 use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server};
-use crate::{core::utils::notify_error, il2cpp::{hook::umamusume::{GameSystem, StoryTimelineController, StoryTimelineData}, symbols::{IList, Thread}}};
+use crate::{core::utils::notify_error, il2cpp::{hook::umamusume::{GameSystem, StoryTimelineController, StoryTimelineData}, symbols::{IList, Thread}, types::Il2CppObject}};
 use super::{Error, Gui, Hachimi};
 
 pub fn start_http(listen_all: bool) {
@@ -89,16 +89,38 @@ fn on_http_request(request: &mut Request) -> Result<CommandResponse, Error> {
                 let (ref mut block_id, incremental) = *STORY_GOTO_BLOCK_PARAMS.lock().unwrap();
 
                 fn exec(block_id: i32, incremental: bool) -> i32 {
-                    let mut handle_guard = StoryTimelineController::CURRENT.lock().unwrap();
-                    let Some(controller) = (*handle_guard).as_ref()
-                        .map(|h| h.target())
-                        .filter(|c| !c.is_null() && !StoryTimelineController::get_IsFinished(*c))
-                    else {
-                        *handle_guard = None;
+                    // The controller this jump needs is whatever `CURRENT` holds *at each call*.
+                    // `CURRENT` is the shared static the story rewrites as it moves (the `GotoBlock`
+                    // detour points it at the controller the story arrived on), and its handle is the
+                    // only thing that knows whether the controller this jump started on is still
+                    // there: every jump below runs story code, and story code ends stories and frees
+                    // the controller a story ran on.
+                    //
+                    // Reading the handle once, dropping the lock and then walking that copy through
+                    // up to hundreds of jumps is the check-then-use this item is about - the check
+                    // was made against the handle, the calls used the copy (C11).
+                    fn live_controller() -> Option<*mut Il2CppObject> {
+                        let target = {
+                            let guard = StoryTimelineController::CURRENT.lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                            guard.as_ref().map(|handle| handle.target())
+                        };
+
+                        // The handle read and the two questions asked of its answer are the whole
+                        // gap: a null test and a read of that same object's own state. Neither can
+                        // take the controller away, and an answer of "finished" refuses the value
+                        // rather than passing it on.
+                        target.filter(|controller| !controller.is_null()
+                            && !StoryTimelineController::get_IsFinished(*controller))
+                    }
+
+                    let Some(controller) = live_controller() else {
+                        *StoryTimelineController::CURRENT.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                         notify_error("No current StoryTimelineController");
                         return -3;
                     };
-                    drop(handle_guard);
 
                     let timeline_data = StoryTimelineController::get_TimelineData(controller);
                     if timeline_data.is_null() {
@@ -120,6 +142,10 @@ fn on_http_request(request: &mut Request) -> Result<CommandResponse, Error> {
                         let last_block_id = StoryTimelineController::last_block_id();
                         let start = if last_block_id > block_id { 0 } else { last_block_id + 1 };
                         for i in start..=block_id {
+                            // Re-derived per jump: one of the jumps before this one may have been
+                            // the jump that ended the story this controller was running.
+                            let Some(controller) = live_controller() else { return -3 };
+
                             StoryTimelineController::GotoBlock(controller, i, false, false, false);
                         }
                     }

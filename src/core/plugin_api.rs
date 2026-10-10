@@ -291,9 +291,12 @@ unsafe extern "C" fn hachimi_register_on_game_initialized(
     let Some(callback) = callback else {
         return false;
     };
-    let hachimi = Hachimi::instance();
-    let mut callbacks = hachimi.plugin_init_callbacks.lock().unwrap();
-    callbacks.push((callback as usize, userdata as usize));
+
+    // C16 follow-up: the queue and its dispatch belong to `Hachimi`, which stores the registrant,
+    // recovers from a poisoned queue instead of panicking back across this `extern "C"` boundary
+    // (AGENTS section 6), and fires a registrant that arrives after the plugin `init()` pass rather
+    // than queueing it for a dispatch that already ran.
+    Hachimi::instance().register_plugin_init_callback(callback as usize, userdata as usize);
     true
 }
 
@@ -306,7 +309,10 @@ unsafe extern "C" fn hachimi_register_present_callback(
         return false;
     };
     let hachimi = Hachimi::instance();
-    let mut callbacks = hachimi.present_callbacks.lock().unwrap();
+    // C2: an exported entry a plugin calls through, `unsafe extern "C"` and nounwind, and this is
+    // the Windows-only half of it. A poisoned `present_callbacks` must hand this call the list, not
+    // a panic that cannot unwind out of the frame (AGENTS section 6).
+    let mut callbacks = crate::core::hachimi::recover_lock(&hachimi.present_callbacks);
     callbacks.push((callback as usize, userdata as usize));
     true
 }
@@ -783,7 +789,7 @@ unsafe extern "C" fn gui_set_menu_width(width: f32) {
 unsafe extern "C" fn hachimi_get_base_dir() -> *const c_char {
     let s = DATA_DIR_CSTR.get_or_init(|| {
         let path = &Hachimi::instance().game.data_dir;
-        CString::new(path.to_string_lossy().into_owned()).unwrap()
+        CString::new(path.to_string_lossy().into_owned()).unwrap_or_else(|_| CString::default())
     });
     s.as_ptr()
 }
@@ -791,7 +797,7 @@ unsafe extern "C" fn hachimi_get_base_dir() -> *const c_char {
 unsafe extern "C" fn hachimi_get_data_path() -> *const c_char {
     let s = DATA_PATH_CSTR.get_or_init(|| {
         let path = get_data_path();
-        CString::new(path).unwrap()
+        CString::new(path).unwrap_or_else(|_| CString::default())
     });
     s.as_ptr()
 }

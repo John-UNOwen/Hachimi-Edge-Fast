@@ -69,7 +69,7 @@ use crate::windows::free_camera::{self, FreeCameraMode};
 
 use super::{
     game::Region,
-    hachimi::{self, Language, REPO_PATH, WEBSITE_URL, RACE_MECHANICS_URL},
+    hachimi::{self, recover_lock, Language, REPO_PATH, WEBSITE_URL, RACE_MECHANICS_URL},
     http::{ureq_config, AsyncRequest},
     live_utils,
     tl_repo::{self, RepoInfo, LocalRepoInfo},
@@ -115,7 +115,7 @@ static PREV_MENU_WIDTH: Mutex<f32> = Mutex::new(200.0);
 static REQUESTED_WIDTH: Mutex<Option<f32>> = Mutex::new(None);
 
 pub fn get_menu_width() -> f32 {
-    *PREV_MENU_WIDTH.lock().unwrap()
+    *recover_lock(&PREV_MENU_WIDTH)
 }
 
 pub fn set_menu_width(width: f32) {
@@ -2442,7 +2442,7 @@ unsafe impl Send for PluginWindow {}
 unsafe impl Sync for PluginWindow {}
 
 pub fn register_plugin_menu_item(label: String, callback: Option<PluginMenuCallback>, userdata: *mut c_void) {
-    PLUGIN_MENU_ITEMS.lock().unwrap().push(PluginMenuItem {
+    recover_lock(&PLUGIN_MENU_ITEMS).push(PluginMenuItem {
         label,
         callback,
         userdata: userdata as usize
@@ -2450,7 +2450,7 @@ pub fn register_plugin_menu_item(label: String, callback: Option<PluginMenuCallb
 }
 
 pub fn register_plugin_menu_section(callback: PluginMenuSectionCallback, userdata: *mut c_void) {
-    PLUGIN_MENU_SECTIONS.lock().unwrap().push(PluginMenuSection {
+    recover_lock(&PLUGIN_MENU_SECTIONS).push(PluginMenuSection {
         title: None,
         icon: None,
         callback,
@@ -2468,7 +2468,7 @@ pub fn register_plugin_menu_section_with_icon(
     if title.is_empty() || uri.is_empty() || bytes.is_empty() {
         return false;
     }
-    PLUGIN_MENU_SECTIONS.lock().unwrap().push(PluginMenuSection {
+    recover_lock(&PLUGIN_MENU_SECTIONS).push(PluginMenuSection {
         title: Some(title),
         icon: Some(PluginMenuIcon { uri, bytes: bytes.into() }),
         callback,
@@ -2481,7 +2481,7 @@ pub fn register_plugin_menu_icon(label: String, uri: String, bytes: Vec<u8>) -> 
     if label.is_empty() || uri.is_empty() || bytes.is_empty() {
         return false;
     }
-    PLUGIN_MENU_ICONS.lock().unwrap().insert(label, PluginMenuIcon {
+    recover_lock(&PLUGIN_MENU_ICONS).insert(label, PluginMenuIcon {
         uri,
         bytes: bytes.into(),
     });
@@ -2489,23 +2489,23 @@ pub fn register_plugin_menu_icon(label: String, uri: String, bytes: Vec<u8>) -> 
 }
 
 pub fn enqueue_plugin_notification(message: String) {
-    PLUGIN_NOTIFICATIONS.lock().unwrap().push(message);
+    recover_lock(&PLUGIN_NOTIFICATIONS).push(message);
 }
 
 fn get_plugin_menu_items() -> Vec<PluginMenuItem> {
-    PLUGIN_MENU_ITEMS.lock().unwrap().clone()
+    recover_lock(&PLUGIN_MENU_ITEMS).clone()
 }
 
 fn get_plugin_menu_sections() -> Vec<PluginMenuSection> {
-    PLUGIN_MENU_SECTIONS.lock().unwrap().clone()
+    recover_lock(&PLUGIN_MENU_SECTIONS).clone()
 }
 
 fn get_plugin_menu_icon(label: &str) -> Option<PluginMenuIcon> {
-    PLUGIN_MENU_ICONS.lock().unwrap().get(label).cloned()
+    recover_lock(&PLUGIN_MENU_ICONS).get(label).cloned()
 }
 
 fn drain_plugin_notifications() -> Vec<String> {
-    let mut notifications = PLUGIN_NOTIFICATIONS.lock().unwrap();
+    let mut notifications = recover_lock(&PLUGIN_NOTIFICATIONS);
     std::mem::take(&mut *notifications)
 }
 
@@ -2564,20 +2564,20 @@ pub fn show_plugin_window(
         pending_anchor: true,
     };
     
-    PLUGIN_WINDOWS_TO_SHOW.lock().unwrap().push(window);
+    recover_lock(&PLUGIN_WINDOWS_TO_SHOW).push(window);
 }
 
 pub fn close_plugin_window(id: i32) {
-    PLUGIN_WINDOWS_TO_CLOSE.lock().unwrap().push(id);
+    recover_lock(&PLUGIN_WINDOWS_TO_CLOSE).push(id);
 }
 
 fn drain_plugin_windows_to_show() -> Vec<PluginWindow> {
-    let mut windows = PLUGIN_WINDOWS_TO_SHOW.lock().unwrap();
+    let mut windows = recover_lock(&PLUGIN_WINDOWS_TO_SHOW);
     std::mem::take(&mut *windows)
 }
 
 fn take_plugin_windows_to_close() -> Vec<i32> {
-    let mut ids = PLUGIN_WINDOWS_TO_CLOSE.lock().unwrap();
+    let mut ids = recover_lock(&PLUGIN_WINDOWS_TO_CLOSE);
     std::mem::take(&mut *ids)
 }
 
@@ -2591,7 +2591,7 @@ static KEYBIND_CAPTURED: Lazy<Mutex<Option<(RawKeybind, String)>>> =
     Lazy::new(|| Mutex::new(None));
 
 pub fn start_keybind_capture() {
-    *KEYBIND_CAPTURED.lock().unwrap() = None;
+    *recover_lock(&KEYBIND_CAPTURED) = None;
     KEYBIND_CAPTURE_ACTIVE.store(true, atomic::Ordering::Relaxed);
 }
 
@@ -2599,13 +2599,16 @@ pub fn is_keybind_capture_active() -> bool {
     KEYBIND_CAPTURE_ACTIVE.load(atomic::Ordering::Relaxed)
 }
 
+/// Reached from `wnd_hook::wnd_proc` and from Android's `nativeInjectEvent` - both are frames a
+/// foreign caller lands on and neither has a barrier on it, so this latch is taken through
+/// `recover_lock` (C2, AGENTS section 6).
 pub fn report_keybind_capture(raw: RawKeybind, display: String) {
     KEYBIND_CAPTURE_ACTIVE.store(false, atomic::Ordering::Relaxed);
-    *KEYBIND_CAPTURED.lock().unwrap() = Some((raw, display));
+    *recover_lock(&KEYBIND_CAPTURED) = Some((raw, display));
 }
 
 fn take_keybind_capture() -> Option<(RawKeybind, String)> {
-    KEYBIND_CAPTURED.lock().unwrap().take()
+    recover_lock(&KEYBIND_CAPTURED).take()
 }
 
 #[cfg(target_os = "android")]

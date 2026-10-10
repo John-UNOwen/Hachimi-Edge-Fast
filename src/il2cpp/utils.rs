@@ -223,6 +223,14 @@ pub fn replace_texture_with_diff_ex<P1: AsRef<Path>, P2: AsRef<Path>>(
 /// Numbers <=0 skip that axis.
 pub fn adjust_transform_size(component: *mut Il2CppObject, width: f32, height: f32) {
     let transform = Component::get_transform(component);
+
+    // C9: the transform is the game's answer for this component. A component that is not live
+    // anymore answers null, and there is no class to compare against a null - the size change is
+    // simply not applied, which is what the RectTransform check already means when it fails.
+    if transform.is_null() {
+        return;
+    }
+
     if unsafe { (*transform).klass() } == RectTransform::class() {
         if width > 0.0 {
             RectTransform::SetSizeWithCurrentAnchors(transform, RectTransform::Axis::Horizontal, width);
