@@ -87,10 +87,11 @@ pub fn report_poisoned_lock_recoveries() {
     info!("{}", poisoned_lock_report());
 }
 
-/// Which door reached the take-down counts first. Two doors can say them: the detach branch in
-/// `src/windows/main.rs`, and the process's own exit call in `src/windows/hook.rs`. Every run so far
-/// ended before either printed anything, so the fork could not tell a detach that never arrived from
-/// one that died on the way to the reports.
+/// Which door reached the take-down counts first. Three doors can say them: the detach branch in
+/// `src/windows/main.rs`, the process's own exit call in `src/windows/hook.rs`, and the game window's
+/// teardown message in `src/windows/wnd_hook.rs`. Every run so far ended before any of them printed
+/// anything: no run reached the detach branch, and run 32 showed the exit call door standing on a path
+/// this game does not take when it closes normally.
 static TAKE_DOWN_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// True for the first caller only, so a session says the counts once whichever door gets there.

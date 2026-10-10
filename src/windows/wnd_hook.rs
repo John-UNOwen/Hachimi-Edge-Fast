@@ -11,7 +11,7 @@ use windows::{core::{w, BOOL, HSTRING}, Win32::{
             CallNextHookEx, CallWindowProcW, DefWindowProcW, EnumWindows, GetClassNameW, GetClientRect, GetForegroundWindow, GetWindowLongPtrW,
             GetWindowRect, GetWindowThreadProcessId, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
             UnhookWindowsHookEx, SetWindowTextW,
-            GWLP_WNDPROC, HCBT_MINMAX, HHOOK, SW_RESTORE, WH_CBT, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN, WNDPROC,
+            GWLP_WNDPROC, HCBT_MINMAX, HHOOK, SW_RESTORE, WH_CBT, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_SYSKEYDOWN, WNDPROC,
             WM_IME_SETCONTEXT, WM_IME_NOTIFY, WM_ACTIVATE, WA_INACTIVE, GWL_STYLE, SIZE_MAXIMIZED,
             SIZE_MINIMIZED,
             SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ENTERSIZEMOVE,
@@ -428,12 +428,55 @@ fn restore_original_wnd_proc(hwnd: HWND) {
     RESTORING_WNDPROC.store(false, atomic::Ordering::Release);
 }
 
+/// Set once when a teardown message arrives on a window other than the one `find_game_window`
+/// settled on, so the note about it is one line per session and not one per message.
+static TEARDOWN_OTHER_WINDOW_NOTICED: AtomicBool = AtomicBool::new(false);
+
+/// The two messages that mean this window is ending: `WM_CLOSE` is the request to close it,
+/// `WM_DESTROY` is the window actually going away. An in game quit reaches one of them whichever way
+/// the game gets there (its own quit option destroys the window rather than posting a close), and a
+/// process killed from outside reaches neither, which is the difference this fork has been unable to
+/// read. Kept apart from `wnd_proc` so a test can say which messages arm the report without a game.
+fn is_teardown_message(umsg: c_uint) -> bool {
+    umsg == WM_CLOSE || umsg == WM_DESTROY
+}
+
 /// The subclassed window procedure: a frame Windows calls, `extern "system"` = `nounwind`, reached on
 /// every message the game window takes. Its GUI reads go through `core::hachimi::recover_lock`, not
 /// `unwrap()`, because one earlier panic inside `GUI` would otherwise answer every later message with
 /// a panic this frame cannot unwind (C2, AGENTS section 6). The `let ... else` branches that hand a
 /// message to `orig_fn` are for a GUI that is **absent**; a poisoned one still gets the mod's branch.
 extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // The take-down counts had one mouth, `DLL_PROCESS_DETACH`, and 32 runs never reached it, so every
+    // "no barrier trip" written in a run note was an absence rather than a measurement. This message is
+    // reached while the process is alive, on its own thread, with the logger still working, which is
+    // the opposite of the teardown moment the exit door turned out to be. The latch in `core::hachimi`
+    // means it is said once however many teardown messages arrive, and a session that ends without a
+    // window teardown still prints nothing, which is what a kill looks like. It stands behind the
+    // barrier for the same reason the exit call door does: this frame cannot unwind, and the two
+    // comparisons are what keep it off the messages that arrive every frame. The handle is the game
+    // window `find_game_window` settled on, so a helper window going away mid session cannot spend
+    // the one claim on an incomplete count.
+    if is_teardown_message(umsg) {
+        if hwnd == get_target_hwnd() {
+            let _ = crate::il2cpp::hook::guard::detour_fallback_or(
+                |_answer| {
+                    // Every door names itself before the counts so a run can see which of them spoke;
+                    // the counts are claimed once whichever arrives first.
+                    info!("Game window teardown message {} on the game window", umsg);
+                    crate::core::hachimi::report_take_down_once();
+                },
+                || {},
+            );
+        }
+        else if !TEARDOWN_OTHER_WINDOW_NOTICED.swap(true, atomic::Ordering::AcqRel) {
+            // The other half of a silent door. If the counts still do not appear in a run, this line
+            // says whether the teardown message came from a window the fork is not standing on rather
+            // than from the game closing no window at all.
+            warn!("Window teardown message {} arrived on window {:p}, not the game window; the take-down counts stay unsaid", umsg, hwnd.0);
+        }
+    }
+
     let freeform_window = Hachimi::instance().config.load().windows.freeform_window;
     let inline_hooked = WNDPROC_INLINE_HOOKED.load(atomic::Ordering::Acquire);
 
@@ -880,6 +923,27 @@ pub fn uninit() {
         }
         if let Err(e) = discord::stop_rpc() {
             error!("{}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The report is a once per process claim about a whole session, so what arms it is the claim: a
+    // message that arrives during play would print the counts in the middle of a run, and a message
+    // that an ordinary quit never sends would leave them unsaid, which is the state 32 runs were in.
+    #[test]
+    fn the_teardown_report_is_armed_by_close_and_destroy() {
+        assert!(is_teardown_message(WM_CLOSE));
+        assert!(is_teardown_message(WM_DESTROY));
+    }
+
+    #[test]
+    fn the_messages_this_frame_takes_while_the_game_is_running_never_arm_it() {
+        for msg in [WM_INPUT, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_KEYDOWN, WM_KEYUP, WM_ACTIVATE, WM_SIZE, WM_IME_NOTIFY] {
+            assert!(!is_teardown_message(msg), "message {} armed the teardown report", msg);
         }
     }
 }
