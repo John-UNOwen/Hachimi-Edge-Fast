@@ -49,8 +49,11 @@ pub struct SpeedPreset {
 }
 
 impl SpeedPreset {
-    /// The neutral arm, read off the shipped defaults rather than written out here, so a preset
-    /// cannot drift from what a fresh install runs.
+    /// The arm where this fork writes nothing on a timing path. Most fields are the shipped defaults
+    /// because those defaults are already inert. Two are not: the story text speed multiplier ships at
+    /// 3.0, and a shipped choice delay of 1.2 hands the story auto select accumulator
+    /// `CHOICE_AUTO_SELECT_TRIGGER_TIME / 1.2` = 0.625, which is a *slower* wait than the game's own.
+    /// This arm names 1.0 and the trigger time itself, the one delay where the multiplier is 1.0.
     pub fn neutral() -> Self {
         let shipped = Config::default();
 
@@ -61,8 +64,8 @@ impl SpeedPreset {
             story_speed: shipped.story_speed,
             ui_animation_scale: shipped.ui_animation_scale,
             time_scale: shipped.time_scale,
-            story_tcps_multiplier: shipped.story_tcps_multiplier,
-            story_choice_auto_select_delay: shipped.story_choice_auto_select_delay,
+            story_tcps_multiplier: 1.0,
+            story_choice_auto_select_delay: AnimationSpeed::CHOICE_AUTO_SELECT_TRIGGER_TIME,
             target_fps: shipped.target_fps,
             auto_skip_result_screens: shipped.auto_skip_result_screens,
             high_speed_settings: shipped.high_speed_settings,
@@ -209,7 +212,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_neutral_preset_is_the_shipped_config_on_every_timing_field() {
+    fn the_neutral_arm_is_the_shipped_defaults_except_where_a_shipped_default_is_already_raised() {
         let shipped = Config::default();
         let preset = SpeedPreset::neutral();
 
@@ -219,13 +222,16 @@ mod tests {
         assert_eq!(preset.story_speed, shipped.story_speed);
         assert_eq!(preset.ui_animation_scale, shipped.ui_animation_scale);
         assert_eq!(preset.time_scale, shipped.time_scale);
-        assert_eq!(preset.story_tcps_multiplier, shipped.story_tcps_multiplier);
-        assert_eq!(preset.story_choice_auto_select_delay, shipped.story_choice_auto_select_delay);
         assert_eq!(preset.target_fps, shipped.target_fps);
         assert_eq!(preset.auto_skip_result_screens, shipped.auto_skip_result_screens);
         assert_eq!(preset.high_speed_settings, shipped.high_speed_settings);
         assert_eq!(preset.story_high_speed_mode, shipped.story_high_speed_mode);
         assert_eq!(preset.physics_update_mode, shipped.physics_update_mode);
+
+        assert_eq!(preset.story_tcps_multiplier, 1.0, "the shipped text multiplier is 3.0, which is a raised lever and belongs to the other arm");
+        assert_eq!(preset.story_choice_auto_select_delay, AnimationSpeed::CHOICE_AUTO_SELECT_TRIGGER_TIME);
+        assert_eq!(AnimationSpeed::story_choice_auto_select_multiplier(shipped.story_choice_auto_select_delay), Some(0.625),
+            "the shipped 1.2 delay hands the story auto select a multiplier under 1.0, which is why the neutral arm cannot simply copy it");
     }
 
     #[test]
@@ -248,7 +254,10 @@ mod tests {
         assert_eq!(config.story_speed, 1.0);
         assert_eq!(config.ui_animation_scale, 1.0);
         assert_eq!(config.time_scale, 1.0);
-        assert_eq!(config.story_choice_auto_select_delay, 1.2, "the shipped delay is the inert one: both choice sites clamp a multiplier below 1.0 to no change");
+        assert_eq!(config.story_tcps_multiplier, 1.0, "the text multiplier multiplies TypewriteCountPerSecond, so only 1.0 leaves it alone");
+        assert_eq!(config.story_choice_auto_select_delay, 0.75);
+        assert_eq!(AnimationSpeed::story_choice_auto_select_multiplier(config.story_choice_auto_select_delay), Some(1.0),
+            "both story choice sites read this multiplier, so 1.0 is the setting where neither writes");
         assert!(!config.auto_skip_result_screens);
         assert!(!config.high_speed_settings);
         assert!(!config.story_high_speed_mode);

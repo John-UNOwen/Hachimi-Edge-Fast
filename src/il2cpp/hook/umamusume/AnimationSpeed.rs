@@ -260,8 +260,9 @@ pub const MAX_STORY_CHOICE_AUTO_SELECT_TIME_SCALE: f32 = MAX_TIME_SCALE;
 
 // What the client compares `_choiceAutoSelectWaitTime` against before it auto taps a story
 // choice. C24: this is the shipped constant the hook pair already assumes, not a value read out
-// of the live client.
-const CHOICE_AUTO_SELECT_TRIGGER_TIME: f32 = 0.75;
+// of the live client. Public because the only `story_choice_auto_select_delay` that leaves both sites
+// inert is this number divided by itself (core::speed_preset).
+pub const CHOICE_AUTO_SELECT_TRIGGER_TIME: f32 = 0.75;
 
 /// `CHOICE_AUTO_SELECT_TRIGGER_TIME / delay` as the wait time site is allowed to apply it: the
 /// delay has a hard floor and the multiplier a hard ceiling, independent of what any slider offers or
