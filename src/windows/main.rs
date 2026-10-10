@@ -76,16 +76,20 @@ pub extern "C" fn DllMain(hmodule: HMODULE, call_reason: c_ulong, _reserved: *mu
         info!("Attach completed");
     }
     else if call_reason == DLL_PROCESS_DETACH && Hachimi::is_initialized() {
-        wnd_hook::uninit();
-
+        // The line is said before anything here can fail. `wnd_hook::uninit` restores a window subclass
+        // and closes the Discord pipe, and ten runs of `hachimi.log` printed neither this line nor the
+        // counts, which left the fork unable to tell a detach that never arrived from one that died on
+        // the way to the reports. The counts are claimed in `core::hachimi`, so the exit call door in
+        // `src/windows/hook.rs` says them once if it got there first and this branch says nothing.
         info!("Unhooking everything");
         // Cold path, and the place the barrier's counts are said. A trip still never logs on the spot -
         // a hook that faults every frame would otherwise write a line every frame - with one exception:
         // a hook take-down names itself at the moment it happens, for the first eight of them
         // (`core::interceptor::TAKEDOWN_LOG_LIMIT`), because a door that came down for the rest of the
         // session used to leave no trace at all until this line.
-        crate::il2cpp::hook::guard::report_trips();
-        crate::core::hachimi::report_poisoned_lock_recoveries();
+        crate::core::hachimi::report_take_down_once();
+
+        wnd_hook::uninit();
         Hachimi::instance().interceptor.unhook_all();
     }
     TRUE.into()
