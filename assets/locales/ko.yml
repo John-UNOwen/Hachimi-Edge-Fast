@@ -203,6 +203,7 @@ config_editor:
   result_screen_speed: "결과 화면 애니메이션 속도"
   story_speed: "스토리 컷신 속도"
   training_plate_speed: "Training stat plate animation speed"
+  training_cut_speed: "Training cut-in animation speed"
   auto_skip_result_screens: "결과 화면 애니메이션 자동 스킵"
   high_speed_settings: "스토리와 훈련의 고속 설정을 게임 최대치로 올리기"
   story_high_speed_mode: "스토리 재생을 게임 자체의 고속 모드로 전환"

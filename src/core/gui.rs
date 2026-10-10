@@ -6035,6 +6035,17 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            // The cut-in clock lever raises a scale the game computes for itself, so its slider stops at
+            // `MAX_TIME_SCALE`, the ceiling every other time-scale lever this fork owns shares, and `mirror_config`
+            // clamps a hand edited config to the same range. The ceiling on the *value handed to the game* is
+            // `MAX_TRAINING_CUT_TIME_SCALE` in the door, above the slider's reach, because the game already puts
+            // 6.080 to 11.280 on this door and a cap at 5.0 would hand those numbers back unchanged.
+            if should_show_option(search, &t!("config_editor.training_cut_speed")) {
+                ui.label(t!("config_editor.training_cut_speed"));
+                ui.add(egui::Slider::new(&mut config.training_cut_speed, AnimationSpeed::MIN_TIME_SCALE..=AnimationSpeed::MAX_TIME_SCALE).step_by(0.5));
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.auto_skip_result_screens")) {
                 ui.label(t!("config_editor.auto_skip_result_screens"));
                 ui.checkbox(&mut config.auto_skip_result_screens, "");

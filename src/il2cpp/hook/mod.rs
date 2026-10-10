@@ -2078,12 +2078,13 @@ pub fn init() {
         crate::core::settings_preset::open_arm_window(preset);
 
         info!(
-            "Config snapshot: preset {} transition {} result {} story {} plate {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
+            "Config snapshot: preset {} transition {} result {} story {} plate {} cut {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
             preset,
             config.transition_speed,
             config.result_screen_speed,
             config.story_speed,
             config.training_plate_speed,
+            config.training_cut_speed,
             config.ui_animation_scale,
             config.time_scale,
             config.story_tcps_multiplier,

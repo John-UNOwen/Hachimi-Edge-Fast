@@ -1069,15 +1069,18 @@ fn close_cut_run() {
     }
 }
 
-type GetTrainingCutTimeScaleFn = extern "C" fn(scale: f32) -> f32;
-// Dumped static: `GetTrainingCutTimeScale/1 -> static float(float)`, so the wrapper declares the
-// dumped argument and no `this` (A3).
-def_detour! {
-    TrainingCuttUtils_GetTrainingCutTimeScale(scale: f32) -> f32 {
-            let value = get_orig_fn!(TrainingCuttUtils_GetTrainingCutTimeScale, GetTrainingCutTimeScaleFn)(scale);
+// Dumped static: `GetTrainingCutTimeScale/1 -> static float(float)`. This probe no longer stands on that
+// address: `AnimationSpeed` arms the scaling door there (`training_cut_speed`, ledger item 77), and the fork
+// does not hook one address twice - the same reason `TrainingParamChangeUI::InitializePlateList` moved out of
+// this file. The census keeps its pair reading because the scaling door hands this module the value the game
+// produced before it scaled it, so the peak stays the game's own number and the hit line beside it says what
+// the lever made of it.
+pub(crate) fn note_cut_clock(scale: f32, value: f32) {
+    if START.get().is_some() {
         GET_TRAINING_CUT_TIME_SCALE.observe_peak(&[scale as f64, value as f64], value);
-
-        value
+    }
+    else {
+        GET_TRAINING_CUT_TIME_SCALE.sample(value);
     }
 }
 
@@ -2254,7 +2257,6 @@ pub fn init(umamusume: *const Il2CppImage) {
 
     let _ = START.set(Instant::now());
 
-    let single_mode_utils = class_for_label(umamusume, "Gallop.SingleModeUtils");
     let cut_in_helper = class_for_label(umamusume, "Gallop.SingleModeTrainingCutInHelper");
     let timeline = class_for_label(umamusume, "Gallop.CutIn.Cutt.CutInTimelineController");
     let cut_status = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatus");
@@ -2371,7 +2373,8 @@ pub fn init(umamusume: *const Il2CppImage) {
         };
     }
 
-    static_probe!(single_mode_utils, TrainingCuttUtils_GetTrainingCutTimeScale, "GetTrainingCutTimeScale", ONE_FLOAT, R4, "SingleModeUtils::GetTrainingCutTimeScale");
+    // `SingleModeUtils::GetTrainingCutTimeScale` is armed by `AnimationSpeed` now, which is where a lever can
+    // sit on it without waiting for debug_mode; its census pair arrives through `note_cut_clock` (item 77).
 
     probe!(cut_in_helper, TrainingCuttHelper_SkipRuntime, "SkipRuntime", NO_PARAMS, VOID, "SingleModeTrainingCutInHelper::SkipRuntime");
     probe!(cut_in_helper, TrainingCuttHelper_GetTargetSpeed, "GetTargetSpeed", NO_PARAMS, R4, "SingleModeTrainingCutInHelper::GetTargetSpeed");

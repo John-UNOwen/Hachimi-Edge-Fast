@@ -210,6 +210,7 @@ config_editor:
   result_screen_speed: "Velocidad de las animaciones de las pantallas de resultados"
   story_speed: "Velocidad de las escenas de la historia"
   training_plate_speed: "Training stat plate animation speed"
+  training_cut_speed: "Training cut-in animation speed"
   auto_skip_result_screens: "Omitir automáticamente las animaciones de las pantallas de resultados"
   high_speed_settings: "Subir los ajustes de alta velocidad de la historia y del entrenamiento al máximo del juego"
   story_high_speed_mode: "Poner la reproducción de la historia en el modo de alta velocidad del juego"

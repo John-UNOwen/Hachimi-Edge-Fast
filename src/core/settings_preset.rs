@@ -206,6 +206,8 @@ impl SettingsPreset {
                 );
 
                 config.training_plate_speed = 1.0;
+                // Neither arm is this fork's ceiling arm, and this lever is not an upstream option either.
+                config.training_cut_speed = 1.0;
             }),
         }
     }
@@ -235,6 +237,8 @@ impl SettingsPreset {
                 );
 
                 config.training_plate_speed = AnimationSpeed::MAX_FACTOR;
+                // A scale lever, so it takes the ceiling every other scale lever in this arm takes.
+                config.training_cut_speed = AnimationSpeed::MAX_TIME_SCALE;
             }),
         }
     }
@@ -264,6 +268,8 @@ impl SettingsPreset {
                 );
 
                 config.training_plate_speed = 1.0;
+                // Neither arm is this fork's ceiling arm, and this lever is not an upstream option either.
+                config.training_cut_speed = 1.0;
             }),
         }
     }
@@ -334,12 +340,13 @@ impl SettingsPreset {
         let config = &self.config;
 
         format!(
-            "preset {} transition {} result {} story {} plate {} ui_animation {} time_scale {} story_tcps {} choice_delay {} cyspring_uncap {} auto_skip {} high_speed {} story_high_speed {}",
+            "preset {} transition {} result {} story {} plate {} cut {} ui_animation {} time_scale {} story_tcps {} choice_delay {} cyspring_uncap {} auto_skip {} high_speed {} story_high_speed {}",
             self.name,
             config.transition_speed,
             config.result_screen_speed,
             config.story_speed,
             config.training_plate_speed,
+            config.training_cut_speed,
             config.ui_animation_scale,
             config.time_scale,
             config.story_tcps_multiplier,
@@ -369,6 +376,7 @@ mod tests {
         assert_eq!(config.ui_animation_scale, 1.0);
         assert_eq!(config.time_scale, 1.0);
         assert_eq!(config.training_plate_speed, 1.0);
+        assert_eq!(config.training_cut_speed, 1.0);
         assert!(!config.auto_skip_result_screens);
         assert!(!config.high_speed_settings);
         assert!(!config.story_high_speed_mode);
@@ -393,6 +401,7 @@ mod tests {
         assert_eq!(config.time_scale, AnimationSpeed::MAX_TIME_SCALE);
         assert_eq!(config.story_choice_auto_select_delay, AnimationSpeed::MIN_STORY_CHOICE_AUTO_SELECT_DELAY);
         assert_eq!(config.training_plate_speed, AnimationSpeed::MAX_FACTOR, "an arm that leaves a timing field at its neutral value is not the all levers arm");
+        assert_eq!(config.training_cut_speed, AnimationSpeed::MAX_TIME_SCALE, "the cut-in lever takes the scale ceiling, not the duration one");
         assert!(config.auto_skip_result_screens);
         assert!(config.high_speed_settings);
         assert!(config.story_high_speed_mode);
@@ -414,6 +423,7 @@ mod tests {
         assert_eq!(config.story_speed, 1.0);
         assert_eq!(config.time_scale, 1.0);
         assert_eq!(config.training_plate_speed, 1.0, "this fork's plate lever is not an upstream option");
+        assert_eq!(config.training_cut_speed, 1.0, "this fork's cut-in lever is not an upstream option either");
         assert!(!config.auto_skip_result_screens);
         assert!(!config.high_speed_settings);
         assert!(!config.story_high_speed_mode);

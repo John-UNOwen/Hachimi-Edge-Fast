@@ -313,6 +313,12 @@ static SCREENS_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 // the HP gauge blend time, and only one of those two is a completion the multiplied clock demonstrably does not
 // measure, so the door that earned a lever has its own (C58, ledger item 74).
 static PLATE_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+// The training cut-in speed lever, mirrored apart from the groups for the same reason the plate lever is, and
+// priced apart from them too. The door it reaches hands the cut-in engine a *scale*, not a duration, so there is
+// no pair to price: `MAX_TWEEN_SPEED_PRODUCT` bounds a completion the ui clock and a duration write both reach,
+// and this value is not measured on the ui clock (ledger item 77). Its own ceiling is
+// `MAX_TRAINING_CUT_TIME_SCALE`.
+static TRAINING_CUT_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static STORY_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static TIME_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static UI_ANIMATION_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
@@ -421,6 +427,19 @@ pub const MAX_TIME_SCALE: f32 = 5.0;
 // config asking for one falls back to doing nothing instead of multiplying the game's own fast
 // forward down (C40).
 pub const MIN_TIME_SCALE: f32 = 1.0;
+
+// The ceiling on the training cut-in's own speed channel, stated rather than inherited from
+// `MAX_TIME_SCALE` (the decision A17 asks for before a lever sits on a value that is already above
+// the ceiling). Every recorded run read the game putting a number past 5.0 on this door by itself:
+// 11.280 in run 11 (`GetTrainingCutTimeScale` answered 5.640 in, 11.280 out), 8.334 in runs 9 and
+// 17, 8.280, 8.000, 6.080 and 6.080 in runs 30, 31, 33 and 34. A lever capped at 5.0 would hand the
+// game its own value back at every setting on this client, because a scale past the ceiling is a
+// pass-through (AGENTS section 5, time scales only go up), and the option would be a slider that
+// does nothing. 12.0 is therefore a ceiling on the value the door may hand, sitting just past the
+// highest reading a run has seen on it: every state the game reaches on its own stays reachable, a
+// value the game already asked for is never pulled down, and the read-modify-write loop C22 and C24
+// are about cannot run past 12.0 however many times the timeline re-prices itself.
+pub const MAX_TRAINING_CUT_TIME_SCALE: f32 = 12.0;
 
 // The ceiling `ui_animation_scale` may reach in code, independent of what any slider offers.
 // The DOTween `Update` detour multiplies the delta time it hands the tween library once per
@@ -739,6 +758,12 @@ pub fn factor(group: Group) -> f32 {
 /// read on a call the training census counts a handful of times per turn rather than a group factor read on every
 /// duration detour.
 pub fn plate_factor() -> f32 { f32::from_bits(PLATE_FACTOR.load(Ordering::Relaxed)) }
+
+/// The training cut-in lever as the config pass left it. One door reads it, on the training screen, so it is a
+/// plain atomic load on a call the run logs at up to a few hundred times a session rather than a per frame read:
+/// run 11 counted 220 calls of this door across a whole career, and the per frame door beside it
+/// (`CutInTimelineController::UpdateSpeed`) stays untouched.
+fn training_cut_factor() -> f32 { f32::from_bits(TRAINING_CUT_FACTOR.load(Ordering::Relaxed)) }
 
 // Most of Gallop's durations are `const`, which IL2CPP folds into the call sites, so
 // the value has no writable storage (see the init log). The methods that play the
@@ -1673,6 +1698,10 @@ fn mirror_config(config: &Config) {
     // The same ceiling as the group factors, on the one training duration this fork scales: a hand edited
     // config.json cannot ask for more than MAX_FACTOR out of a plate cascade.
     PLATE_FACTOR.store(normalize(config.training_plate_speed).to_bits(), Ordering::Release);
+    // The cut-in lever takes the time-scale clamp, not the duration one: it is a lever on a scale, so its floor
+    // is its neutral 1.0 and a hand edited config asking for 0.1 cannot turn a training cut into a slow motion
+    // (C40). What it may raise that scale *to* is capped by `MAX_TRAINING_CUT_TIME_SCALE` in the door, not here.
+    TRAINING_CUT_FACTOR.store(normalize_time_scale(config.training_cut_speed).to_bits(), Ordering::Release);
     // Clamped here so neither story choice site divides by the delay itself: `CheckChoiceAutoTap`
     // runs while a choice is up and `GetTimeScaleByHighSpeedType` is a story path getter, so both
     // read this mirror instead of the config (C24).
@@ -1697,6 +1726,12 @@ static TRAINING_DOORS_NOTE_LOGGED: AtomicBool = AtomicBool::new(false);
 // Named exactly as `TRAINING_HIT_SLOTS` names them, so a run can match this line to the census counts.
 const TRAINING_PLATE_DOOR: &str = "TrainingParamChangeUI.InitializePlateList";
 const TRAINING_GAUGE_DOOR: &str = "SingleModeMainViewHpGauge.SetProgressbarBlendTime";
+// The cut-in clock door, named as `TrainingCuttProbe` names it in its totals line
+// (`SingleModeUtils::GetTrainingCutTimeScale(scale)=N peak X`), and as `hit` prints it on its first calls. It is
+// not in `TRAINING_HIT_SLOTS`: that table counts doors that shorten a *duration*, and this one hands the cut-in
+// engine a scale. The slot is the one `hit` counts it under.
+pub const TRAINING_CUT_DOOR: &str = "SingleModeUtils.GetTrainingCutTimeScale";
+const TRAINING_CUT_SLOT: usize = 13;
 
 /// Whether this config pass got the line.
 fn note_training_gate_levers() -> bool {
@@ -1705,10 +1740,13 @@ fn note_training_gate_levers() -> bool {
     }
 
     debug!(
-        "AnimationSpeed: training gates: {} scales on training_plate_speed {} alone, off the pair bound; {} hands the game the value it was passed; result_screen_speed reaches result screens only",
+        "AnimationSpeed: training gates: {} scales on training_plate_speed {} alone, off the pair bound; {} hands the game the value it was passed; {} scales on training_cut_speed {} alone, the scale it hands capped at {}; result_screen_speed reaches result screens only",
         TRAINING_PLATE_DOOR,
         plate_factor(),
         TRAINING_GAUGE_DOOR,
+        TRAINING_CUT_DOOR,
+        training_cut_factor(),
+        MAX_TRAINING_CUT_TIME_SCALE,
     );
 
     true
@@ -2704,6 +2742,61 @@ pub fn plate_cascade_interval(interval: f32, scaled: f32) -> f32 {
 /// driving the same decision the hook makes in game.
 pub fn plate_cascade_handoff(interval: f32) -> f32 { plate_cascade_interval(interval, plate_interval_duration(interval)) }
 
+/// What the cut-in clock door hands back: the scale the game computed, raised by the lever, never lowered,
+/// never past `MAX_TRAINING_CUT_TIME_SCALE`. The target is a static helper that takes a scale and returns one
+/// (`introspect.log:24381`, `GetTrainingCutTimeScale/1 -> static float(float)`), and every pair a run read off it
+/// has the answer above the question: `[3.04, 6.08]` and `[2.4, 4.8]` in run 9, 5.640 in to 11.280 out in run 11,
+/// 6.080 peaked in runs 33 and 34 against 8.000 in run 31. So the number this door scales is the training cut's
+/// own speed channel rather than one argument among several. At the shipped 1.0 it is the identity, which is the
+/// state every recorded run measured with.
+pub fn training_cut_time_scale(value: f32) -> f32 {
+    let factor = training_cut_factor();
+
+    if factor == 1.0 || !value.is_finite() || value < MIN_TIME_SCALE {
+        return value;
+    }
+
+    // A scale only goes up (AGENTS section 5), and `value.max(...)` is what keeps the ceiling from turning into
+    // a slow down: run 11 read the game putting 11.280 on this door by itself, so a cap of 12.0 applied without
+    // it would trim a value the game asked for. Below `MIN_TIME_SCALE` the game chose a pause or a slow motion
+    // and it arrives as it arrived.
+    value.max((value * factor).min(MAX_TRAINING_CUT_TIME_SCALE))
+}
+
+// The training cut-in clock door. `GetTrainingCutTimeScale/1` is static, so the wrapper declares the dumped
+// float and no `this` (A3), and it is reached 8 to 220 times a session on this client, never once a frame, so
+// the scaling half pays one atomic load and a `hit` on the first four calls. The two doors that *read* the
+// channel this one writes, `SingleModeTrainingCutInHelper::GetTargetSpeed` and `CutInTimelineController::
+// UpdateSpeed`, stay off the lever: item 45 keeps them off limits until something is built beside their setters
+// `SetSpeed/1` and `set_SkipFrame/1`, and scaling the source once is also the shape that cannot put the same
+// factor on a value twice (C22, C24). `SetSpeed` and `set_SkipFrame` are themselves installed and silent - 29
+// of the probe's 47 counted doors printed no call line in the run C49 records - so there is no write half to
+// build beside them yet.
+//
+// What is not proven is what a raised channel buys, and that is the measurement this door exists to make. Run
+// 25 measured a 7867 ms and an 11688 ms hole in which the cut-in had already finished (the timeline handing
+// 2.4 to 2.4), and runs 33 and 34 closed a plate cascade in 1140 to 1242 ms on this door peaked at 6.080 while
+// run 31 closed one in 338 ms at 8.000. So the run this lever owes reads `hit` here beside `Cutt probe plate
+// cascade:` and `cut runs ... wall`, and says whether the wall moved with the scale or not at all.
+type GetTrainingCutTimeScaleFn = extern "C" fn(scale: f32) -> f32;
+def_detour! {
+    SingleModeUtils_GetTrainingCutTimeScaleSpeed(scale: f32) answer -> f32 {
+            let value = get_orig_fn!(SingleModeUtils_GetTrainingCutTimeScaleSpeed, GetTrainingCutTimeScaleFn)(scale);
+        // The game's own scale is published before the scaling half runs: a 0 scale on this door is a training
+        // cut that stops advancing, which is the machinery C62's career end stall lived in, and a trip in this
+        // mod's own logging is not this mod's decision to freeze the cut.
+        answer.publish(value);
+
+        let scaled = training_cut_time_scale(value);
+        hit(TRAINING_CUT_SLOT, TRAINING_CUT_DOOR, value, scaled);
+        // The probe keeps its pair reading on this door and does not hook it a second time, so the census peak
+        // stays the game's own scale while the line above says what the lever made of it.
+        TrainingCuttProbe::note_cut_clock(scale, value);
+
+        scaled
+    }
+}
+
 // The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
 // waited for a tap and 10,034 ms was the cut playing before it asked, while the cut's own timeline
 // reported 2.4 s of total length. The door on that path carrying a duration is `InitializePlateList`,
@@ -2871,6 +2964,21 @@ fn install_getters(umamusume: *const Il2CppImage) {
         ) };
 
         if addr != 0 { new_hook!(addr, TrainingParamChangeUI_InitializePlateListSpeed); }
+    }
+
+    // The training cut-in clock. `SingleModeUtils::GetTrainingCutTimeScale/1 -> static float(float)`
+    // (`introspect.log:24381`) carries no `this`, so it resolves through the static matcher and its wrapper
+    // declares the dumped float alone (A3), and the class is reached the way the probe reaches it, by splitting
+    // the dumped label into namespace and name (A27). The probe stood on this address until now and reports the
+    // call through `note_cut_clock` instead, so nothing here hooks one address twice.
+    if let Some(class) = TrainingCuttProbe::class_for_label(umamusume, "Gallop.SingleModeUtils") {
+        let addr = unsafe { resolve_static_method(
+            class, "GetTrainingCutTimeScale",
+            &[Il2CppTypeEnum_IL2CPP_TYPE_R4],
+            Il2CppTypeEnum_IL2CPP_TYPE_R4,
+        ) };
+
+        if addr != 0 { new_hook!(addr, SingleModeUtils_GetTrainingCutTimeScaleSpeed); }
     }
 }
 
@@ -3089,7 +3197,7 @@ mod tests {
 
     struct PassTurn {
         _turn: MutexGuard<'static, ()>,
-        saved_mirrors: [u32; 9],
+        saved_mirrors: [u32; 10],
         saved_applied: [u32; 4],
         saved_training_note: bool,
         saved_countup: CountupBracketState,
@@ -3108,6 +3216,7 @@ mod tests {
             TIME_SCALE_RAISE.load(Ordering::Relaxed),
             TIME_SCALE_PRODUCED.load(Ordering::Relaxed),
             PLATE_FACTOR.load(Ordering::Relaxed),
+            TRAINING_CUT_FACTOR.load(Ordering::Relaxed),
         ];
         let saved_applied = [
             APPLIED_FACTORS[0].load(Ordering::Relaxed),
@@ -3148,6 +3257,7 @@ mod tests {
             TIME_SCALE_RAISE.store(self.saved_mirrors[6], Ordering::Release);
             TIME_SCALE_PRODUCED.store(self.saved_mirrors[7], Ordering::Release);
             PLATE_FACTOR.store(self.saved_mirrors[8], Ordering::Release);
+            TRAINING_CUT_FACTOR.store(self.saved_mirrors[9], Ordering::Release);
             TRAINING_DOORS_NOTE_LOGGED.store(self.saved_training_note, Ordering::Release);
             restore_countup_bracket(&self.saved_countup);
 
@@ -4744,6 +4854,104 @@ mod tests {
         // ceiling hands the game its own beat, which is the reading run 33 printed four times.
         mirror_config(&timing_config(MAX_FACTOR, MAX_FACTOR, 10.0, MAX_UI_ANIMATION_SCALE));
         assert_eq!(plate_cascade_handoff(1.0), 1.0, "another lever reached the plate cascade");
+    }
+
+    #[test]
+    fn the_cut_in_lever_raises_the_cut_clock_up_to_the_ceiling_the_runs_read() {
+        let _turn = pass_turn();
+
+        // The state runs 33 and 34 measured: this door handing 6.080 with nothing on it. At the shipped 1.0 the
+        // lever is the identity, which is what every recorded run measured with.
+        assert_eq!(training_cut_factor(), 1.0, "a launch armed the cut-in lever");
+        assert_eq!(training_cut_time_scale(6.080), 6.080, "the shipped lever moved the cut clock");
+
+        // The `All levers` arm: the lever at `MAX_TIME_SCALE` on the number the game computed. The ceiling lands
+        // before the product does, because 6.080 x 5 is past anything a run has seen on this door.
+        let mut arm = Config::default();
+        arm.training_cut_speed = MAX_TIME_SCALE;
+        mirror_config(&arm);
+
+        println!("item 77, the cut clock on the all levers arm: 6.080 handed, {} offered", training_cut_time_scale(6.080));
+
+        assert_eq!(training_cut_factor(), MAX_TIME_SCALE, "the arm's cut lever did not mirror");
+        assert_eq!(training_cut_time_scale(6.080), MAX_TRAINING_CUT_TIME_SCALE, "the cut lever ran past the ceiling the runs read");
+        assert_eq!(training_cut_time_scale(1.0), MAX_TIME_SCALE, "the lever left the game's own baseline unraised");
+
+        // A scale only goes up (AGENTS section 5), and the ceiling is a cap on what the door may hand, not a
+        // trim on what the game asked for: run 11 read 11.280 arrive on this door by itself.
+        assert_eq!(training_cut_time_scale(11.280), MAX_TRAINING_CUT_TIME_SCALE, "the cap replaced the game's own 11.280 with a smaller number");
+        assert_eq!(training_cut_time_scale(20.0), 20.0, "the cap pulled a value the game asked for back down");
+
+        // Below `MIN_TIME_SCALE` the game chose a pause or a slow motion, and a mirror that is not a number
+        // does nothing at all.
+        assert_eq!(training_cut_time_scale(0.0), 0.0, "the lever raised a pause the game asked for");
+        assert_eq!(training_cut_time_scale(0.5), 0.5, "the lever raised a slow motion the game asked for");
+
+        let mut hand = Config::default();
+        hand.training_cut_speed = 1000.0;
+        mirror_config(&hand);
+        assert_eq!(training_cut_factor(), MAX_TIME_SCALE, "the cut lever reached past MAX_TIME_SCALE from a hand edited config");
+
+        let mut broken = Config::default();
+        broken.training_cut_speed = f32::NAN;
+        mirror_config(&broken);
+        assert_eq!(training_cut_factor(), 1.0, "a cut lever that is not a number reached the cut-in engine");
+        assert_eq!(training_cut_time_scale(6.080), 6.080, "a broken mirror moved the cut clock");
+    }
+
+    #[test]
+    fn the_cut_in_lever_reaches_the_cut_clock_door_and_no_other_training_value() {
+        let _turn = pass_turn();
+
+        let mut arm = timing_config(MAX_FACTOR, MAX_FACTOR, 10.0, MAX_UI_ANIMATION_SCALE);
+        arm.training_cut_speed = MAX_TIME_SCALE;
+        mirror_config(&arm);
+
+        // The lever is on the cut-in's scale and on nothing else the training turn waits on: the plate beat keeps
+        // its own lever, the HP gauge blend keeps item 59's separation, and `Group::Training` stays factor-less.
+        assert_eq!(training_cut_time_scale(6.080), MAX_TRAINING_CUT_TIME_SCALE, "the cut lever did not reach its own door");
+        assert_eq!(plate_cascade_handoff(1.0), 1.0, "the cut lever reached the plate cascade");
+        assert_eq!(training_gate_duration(2.4), 2.4, "the cut lever reached the HP gauge blend time");
+        assert_eq!(factor(Group::Training), 1.0, "the cut lever wrote the training group");
+
+        // And the separation holds the other way: the plate lever at its ceiling with the cut lever at its
+        // shipped 1.0 leaves the cut clock on the number the game computed.
+        let mut plate_only = timing_config(1.0, 1.0, 1.0, 1.0);
+        plate_only.training_plate_speed = MAX_FACTOR;
+        mirror_config(&plate_only);
+
+        assert_eq!(plate_cascade_handoff(1.0), MIN_PLATE_INTERVAL_SEC, "the plate lever stopped reaching its own door");
+        assert_eq!(training_cut_time_scale(6.080), 6.080, "the plate lever reached the cut-in clock");
+    }
+
+    #[test]
+    fn the_cut_clock_door_reports_where_a_run_reads_it_and_stays_out_of_the_duration_table() {
+        let _turn = pass_turn();
+
+        // The door hands the cut-in engine a scale, not a duration, so it has no completion for a `Pace` to speak
+        // about and it is not one of the training census's scaling points. A run reads it three other ways: the
+        // `hit` line the door writes, the probe's `SingleModeUtils::GetTrainingCutTimeScale(scale)` peak, which
+        // `note_cut_clock` keeps fed with the game's own number, and the ceiling named on the training gate line.
+        assert!(
+            !TRAINING_HIT_SLOTS.iter().any(|(_, name)| *name == TRAINING_CUT_DOOR),
+            "the cut clock door went into the duration census, which is the table a scale door does not belong to"
+        );
+        assert!(
+            !ARMED_DOOR_PACES.iter().any(|(door, _, _)| *door == TRAINING_CUT_DOOR),
+            "the cut clock door went into the armed duration table"
+        );
+
+        hit(TRAINING_CUT_SLOT, TRAINING_CUT_DOOR, 6.080, MAX_TRAINING_CUT_TIME_SCALE);
+        assert_eq!(hit_calls(TRAINING_CUT_SLOT), 1, "the cut clock door scales on a slot nothing counts");
+
+        assert!(
+            MAX_TRAINING_CUT_TIME_SCALE > MAX_TIME_SCALE,
+            "a cap at MAX_TIME_SCALE hands this client its own 6.080 back at every setting, which is a slider that does nothing"
+        );
+        assert!(
+            note_training_gate_levers(),
+            "a run was never told the cut clock carries training_cut_speed and stops at MAX_TRAINING_CUT_TIME_SCALE"
+        );
     }
 
     #[test]

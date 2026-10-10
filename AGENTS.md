@@ -53,6 +53,12 @@ or a decision is taken, not as a scratch pad. The split and the evidence rule ar
   multiplied clock, so no pair composes on that completion. It mirrors to its own atomic, `normalize` holds it at
   `MAX_FACTOR`, `MIN_PLATE_INTERVAL_SEC` is where the ceiling lands, and it is not on `Group::Training`, which stays
   factor-less so the HP gauge blend time keeps its bound (C58, ledger item 74).
+  `training_cut_speed` is the lever on the training cut-in's own speed channel, on `SingleModeUtils.GetTrainingCutTimeScale`
+  alone, and it sits outside that bound for a different reason: the door hands the cut-in engine a *scale*, not a duration, so
+  there is no completion for the pair to price. The lever takes the time-scale clamp (`MIN_TIME_SCALE` to `MAX_TIME_SCALE`), a
+  scale never goes down, and the value the door may hand stops at `MAX_TRAINING_CUT_TIME_SCALE` - above the lever's own reach,
+  because every recorded run read the game putting 6.080 to 11.280 on this door by itself and a cap at `MAX_TIME_SCALE` would
+  hand those numbers back at every setting (A17 asks for that ceiling decision to be stated, ledger item 77).
 - **Client side presentation only.** Do not speed things up by skipping server calls, faking
   success callbacks, changing simulation results, or touching purchase, legality, SQLite key or
   network paths (see C3, C6, C12, C20, C21, C31). `Time.timeScale` is a simulation lever, not an

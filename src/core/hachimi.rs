@@ -1323,6 +1323,12 @@ pub struct Config {
     // multiplied tween clock, so this lever is the only one that reaches that completion (C58, ledger item 74).
     #[serde(default = "Config::default_animation_speed")]
     pub training_plate_speed: f32,
+    // The training cut-in's own speed channel, on `SingleModeUtils::GetTrainingCutTimeScale` alone. It raises a
+    // scale rather than dividing a duration, so its clamp is the time-scale one (`MIN_TIME_SCALE` to
+    // `MAX_TIME_SCALE`) and what the door may hand the game stops at `MAX_TRAINING_CUT_TIME_SCALE`
+    // (`AnimationSpeed.rs`, ledger item 77).
+    #[serde(default = "Config::default_animation_speed")]
+    pub training_cut_speed: f32,
     #[serde(default)]
     pub auto_skip_result_screens: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
