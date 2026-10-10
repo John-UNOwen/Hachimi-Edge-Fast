@@ -267,8 +267,9 @@ pub const MIN_UI_ANIMATION_SCALE: f32 = 0.1;
 // The ceiling on the *pair* of layers that reach one tween (C58, ledger item 62).
 //
 // `ui_animation_scale` multiplies the elapsed time `DG.Tweening.Core.TweenManager::Update` hands every
-// tween, both the scaled and the unscaled clock (`DOTween/TweenManager.rs:9-13`), and a group factor
-// divides the duration a game method is handed (`scale_duration` below). The two act on the same
+// tween that runs on the game's clock - the `deltaTime` channel only, never the `independentTime`
+// channel a time scale independent tween is advanced by (`DOTween/TweenManager.rs`, C5) - and a group
+// factor divides the duration a game method is handed (`scale_duration` below). The two act on the same
 // quantity from opposite ends: a tween's real completion time is the duration it was told divided by
 // the clock it is measured on, so what the game waits on is shortened by the *product*. Each layer has
 // its own ceiling of `MAX_FACTOR` and neither one looked at the other, so a pair that is legal twice
@@ -379,6 +380,31 @@ pub fn ui_animation_scale() -> f32 {
     f32::from_bits(UI_ANIMATION_SCALE.load(Ordering::Acquire))
 }
 
+/// The two elapsed time channels of one DOTween tick, exactly as `DOTween/TweenManager.rs` hands them
+/// to the game: the `deltaTime` half multiplied by the clamped mirror, and the `independentTime` half
+/// passed on as the caller computed it (C5, the half this line used to scale as well).
+///
+/// The lever is a clock on the delta channel only because DOTween reads the other one per tween.
+/// `DG.Tweening.Core.TweenManager.Update(tween, deltaTime, independentTime, ..)` advances a tween by
+/// `float tDeltaTime = (t.isIndependentUpdate ? independentTime : deltaTime) * t.timeScale;`, and
+/// `DOTweenComponent.Update` computes that argument from `Time.unscaledDeltaTime`. A tween the game
+/// marked time scale independent (`SetUpdate(true)`, `DOTween.defaultTimeScaleIndependent`) is therefore
+/// measured on wall clock on purpose, and that is how UI keeps animating while `Time.timeScale` is 0 -
+/// a paused race, a story wait. Multiplying it took wall clock out of a tween the game had deliberately
+/// taken out of every time lever this fork touches: at `MAX_UI_ANIMATION_SCALE` a 1 s real time UI tween
+/// finished in 50 ms, pause included. A mirror that is not a number - which this module never stores -
+/// is read as the neutral 1.0, the way `duration_factor` reads it.
+pub fn tween_clocks(delta_time: f32, independent_time: f32) -> (f32, f32) {
+    let scale = ui_animation_scale();
+
+    // Fast exit at the neutral setting: no work on a tween tick that nothing speeds up.
+    if scale == 1.0 || !scale.is_finite() {
+        return (delta_time, independent_time);
+    }
+
+    (delta_time * scale, independent_time)
+}
+
 // The factors are cached so a detour that runs per call reads one atomic instead of
 // loading the whole config.
 pub fn factor(group: Group) -> f32 {
@@ -415,11 +441,14 @@ pub fn scale_duration(value: f32, group: Group) -> f32 {
 /// The headroom a duration in this group has left under `MAX_TWEEN_SPEED_PRODUCT`, which is what a
 /// duration door scales by. `ui_animation_scale` is read from the same live mirror the DOTween
 /// `Update` detour multiplies the tween clock by, so the shorter this fork has already made every
-/// tween, the less a group factor may take out of the duration handed to the game. At the neutral
-/// clock the headroom is `MAX_FACTOR` and every door scales exactly as it did; at `ui_animation 20`
-/// nothing is left, and a duration door hands on the number it received. A mirror below 1.0 (the
-/// slider's 0.1 floor slows the tween clock) leaves the group's own `MAX_FACTOR` ceiling in force,
-/// and a mirror that is not a number - which this module never stores - is read as the neutral 1.0.
+/// tween that runs on that clock, the less a group factor may take out of the duration handed to the
+/// game. A tween the game marked time scale independent is measured on the unscaled channel and takes
+/// the group factor alone, which this bound over-counts - a ceiling is a ceiling, not a target. At the
+/// neutral clock the headroom is `MAX_FACTOR` and every door scales exactly as it did; at
+/// `ui_animation 20` nothing is left, and a duration door hands on the number it received. A mirror
+/// below 1.0 (the slider's 0.1 floor slows the tween clock) leaves the group's own `MAX_FACTOR` ceiling
+/// in force, and a mirror that is not a number - which this module never stores - is read as the
+/// neutral 1.0.
 ///
 /// The result never goes under 1.0: this is a ceiling on a speed-up, never a lever that slows the
 /// game (AGENTS section 5).
@@ -2333,6 +2362,76 @@ mod tests {
 
         // Nothing wrote the mirror in this test process, so a build at the defaults is inert.
         assert_eq!(ui_animation_scale(), 1.0, "the default mirrored to a speed-up");
+    }
+
+    // C5's open half, on the arithmetic the shipped detour performs. `DOTween/TweenManager.rs` hands
+    // `DG.Tweening.Core.TweenManager::Update` the pair `tween_clocks` returns, and DOTween then picks
+    // the channel per tween: `float tDeltaTime = (t.isIndependentUpdate ? independentTime : deltaTime)
+    // * t.timeScale;`. The lever is a clock on the delta channel; the other one is the game's own real
+    // time, and it is how UI keeps animating while `Time.timeScale` is 0. Scaling it was the defect: a
+    // 1 s tween the game marked `SetUpdate(true)` completed in 50 ms at `ui_animation 20`, pause
+    // included.
+    #[test]
+    fn the_tween_clock_layer_scales_the_delta_channel_and_not_the_independent_one() {
+        let _turn = pass_turn();
+
+        let frame = 1.0 / 60.0;
+        // `DOTweenComponent.Update` computes the third argument from `Time.unscaledDeltaTime`, so at the
+        // shipped DOTween options a tick arrives with the same 1/60 the delta channel carries.
+        let real_time_tick = 1.0 / 60.0;
+
+        // The shipped defaults: a tween tick passes through, no lever applied.
+        assert_eq!(
+            tween_clocks(frame, real_time_tick),
+            (frame, real_time_tick),
+            "the neutral clock changed a tween tick",
+        );
+
+        // `ui_animation 20`, the ceiling the mirror publishes for the wizard's 1000.0 (C5).
+        mirror_config(&timing_config(1.0, 1.0, 1.0, MAX_UI_ANIMATION_SCALE));
+        let (delta, independent) = tween_clocks(frame, real_time_tick);
+        assert_eq!(delta, frame * MAX_UI_ANIMATION_SCALE, "the delta channel stopped being the clock this lever speeds up");
+        assert_eq!(independent, real_time_tick, "the independent channel was scaled: a time scale independent tween ran on the mod's clock");
+
+        // The wall clock a 1 s tween takes on each channel, 60 ticks to a wall second: the scaled
+        // channel keeps the 50 ms the option asks for, the independent channel still takes its second.
+        // Before this fix both came out 50 ms, which is a real time UI tween ending in the time it takes
+        // the game to draw three frames.
+        let wall_ms_for_one_second_of_tween = |channel: f32| 1000.0 / (channel * 60.0);
+        assert!(ms_is(wall_ms_for_one_second_of_tween(delta), 1000.0 / MAX_UI_ANIMATION_SCALE), "the scaled clock no longer completes a second 20x faster");
+        assert!(ms_is(wall_ms_for_one_second_of_tween(independent), 1000.0), "the real time clock ran faster than real time");
+
+        // The slider's floor: the scaled clock slows down, the game's real time channel is untouched by
+        // a lever that is not about it.
+        mirror_config(&timing_config(1.0, 1.0, 1.0, MIN_UI_ANIMATION_SCALE));
+        let (slower_delta, slower_independent) = tween_clocks(frame, real_time_tick);
+        assert_eq!(slower_delta, frame * MIN_UI_ANIMATION_SCALE);
+        assert_eq!(slower_independent, real_time_tick, "the pause clock took the slider's slow down");
+
+        // A mirror that is not a number - which `mirror_config` never stores - is the neutral clock on
+        // both channels, the same reading `duration_factor` gives it.
+        UI_ANIMATION_SCALE.store(f32::NAN.to_bits(), Ordering::Release);
+        assert_eq!(
+            tween_clocks(frame, real_time_tick),
+            (frame, real_time_tick),
+            "a broken mirror reached a tween",
+        );
+
+        // The pair ceiling (C58) still bounds the channel this lever speeds up, and it is now a ceiling
+        // that over-counts a time scale independent tween rather than the number it runs at.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+        assert!(
+            tween_speed(Group::Screens) <= MAX_TWEEN_SPEED_PRODUCT,
+            "the pair left its ceiling once the independent channel came out of it",
+        );
+        let (delta, independent) = tween_clocks(frame, real_time_tick);
+        assert_eq!(delta, frame * MAX_UI_ANIMATION_SCALE);
+        assert_eq!(independent, real_time_tick);
+
+        println!(
+            "tween clock at ui_animation {}x: delta tick {} s -> {} s, independent tick {} s -> {} s (MAX_UI_ANIMATION_SCALE {})",
+            ui_animation_scale(), frame, delta, real_time_tick, independent, MAX_UI_ANIMATION_SCALE,
+        );
     }
 
     // C58 / ledger item 62, spelled on the quantity the game waits on. Each layer has its own

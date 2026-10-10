@@ -5970,8 +5970,10 @@ impl ConfigEditor {
                 // DOTween `Update` detour multiplies its delta time, so the top of a 1000.0 slider
                 // offered a value the mod would silently cut to 20.0 (C5).
                 //
-                // This lever multiplies the clock every tween is measured on, so the group sliders under
-                // it are bounded against it rather than against nothing: `AnimationSpeed::duration_factor`
+                // This lever multiplies the clock a tween is measured on - the delta channel
+                // `DOTween/TweenManager.rs` hands DOTween, not the `independent_time` channel a time
+                // scale independent tween is advanced by (C5) - so the group sliders under it are
+                // bounded against it rather than against nothing: `AnimationSpeed::duration_factor`
                 // lets a group shorten a duration only by what is left under MAX_TWEEN_SPEED_PRODUCT, and
                 // at the top of this slider the group factors add nothing to the same completion (C58).
                 ui.add(egui::Slider::new(&mut config.ui_animation_scale, AnimationSpeed::MIN_UI_ANIMATION_SCALE..=AnimationSpeed::MAX_UI_ANIMATION_SCALE).step_by(0.1));

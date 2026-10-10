@@ -2,15 +2,26 @@ use crate::il2cpp::{hook::umamusume::AnimationSpeed, symbols::get_method_addr, t
 
 type UpdateFn = extern "C" fn(update_type: i32, delta_time: f32, independent_time: f32);
 def_detour! {
-    Update(update_type: i32, mut delta_time: f32, mut independent_time: f32) {
+    Update(update_type: i32, delta_time: f32, independent_time: f32) {
             // The clamped mirror, not the config: this detour runs on every tween tick, and the
         // ceiling is what bounds the 0.1..=1000.0 both sliders offer (C5). Left unbounded, the
         // wizard's maximum setting handed DOTween 16 s of elapsed time per 60 fps tick.
-        let scale = AnimationSpeed::ui_animation_scale();
-        if scale != 1.0 {
-            delta_time *= scale;
-            independent_time *= scale;
-        }
+        //
+        // Only the delta channel is scaled; `independent_time` is handed on exactly as the caller
+        // computed it. DOTween reads the two per tween - `DG.Tweening.Core.TweenManager.Update(tween,
+        // deltaTime, independentTime, ..)` advances a tween by
+        // `float tDeltaTime = (t.isIndependentUpdate ? independentTime : deltaTime) * t.timeScale;` -
+        // and `DOTweenComponent` computes `independentTime` from `Time.unscaledDeltaTime`. The second
+        // argument is therefore the clock of the tweens the game marked time scale independent, the
+        // channel DOTween keeps outside every time lever so UI keeps animating while the game is
+        // paused. Scaling it - this line's other half, C5 - took wall clock out of a tween the game
+        // deliberately took out of the game's own clock: 1 s of real time UI animation in 50 ms at
+        // `MAX_UI_ANIMATION_SCALE`, pause included. The arithmetic the hook performs lives in
+        // `AnimationSpeed::tween_clocks`, which the `cargo test --lib` case
+        // `the_tween_clock_layer_scales_the_delta_channel_and_not_the_independent_one` drives; the
+        // wrapper itself cannot run in a test, because `get_orig_fn!` is 0 outside `init` (C1).
+        let (delta_time, independent_time) = AnimationSpeed::tween_clocks(delta_time, independent_time);
+
         get_orig_fn!(Update, UpdateFn)(update_type, delta_time, independent_time);
     }
 }
