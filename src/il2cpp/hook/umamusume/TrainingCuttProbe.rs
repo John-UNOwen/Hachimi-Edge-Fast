@@ -182,11 +182,16 @@ impl CutProbe {
     // interval)=12` was six calls, and its first hit lines numbered them 1, 3, 5 and 7 (C53).
     pub(crate) fn observe_peak(&self, values: &[f64], value: f32) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
-        note_hole_census(self.name);
 
+        // The census records the value for the same doors the peak is worth keeping for: those are the
+        // doors that hand a time or a speed, which is what item 70 needs inside a hole window.
         if self.peaked {
+            note_hole_census_value(self.name, value);
             let bits = peak_merge(self.peak.load(atomic::Ordering::Relaxed), value);
             self.peak.fetch_max(bits, atomic::Ordering::Relaxed);
+        }
+        else {
+            note_hole_census(self.name);
         }
 
         if calls <= PROBE_DETAIL_LIMIT {
@@ -200,11 +205,14 @@ impl CutProbe {
     // The frame hot shape: one increment, one max, no slice and no formatting until a chunk boundary.
     pub(crate) fn sample(&self, value: f32) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
-        note_hole_census(self.name);
 
         if self.peaked {
+            note_hole_census_value(self.name, value);
             let bits = peak_merge(self.peak.load(atomic::Ordering::Relaxed), value);
             self.peak.fetch_max(bits, atomic::Ordering::Relaxed);
+        }
+        else {
+            note_hole_census(self.name);
         }
 
         if calls % PROBE_CHUNK == 0 {
@@ -244,7 +252,18 @@ impl CutProbe {
 // The cost sits with the hole, not on a door: one relaxed load per counted door call, and a lock with a
 // hash entry only while a hole window stands open, which is a stretch of a few seconds a couple of times
 // a career run, on doors that already do an atomic increment each.
-static HOLE_CENSUS: Lazy<Mutex<Option<FnvHashMap<&'static str, usize>>>> = Lazy::new(|| Mutex::new(None));
+// One door's half of a hole census. The crossings answer item 68 (which door the poll re-tests); the
+// lowest and highest value answer what item 70 needs before it can hand the game's own skip door an argument,
+// which is the time the cut-in clock is being fed during the wait rather than a guess at it.
+#[derive(Default)]
+struct HoleCensusEntry {
+    crossings: usize,
+    lowest: f32,
+    highest: f32,
+    valued: bool,
+}
+
+static HOLE_CENSUS: Lazy<Mutex<Option<FnvHashMap<&'static str, HoleCensusEntry>>>> = Lazy::new(|| Mutex::new(None));
 static HOLE_CENSUS_OPEN: AtomicBool = AtomicBool::new(false);
 
 // Printed most crossed first, and capped: the line has to name the poll's own door and whatever the poll
@@ -259,8 +278,33 @@ fn note_hole_census(name: &'static str) {
     let mut slot = recover_lock(&HOLE_CENSUS);
 
     if let Some(table) = slot.as_mut() {
-        *table.entry(name).or_insert(0) += 1;
+        table.entry(name).or_default().crossings += 1;
     }
+}
+
+fn note_hole_census_value(name: &'static str, value: f32) {
+    if !HOLE_CENSUS_OPEN.load(atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    let mut slot = recover_lock(&HOLE_CENSUS);
+
+    let Some(table) = slot.as_mut() else {
+        return;
+    };
+
+    let entry = table.entry(name).or_default();
+
+    if entry.valued {
+        entry.lowest = entry.lowest.min(value);
+        entry.highest = entry.highest.max(value);
+    } else {
+        entry.lowest = value;
+        entry.highest = value;
+        entry.valued = true;
+    }
+
+    entry.crossings += 1;
 }
 
 // Installs the tally before raising the flag, so a door crossed between the two cannot fall between them.
@@ -270,20 +314,30 @@ fn open_hole_census() {
 }
 
 // Lowers the flag before taking the tally, so a door crossed after the hole is closed is not charged to it.
-fn close_hole_census() -> Option<FnvHashMap<&'static str, usize>> {
+fn close_hole_census() -> Option<FnvHashMap<&'static str, HoleCensusEntry>> {
     HOLE_CENSUS_OPEN.store(false, atomic::Ordering::Relaxed);
     recover_lock(&HOLE_CENSUS).take()
 }
 
-fn hole_census_line(span_ms: i64, table: &FnvHashMap<&'static str, usize>) -> String {
+fn hole_census_line(span_ms: i64, table: &FnvHashMap<&'static str, HoleCensusEntry>) -> String {
     let doors = table.len();
-    let crossings: usize = table.values().sum();
+    let crossings: usize = table.values().map(|entry| entry.crossings).sum();
 
-    let mut ranked: Vec<(&str, usize)> = table.iter().map(|(name, count)| (*name, *count)).collect();
-    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    let mut ranked: Vec<(&str, &HoleCensusEntry)> = table.iter().map(|(name, entry)| (*name, entry)).collect();
+    ranked.sort_by(|left, right| right.1.crossings.cmp(&left.1.crossings).then_with(|| left.0.cmp(right.0)));
     ranked.truncate(HOLE_CENSUS_DOOR_LIMIT);
 
-    let listed = ranked.iter().map(|(name, count)| format!("{name} = {count}")).collect::<Vec<_>>().join(", ");
+    let listed = ranked
+        .iter()
+        .map(|(name, entry)| {
+            if entry.valued {
+                format!("{name} = {} ({} to {} handed)", entry.crossings, entry.lowest, entry.highest)
+            } else {
+                format!("{name} = {}", entry.crossings)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
 
     format!("Cutt probe cut hole census over {span_ms} ms: {doors} counted door(s) crossed {crossings} times while the status panel was held off: {listed}")
 }
@@ -2480,9 +2534,13 @@ mod tests {
         let table = close_hole_census().expect("opening a hole installs its tally");
 
         assert_eq!(
-            table.get("census door crossed three ways").copied(),
+            table.get("census door crossed three ways").map(|entry| entry.crossings),
             Some(3),
             "a door crossed through all three counting shapes counts three crossings"
+        );
+        assert!(
+            !table.get("census door crossed three ways").is_some_and(|entry| entry.valued),
+            "a counted door hands nothing worth a range, and claiming one would be a made up number"
         );
         assert!(
             !table.contains_key("census door crossed before the hole"),
@@ -2493,6 +2551,30 @@ mod tests {
         assert!(line.contains("census door crossed three ways = 3"), "the census line names the door and its crossings: {line}");
         assert!(line.contains("over 6583 ms"), "the census line carries the hole it censuses: {line}");
         assert!(!line.contains("before the hole"), "the census line does not carry a door the hole never crossed: {line}");
+    }
+
+    // Item 70 needs more than crossings before it hands the game's own skip door an argument: it needs the
+    // times the cut-in clock is being fed while the panel is held off. The peak a door keeps all run cannot
+    // answer that, because the peak may have been set by a cut outside the hole.
+    #[test]
+    fn a_hole_census_keeps_the_lowest_and_highest_value_a_valued_door_handed() {
+        let _turn = CENSUS_TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let clock = CutProbe::peaked("census clock door handed times");
+
+        open_hole_census();
+        clock.sample(3.0);
+        clock.observe_peak(&[6.0], 6.0);
+        clock.sample(1.5);
+        clock.count();
+        let table = close_hole_census().expect("opening a hole installs its tally");
+        let entry = table.get("census clock door handed times").expect("the door was crossed inside the window");
+
+        assert_eq!(entry.crossings, 4, "the valued shapes and the plain one all count as crossings");
+        assert_eq!((entry.lowest, entry.highest), (1.5, 6.0), "the window keeps the spread it saw, not the run peak");
+        assert!(entry.valued, "a door that handed a value is reported with one");
+
+        let line = hole_census_line(3400, &table);
+        assert!(line.contains("census clock door handed times = 4 (1.5 to 6 handed)"), "the census line prints the spread next to the crossings: {line}");
     }
 
     #[test]
@@ -2519,7 +2601,7 @@ mod tests {
         let table = close_hole_census().expect("the second window carries its own tally");
 
         assert_eq!(
-            table.get("census door of a hole a second cut-in replaced").copied(),
+            table.get("census door of a hole a second cut-in replaced").map(|entry| entry.crossings),
             Some(1),
             "the replaced window is dropped rather than added to the new one"
         );
