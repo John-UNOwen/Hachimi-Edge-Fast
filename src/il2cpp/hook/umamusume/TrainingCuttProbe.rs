@@ -8,7 +8,7 @@ use fnv::FnvHashMap;
 use once_cell::sync::Lazy;
 
 use crate::{
-    core::{hachimi::recover_lock, Hachimi},
+    core::{hachimi::recover_lock, settings_preset, Hachimi},
     il2cpp::{
         hook::umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager},
         symbols::{get_class, get_field_from_name},
@@ -781,6 +781,74 @@ fn tag_kind_for_run(tag_player_seen: bool, last_answer: usize) -> usize {
     if tag_player_seen { TAG_FRIENDSHIP } else { last_answer }
 }
 
+// What one arm window did to the cuts that ran under it. Run 29 settled that a game session cannot be
+// held constant, because which cut the game plays and how long the server takes are its own business,
+// so item 55 is measured the other way round: every sample is filed under the window the picker last
+// opened, and each window is reported on its own line with its cuts split by kind. The door side cost
+// is one atomic load, and the lock below sits on the same cold doors the hole census already takes one
+// on: a training cut closes a couple of times a career, not a frame.
+#[derive(Clone, Default)]
+struct WindowAgg {
+    runs: usize,
+    wall_ms: i64,
+    played_ms: i64,
+    tap_ms: i64,
+    gaps: usize,
+    gap_ms: i64,
+    holes: usize,
+    hole_ms: i64,
+    first_ms: i64,
+    last_ms: i64,
+    kind_runs: [usize; TAG_COUNT],
+    kind_wall_ms: [i64; TAG_COUNT],
+}
+
+static WINDOW_AGG: Lazy<Mutex<FnvHashMap<usize, WindowAgg>>> = Lazy::new(|| Mutex::new(FnvHashMap::default()));
+static FLUSHED_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+fn record_in_window(record: impl FnOnce(&mut WindowAgg)) {
+    let window = settings_preset::arm_window();
+    let now = elapsed_ms();
+    let mut table = recover_lock(&WINDOW_AGG);
+    let agg = table.entry(window).or_default();
+
+    if agg.first_ms < 0 {
+        agg.first_ms = now;
+    }
+
+    agg.last_ms = now;
+    record(agg);
+}
+
+// The line one arm window gets when the picker has moved off it. `played` is the cut running before it
+// asked the player for a tap and `tap` is the wait after that ask, which is the pair a comparison needs
+// because one of them is the animation the levers reach and the other is a person.
+fn window_line(window: usize, name: &str, agg: &WindowAgg) -> String {
+    let mut kinds = String::new();
+
+    for index in 0..TAG_COUNT {
+        if agg.kind_runs[index] == 0 {
+            continue;
+        }
+
+        let _ = write!(kinds, " {} {} runs {} ms", TAG_NAMES[index], agg.kind_runs[index], agg.kind_wall_ms[index]);
+    }
+
+    format!(
+        "Cutt probe arm window {name} #{window} span {} s: cuts {} wall {} ms played {} ms tap {} ms, gaps {} {} ms, holes {} {} ms:{}kinds",
+        (agg.last_ms - agg.first_ms).max(0) / 1000,
+        agg.runs,
+        agg.wall_ms,
+        agg.played_ms,
+        agg.tap_ms,
+        agg.gaps,
+        agg.gap_ms,
+        agg.holes,
+        agg.hole_ms,
+        kinds
+    )
+}
+
 // Called from the door run 10 measured 19 times in a career that produced 35 `CleanUpCutt` calls:
 // `PlayTrainingCut` is where the game starts a training cut. The run before is closed first, so a cut that
 // was never cleaned up is still measured instead of silently merged with the next one. C47 and C49 are the
@@ -819,6 +887,12 @@ fn open_cut_run() {
         if gaps <= PROBE_DETAIL_LIMIT {
             info!("Cutt probe: cut gap {gap_ms} ms from the previous close to this open on view {view} {}", BUCKET_NAMES[bucket as usize]);
         }
+
+        // A gap belongs to the window the cut opened in, which is where its second half was spent.
+        record_in_window(|window| {
+            window.gaps += 1;
+            window.gap_ms += gap_ms;
+        });
 
         record_gap_legs(closed_ms, now);
     }
@@ -893,6 +967,21 @@ fn close_cut_run() {
         TAP_WAIT_BUCKET_RUNS[closed_bucket].fetch_add(1, atomic::Ordering::Relaxed);
         TAP_WAIT_BUCKET_MS[closed_bucket].fetch_add(waited, atomic::Ordering::Relaxed);
     }
+
+    // The same cut, filed under the arm that was in force while it ran. `played` is `run_ms` minus the
+    // tap wait, which is the leg from this run's open to the moment it asked for a tap, the same stretch
+    // the `cut wall legs` line measures across the whole session.
+    record_in_window(|window| {
+        window.runs += 1;
+        window.wall_ms += run_ms;
+        window.kind_runs[tag_kind] += 1;
+        window.kind_wall_ms[tag_kind] += run_ms;
+
+        if let Some(waited) = tap_ms {
+            window.tap_ms += waited;
+            window.played_ms += run_ms - waited;
+        }
+    });
 
     RUN_CLOSED_MS.store(now, atomic::Ordering::Relaxed);
 
@@ -1508,6 +1597,10 @@ fn record_cut_hole() {
         CUT_HOLE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         CUT_HOLE_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
         CUT_HOLE_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
+        record_in_window(|window| {
+            window.holes += 1;
+            window.hole_ms += span_ms;
+        });
         // Which doors the wait crossed, said once, at the moment the wait ends.
         if let Some(table) = close_hole_census() {
             info!("{}", hole_census_line(span_ms, &table));
@@ -2423,7 +2516,15 @@ pub fn report_if_due() {
     let last_frame = TIMELINE_CURRENT_FRAME_PEAK.load(atomic::Ordering::Relaxed);
     let target_fps = TIMELINE_TARGET_FPS.load(atomic::Ordering::Relaxed);
 
-    info!("Cutt probe totals at {now_sec} s:{line} cut runs {runs} wall {wall_ms} ms timeline {peak_ms} ms open {open_for} ms");
+    // The window still open gets a tail on the totals line rather than a line of its own, so naming the
+    // arm a run is on costs no log volume.
+    let window = settings_preset::arm_window();
+    let arm = match recover_lock(&WINDOW_AGG).get(&window).cloned() {
+        Some(agg) if agg.runs > 0 => format!(" arm {} #{} cuts {} wall {} ms", settings_preset::arm_window_name(window), window, agg.runs, agg.wall_ms),
+        _ => String::new(),
+    };
+
+    info!("Cutt probe totals at {now_sec} s:{line} cut runs {runs} wall {wall_ms} ms timeline {peak_ms} ms open {open_for} ms{arm}");
     info!("Cutt probe cut runs by screen:{buckets}");
 
     // The three clocks run 11 left open, on their own line so the totals above stay readable. The tap
@@ -2506,6 +2607,32 @@ pub fn report_if_due() {
     );
     info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");
     info!("Cutt probe training scaling points reached:{doors}");
+
+    // A window is printed once, after the picker has moved off it, so the arm a run was on and the cuts
+    // that ran under it are in the log even though the session never repeats the same content. A window
+    // that saw no cut is left out: an arm with no sample has nothing to say.
+    let closed_from = FLUSHED_WINDOW.load(atomic::Ordering::Relaxed) + 1;
+    let current_window = settings_preset::arm_window();
+
+    if closed_from < current_window {
+        let mut closed: Vec<(usize, String, WindowAgg)> = Vec::new();
+
+        for index in closed_from..current_window {
+            if let Some(agg) = recover_lock(&WINDOW_AGG).get(&index).cloned() {
+                closed.push((index, settings_preset::arm_window_name(index), agg));
+            }
+        }
+
+        for (index, name, agg) in closed {
+            if agg.runs == 0 {
+                continue;
+            }
+
+            info!("{}", window_line(index, &name, &agg));
+        }
+    }
+
+    FLUSHED_WINDOW.store(current_window.saturating_sub(1).max(FLUSHED_WINDOW.load(atomic::Ordering::Relaxed)), atomic::Ordering::Relaxed);
 }
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -2515,6 +2642,54 @@ static LAST_TOTALS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The window line is what a comparison is read off, so its numbers are checked as text: an arm that
+    // cannot be told apart from the arm next to it in the log is the same as not measuring it at all.
+    #[test]
+    fn the_window_line_splits_an_arms_cuts_into_the_animation_and_the_tap() {
+        let mut agg = WindowAgg::default();
+
+        agg.first_ms = 10_000;
+        agg.last_ms = 610_000;
+        agg.runs = 3;
+        agg.wall_ms = 6_000;
+        agg.played_ms = 4_500;
+        agg.tap_ms = 1_500;
+        agg.gaps = 2;
+        agg.gap_ms = 40_000;
+        agg.holes = 1;
+        agg.hole_ms = 3_000;
+        agg.kind_runs[TAG_FRIENDSHIP] = 2;
+        agg.kind_wall_ms[TAG_FRIENDSHIP] = 4_000;
+        agg.kind_runs[TAG_UNKNOWN] = 1;
+        agg.kind_wall_ms[TAG_UNKNOWN] = 2_000;
+
+        let line = window_line(2, "All levers", &agg);
+
+        assert!(line.contains("arm window All levers #2 span 600 s"), "{line}");
+        assert!(line.contains("cuts 3 wall 6000 ms played 4500 ms tap 1500 ms"), "{line}");
+        assert!(line.contains("gaps 2 40000 ms, holes 1 3000 ms"), "{line}");
+        assert!(line.contains("friendship cut 2 runs 4000 ms"), "{line}");
+        assert!(line.contains("tag answer unknown 1 runs 2000 ms"), "{line}");
+    }
+
+    #[test]
+    fn a_window_line_leaves_out_the_cut_kind_that_arm_never_saw() {
+        let mut agg = WindowAgg::default();
+
+        agg.last_ms = 15_000;
+        agg.first_ms = 10_000;
+        agg.runs = 1;
+        agg.wall_ms = 1_900;
+        agg.kind_runs[TAG_REGULAR] = 1;
+        agg.kind_wall_ms[TAG_REGULAR] = 1_900;
+
+        let line = window_line(1, "Neutral", &agg);
+
+        assert!(line.contains("regular cut 1 runs 1900 ms"), "{line}");
+        assert!(!line.contains("friendship"), "a kind the arm never reached must not show up as a zero");
+        assert!(!line.contains("tag answer"), "{line}");
+    }
 
     // The census window is one process wide static, and cargo runs tests on several threads, so the tests
     // that open and close a window take this turn instead of racing each other for it.
