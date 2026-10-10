@@ -1,11 +1,11 @@
-use std::{fs, path::{Path, PathBuf}, process, sync::{atomic::{self, AtomicBool, AtomicI32}, Arc, Mutex}, time::{Duration, Instant}};
+use std::{fs, path::{Path, PathBuf}, process, sync::{atomic::{self, AtomicBool, AtomicI32, AtomicPtr, AtomicUsize}, Arc, Mutex}, time::{Duration, Instant}};
 use arc_swap::ArcSwap;
 use fnv::{FnvHashMap, FnvHashSet};
 use once_cell::sync::OnceCell;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use textwrap::wrap_algorithms::Penalties;
 
-use crate::{core::{gui, plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il2cpp::{self, hook::umamusume::{CySpringController::SpringUpdateMode, GameSystem}, sql::{CharacterData, SkillDataDesc, SkillInfo}}};
+use crate::{core::{gui, plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il2cpp::{self, hook::guard, hook::umamusume::{CySpringController::SpringUpdateMode, GameSystem}, sql::{CharacterData, SkillDataDesc, SkillInfo}}};
 
 use super::{game::{Game, Region}, ipc, plurals, template, template_filters, tl_repo, utils, Error, Interceptor};
 
@@ -16,33 +16,390 @@ pub const WEBSITE_URL: &str = "https://hachimi.noccu.art";
 pub const UMAPATCHER_UPDATER_DEEPLINK: &str = "umapatcher-edge://update-hachimi";
 pub const RACE_MECHANICS_URL: &str = "https://docs.google.com/document/d/15VzW9W2tXBBTibBRbZ8IVpW6HaMX8H0RP03kq6Az7Xg";
 
-static mut ORIG_SQLITE3_OPEN_V2: Option<extern "C" fn(*const i8, *mut *mut std::ffi::c_void, i32, *const i8) -> i32> = None;
-static mut ORIG_SQLITE3_KEY: Option<extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, i32) -> i32> = None;
+/// How many times a shared lock was handed back despite its poison flag in this process. Bumped only
+/// in the cold arm of `recover_lock` below, so a clean `lock()` pays nothing for it (AGENTS section
+/// 6).
+static POISONED_LOCK_RECOVERIES: AtomicUsize = AtomicUsize::new(0);
+
+/// Acquire a shared lock so that a lock poisoned by a thread that died holding it hands **this**
+/// call its data instead of a panic. The acquirer every shipped `extern "C"` frame under `src/` reads
+/// a shared `Mutex` through (AGENTS section 6, C2), published here, next to the state it guards; the
+/// recoveries written out in full in this file (`apply_retrieved_key`, `record_key_into`,
+/// `store_plugin_init_callback`, `run_plugin_init_callbacks`) are the same rule, written before it
+/// had a name.
+///
+/// Why `lock().unwrap()` is the wrong answer on this side of a hook boundary, in the order the data
+/// moves:
+///
+/// 1. When a panic unwinds through a `MutexGuard`, its `Drop` sets the cell's poison flag. It does
+///    not invalidate the data: every lock in this crate guards the mod's own state - a plugin list,
+///    the GUI, a painter, an IME position, a translation cache - and `PoisonError::into_inner()` is
+///    exactly the handle back to it.
+/// 2. The flag is permanent. One accident makes every later acquirer of that cell a caller that gets
+///    `Err(PoisonError)`, for the life of the process.
+/// 3. `unwrap()` turns that value into a **new panic**, at the acquirer's frame. If that frame is an
+///    `extern "C"` one - a MinHook detour, a subclassed window procedure, a swap-chain `Present`, an
+///    exported plugin entry - it is `nounwind`, so nothing can unwind the panic out: the runtime
+///    prints `panic in a function that cannot unwind` and aborts. `target\scratch\i4_poison_repro.rs`
+///    measures both halves out of process, one shape per run: `unwrap` answers nothing and exits
+///    `0xC0000409`; this acquirer answers three frame calls with the cell's data intact and the
+///    process alive. And the abort is silent, because `windows/hachimi_impl.rs` has already killed
+///    `UnityCrashHandler64.exe`.
+///
+/// What the recovery trades, said out loud: it hands back a value a panic may have left
+/// half-updated, instead of ending the game. For these cells that is a wrong pixel, a stale cache
+/// entry or one skipped translation, and the alternative is the process dying on the frame after it -
+/// which is the choice AGENTS section 6 already makes for the sqlite key (`:155`, `:212`) and the
+/// plugin queue (`:287-293`). A cell whose own invariant cannot survive a half-update must not be
+/// acquired this way; none of the cells here is one, and each one's own doc says what it holds.
+///
+/// Cost on a path a detour runs per call: `#[inline]` over `lock()` with a cold `into_inner()` arm -
+/// the same instructions `unwrap()` compiles on the success path. No allocation, no formatting, no
+/// log, no lock taken twice (AGENTS section 6).
+#[inline]
+pub fn recover_lock<T>(cell: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    cell.lock().unwrap_or_else(|poisoned| {
+        // Cold arm only: a clean `lock()` never reaches it, so this counter is not a per-call cost
+        // (AGENTS section 6). It is what makes the recovery countable in a run instead of invisible.
+        POISONED_LOCK_RECOVERIES.fetch_add(1, atomic::Ordering::Relaxed);
+        poisoned.into_inner()
+    })
+}
+
+/// How many times a shared lock was handed back despite its poison flag, across this process.
+pub fn poisoned_lock_recoveries() -> usize {
+    POISONED_LOCK_RECOVERIES.load(atomic::Ordering::Relaxed)
+}
+
+/// The line a run reads, assembled apart from the `info!` for the reason `guard` gives for splitting
+/// `trip_report` from `report_trips`: the claim this item ends with is a claim about a log line, and
+/// the test process installs no logger. One `String`, on the path that runs once per process.
+pub fn poisoned_lock_report() -> String {
+    format!(
+        "Poisoned shared locks recovered: {} acquisition(s) handed their data instead of a panic across a hook boundary",
+        poisoned_lock_recoveries()
+    )
+}
+
+/// Printed at `DLL_PROCESS_DETACH` beside the barrier's own trip report. A clean run prints it with
+/// `0` in it, which is the number that says the hazard never fired.
+pub fn report_poisoned_lock_recoveries() {
+    info!("{}", poisoned_lock_report());
+}
+
+type Sqlite3OpenV2Fn = extern "C" fn(filename: *const i8, pp_db: *mut *mut std::ffi::c_void, flags: i32, z_vfs: *const i8) -> i32;
+type Sqlite3KeyFn = extern "C" fn(db: *mut std::ffi::c_void, p_key: *const std::ffi::c_void, n_key: i32) -> i32;
+
+// The two detours below are hook boundaries: MinHook writes a jump into the game's
+// `sqlite3_open_v2` / `sqlite3_key` in `libnative.dll`, and the frame that lands on the detour is the
+// game's own sqlite call. Nothing may leave these bodies unwound, and nothing may call a target that
+// was never published (AGENTS section 6, C2, C1).
+//
+// What the shape they carried got wrong, in the order the data moves:
+//
+// 1. `Interceptor::hook` is create **and arm** on this platform (`windows/interceptor_impl.rs`:
+//    `create_hook` then `enable_hook`), and the original was only written *after* it returned. The
+//    jump into the detour is live the moment `hook` returns, so a `sqlite3_key` call from any other
+//    thread in that window reached `ORIG_SQLITE3_KEY.unwrap()` on a `None`.
+// 2. `static mut Option<extern "C" fn>` is 16 bytes written by the thread that loaded `libnative.dll`
+//    while the game's other threads read it on every sqlite call. Unsynchronised: a reader that sees
+//    the discriminant before the pointer calls through whatever the old bytes held.
+// 3. `RETRIEVED_RAW_KEY.lock().unwrap()` sat in both bodies. These two hooks are the only writers of
+//    the key `il2cpp::sql::key_retrieved` reads, so one thread that died holding that lock turned
+//    every later sqlite call the game makes into a panic across a boundary rustc refuses to unwind
+//    through. Measured in `target/scratch/check_c2_sqlite` (a standalone mirror of both bodies built
+//    with `rustc`, run four ways): the old body, called the way a trampoline calls it, exits
+//    `0xC0000409` - `panic in a function that cannot unwind` - on both the unpublished original and a
+//    poisoned lock; the fixed body on the same two inputs returns `SQLITE_ERROR` and the process lives.
+//
+// `AtomicUsize` is the shape that answers 1 and 2: a release store, an acquire load, and `0` meaning
+// "no original published yet", which AGENTS section 2 keeps inert. A published original is still
+// stored after `hook` returns - there is no create-without-arm entry on `Interceptor` - so the window
+// a call can land in is the few instructions after arming, and what it now gets is a refusal, not a
+// panic and not a jump through 0.
+static ORIG_SQLITE3_OPEN_V2: AtomicUsize = AtomicUsize::new(0);
+static ORIG_SQLITE3_KEY: AtomicUsize = AtomicUsize::new(0);
+
+/// `SQLITE_ERROR`. The only answer a sqlite call this mod cannot forward gives: `SQLITE_OK` (0) would
+/// be the mod inventing a database it never opened, or a key it never applied.
+const SQLITE_ERROR: i32 = 1;
+
+/// `n_key` is a length the game supplied. Copying an unbounded one is an out-of-bounds read (the C9
+/// shape) or a multi-gigabyte allocation, and an allocation failure aborts instead of unwinding, so a
+/// length past this is refused before either happens. The keys this game passes are tens of bytes.
+const MAX_SQLITE_KEY_BYTES: usize = 4096;
+
+/// One line per detour, never one per call (AGENTS section 6). Each latch starts as the address of
+/// the code that owns it rather than as the same `false` bytes as its neighbours, because a linker
+/// folding identical data folds latches onto one another - the same reason `guard::invented_answer`
+/// takes its latch that way. A swap to null spends it. The five seeds are five different addresses so
+/// no two of them are ever candidates for that folding.
+static SQLITE3_OPEN_NO_ORIG: AtomicPtr<()> = AtomicPtr::new(sqlite3_open_v2_hook as *mut ());
+static SQLITE3_KEY_NO_ORIG: AtomicPtr<()> = AtomicPtr::new(sqlite3_key_hook as *mut ());
+static SQLITE3_APPLY_NO_ORIG: AtomicPtr<()> = AtomicPtr::new(apply_retrieved_key as *mut ());
+static SQLITE3_KEY_LENGTH_REFUSED: AtomicPtr<()> = AtomicPtr::new(refuse_key_length as *mut ());
+
+/// "A key is already in the record", and it is an `AtomicPtr` seeded with its own function for the
+/// reason above: a `static AtomicBool = false` here is a latch whose bytes are identical to someone
+/// else's, and the two would become one flag. Non-null means nothing captured yet; the capture spends
+/// it, and a capture the barrier stopped leaves it unspent.
+static SQLITE3_KEY_RECORDED: AtomicPtr<()> = AtomicPtr::new(record_key_into as *mut ());
+
+#[cold]
+fn claim_cold_report(latch: &AtomicPtr<()>) -> bool {
+    !latch.swap(std::ptr::null_mut(), atomic::Ordering::AcqRel).is_null()
+}
+
+#[cold]
+fn refuse_key_length(n_key: i32) {
+    if claim_cold_report(&SQLITE3_KEY_LENGTH_REFUSED) {
+        warn!("sqlite3_key reported a key of {} bytes; longer than {}, it is not captured", n_key, MAX_SQLITE_KEY_BYTES);
+    }
+}
+
+#[inline]
+fn sqlite3_open_v2_orig() -> Option<Sqlite3OpenV2Fn> {
+    match ORIG_SQLITE3_OPEN_V2.load(atomic::Ordering::Acquire) {
+        0 => None,
+        addr => Some(unsafe { std::mem::transmute::<usize, Sqlite3OpenV2Fn>(addr) }),
+    }
+}
+
+#[inline]
+fn sqlite3_key_orig() -> Option<Sqlite3KeyFn> {
+    match ORIG_SQLITE3_KEY.load(atomic::Ordering::Acquire) {
+        0 => None,
+        addr => Some(unsafe { std::mem::transmute::<usize, Sqlite3KeyFn>(addr) }),
+    }
+}
 
 extern "C" fn sqlite3_open_v2_hook(filename: *const i8, pp_db: *mut *mut std::ffi::c_void, flags: i32, z_vfs: *const i8) -> i32 {
-    let result = unsafe { ORIG_SQLITE3_OPEN_V2.unwrap()(filename, pp_db, flags, z_vfs) };
+    let Some(orig) = sqlite3_open_v2_orig() else {
+        if claim_cold_report(&SQLITE3_OPEN_NO_ORIG) {
+            warn!("sqlite3_open_v2 detour has no original published: the game's sqlite3_open_v2 was not forwarded and this open reports SQLITE_ERROR");
+        }
+        return SQLITE_ERROR;
+    };
+
+    // The game's own call to the game's own sqlite, deliberately outside the barrier: a fault inside
+    // sqlite is the failure the game has with no mod installed, and this hook does not get to answer
+    // it. Everything the mod adds after that call runs behind `detour_barrier`.
+    let result = orig(filename, pp_db, flags, z_vfs);
 
     if result == 0 && !pp_db.is_null() {
-        if crate::il2cpp::sql::AUTO_UNLOCK_NEXT_DB.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            let raw_key = crate::il2cpp::sql::RETRIEVED_RAW_KEY.lock().unwrap();
-            if !raw_key.is_empty() {
-                let db_ptr = unsafe { *pp_db };
-                unsafe { ORIG_SQLITE3_KEY.unwrap()(db_ptr, raw_key.as_ptr() as *const std::ffi::c_void, raw_key.len() as i32) };
-            }
-        }
+        apply_retrieved_key(&crate::il2cpp::sql::RETRIEVED_RAW_KEY, pp_db);
     }
+
     result
 }
 
 extern "C" fn sqlite3_key_hook(db: *mut std::ffi::c_void, p_key: *const std::ffi::c_void, n_key: i32) -> i32 {
     if !p_key.is_null() {
-        let mut raw_guard = crate::il2cpp::sql::RETRIEVED_RAW_KEY.lock().unwrap();
-        if raw_guard.is_empty() {
-            let key_bytes = unsafe { std::slice::from_raw_parts(p_key as *const u8, n_key as usize) };
-            *raw_guard = key_bytes.to_vec();
+        record_key_into(&crate::il2cpp::sql::RETRIEVED_RAW_KEY, &SQLITE3_KEY_RECORDED, p_key, n_key);
+    }
+
+    let Some(orig) = sqlite3_key_orig() else {
+        if claim_cold_report(&SQLITE3_KEY_NO_ORIG) {
+            warn!("sqlite3_key detour has no original published: the game's sqlite3_key was not forwarded and this call reports SQLITE_ERROR");
+        }
+        return SQLITE_ERROR;
+    };
+
+    orig(db, p_key, n_key)
+}
+
+/// The mod half of the open detour: hand the database this open just produced the key the game
+/// already gave us. `AUTO_UNLOCK_NEXT_DB` is the one-shot `il2cpp::sql::MetaData::load_from_db` arms,
+/// and the rule it implements is unchanged - one key, applied to the next database that opens.
+///
+/// The key is taken out as a copy, so the shared lock is **out of this frame** before anything foreign
+/// is called. A `std::Mutex` is not reentrant, and the old body held it across `sqlite3_key`: that is
+/// how this detour made `il2cpp::sql::key_retrieved` - the shipped meta-table guard's key read, on
+/// asset-load paths - wait on a call into sqlite, and a fault inside that call would have abandoned
+/// the lock with no `Drop` to release it (the C frame stops a fault by returning out of the frames it
+/// wrapped, AGENTS section 6).
+fn apply_retrieved_key(cell: &Mutex<Vec<u8>>, pp_db: *mut *mut std::ffi::c_void) {
+    if !crate::il2cpp::sql::AUTO_UNLOCK_NEXT_DB.swap(false, atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    let key = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    if key.is_empty() {
+        return;
+    }
+
+    let Some(key_orig) = sqlite3_key_orig() else {
+        if claim_cold_report(&SQLITE3_APPLY_NO_ORIG) {
+            warn!("sqlite3_key detour has no original published: the retrieved key was not applied to this database");
+        }
+        return;
+    };
+
+    // Behind the barrier, because this call is the mod's own - made on a handle read through a
+    // pointer the caller supplied, with a key the mod captured. A fault here is answered as a key that
+    // was not applied: no unwind into sqlite, no replay of the call that faulted, and no lock left
+    // stranded, because the key lock already left this frame.
+    let _ = guard::detour_barrier(|_answer| {
+        let db = unsafe { *pp_db };
+
+        if !db.is_null() {
+            key_orig(db, key.as_ptr() as *const std::ffi::c_void, key.len() as i32);
+        }
+    });
+}
+
+/// The only writer of `RETRIEVED_RAW_KEY`, and the record `il2cpp::sql::key_retrieved` answers with
+/// is unchanged: the first key the game hands to `sqlite3_key`, byte for byte, and nothing after it.
+///
+/// What changed is *where* the copy happens. `p_key` / `n_key` are values the game supplied, so the
+/// copy runs behind the barrier with the length clamped: a bad length or a bad pointer is stopped as
+/// "no key captured" instead of crossing a boundary that cannot unwind, and it is stopped before an
+/// allocation that would abort rather than unwind. A fault inside the copy abandons the temporary copy
+/// (a few kilobytes, on a trip path only) - the barrier returns out of the closure frames it wrapped,
+/// so no `Drop` runs there.
+///
+/// The copy has to happen before this function can tell whether a key is already in hand, because
+/// that is the half a bad pointer or a bad length can fault in, and a lock held across a fault the C
+/// frame stops by returning out of is a lock no `Drop` ever releases. `recorded` is what keeps the
+/// settled case free of all of it: once a key is in the record, a later `sqlite3_key` takes no lock,
+/// allocates nothing and copies nothing (AGENTS section 6). A capture that faulted leaves it clear, so
+/// a key arriving after one refused call is still captured.
+///
+/// The cell and the latch are parameters so a unit test drives this shape on state of its own; the
+/// shipped writer is the one call that names the shared pair.
+fn record_key_into(cell: &Mutex<Vec<u8>>, recorded: &AtomicPtr<()>, p_key: *const std::ffi::c_void, n_key: i32) {
+    if recorded.load(atomic::Ordering::Acquire).is_null() {
+        return;
+    }
+
+    let len = match usize::try_from(n_key) {
+        Ok(len) if 0 < len && len <= MAX_SQLITE_KEY_BYTES => len,
+        _ => return refuse_key_length(n_key),
+    };
+
+    let _ = guard::detour_barrier(|_answer| {
+        let bytes = unsafe { std::slice::from_raw_parts(p_key as *const u8, len) }.to_vec();
+
+        let mut key = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if key.is_empty() {
+            *key = bytes;
+        }
+        // Either this call put the first key in the record or it found one already there. Both end the
+        // capture: what `il2cpp::sql::key_retrieved` answers with is the first key, and a second key
+        // the game handed over is not information this mod uses.
+        recorded.store(std::ptr::null_mut(), atomic::Ordering::Release);
+    });
+}
+
+
+// C16 follow-up: the plugin `on_game_initialized` queue (`Hachimi::plugin_init_callbacks`) has one
+// writer, `hachimi_register_on_game_initialized` in `core::plugin_api`, which a plugin calls from
+// its `init()`, and `on_hooking_finished` runs that `init()` pass *after* the eager
+// `GameSystem::on_game_initialized()` that claims the session latch. The only reader the queue had
+// sat inside that body, so it always ran on an empty queue: a plugin that registered got `true`
+// back and was never called. The two ends are owned here, next to the queue, and the dispatch runs
+// after the writers instead of before them.
+type PluginInitCallback = (usize, usize);
+
+// Set by `on_hooking_finished` once the plugin `init()` pass has run. From that moment the game is
+// initialised and the window in which a plugin could register has closed, so a registrant is fired
+// by the call that registered it instead of queued for a pass that already happened.
+static PLUGIN_INIT_WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
+
+// A callback is third-party code and it registers through the same queue, so a dispatch marks
+// itself as in progress: a registrant that arrives while a callback is running is taken by the next
+// round of that same dispatch rather than by a recursive one.
+static PLUGIN_INIT_DISPATCHING: AtomicBool = AtomicBool::new(false);
+
+/// The in-progress mark, released by `Drop` rather than by a line at the end of the body: a hook
+/// barrier (C2) that catches a panic out of a dispatch must not leave the mark standing, or the
+/// plugin callback API is shut for the rest of the session - the exact failure this change set is
+/// fixing.
+struct PluginInitDispatchGuard {
+    flag: &'static AtomicBool,
+}
+
+impl PluginInitDispatchGuard {
+    /// Take `flag`, or `None` when a dispatch already holds it on this call stack.
+    fn claim(flag: &'static AtomicBool) -> Option<Self> {
+        if flag.compare_exchange(false, true, atomic::Ordering::AcqRel, atomic::Ordering::Relaxed).is_err() {
+            return None;
+        }
+
+        Some(PluginInitDispatchGuard { flag })
+    }
+}
+
+impl Drop for PluginInitDispatchGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, atomic::Ordering::Release);
+    }
+}
+
+// How many batches one dispatch chases, so a callback that registers another callback on every
+// firing cannot hold the thread that is starting the game in a loop.
+const MAX_PLUGIN_INIT_DISPATCH_ROUNDS: usize = 8;
+
+/// Where a registrant has to land: fired by the call that registered it, or left in the queue.
+/// While the plugin `init()` pass is still running the answer is `false`, so a plugin's own
+/// callback never fires inside its own `init()` before that `init()` has finished. Once the pass
+/// has run the answer is `true`, which is the case C16's latch used to strand. It is `false` again
+/// while a dispatch is in progress further up the same call stack, because that dispatch drains
+/// what it fired.
+fn plugin_init_callback_fires_on_arrival(window_closed: &AtomicBool, dispatching: &AtomicBool) -> bool {
+    window_closed.load(atomic::Ordering::Acquire) && !dispatching.load(atomic::Ordering::Acquire)
+}
+
+/// Store one registrant. The lock is taken across an `extern "C"` boundary a plugin calls through,
+/// and a plugin that faults poisons it, so both paths recover instead of panicking back into
+/// third-party code (AGENTS section 6). The entry is stored before the caller looks at the window,
+/// which is what makes a registrant that races the window closing impossible to lose.
+fn store_plugin_init_callback(queue: &Mutex<Vec<PluginInitCallback>>, entry: PluginInitCallback) {
+    match queue.lock() {
+        Ok(mut slot) => slot.push(entry),
+        Err(poisoned) => {
+            warn!("plugin_init_callbacks mutex poisoned, recovering");
+            poisoned.into_inner().push(entry);
         }
     }
-    unsafe { ORIG_SQLITE3_KEY.unwrap()(db, p_key, n_key) }
+}
+
+/// Invoke everything the queue holds, plus everything those calls queued, in batches of at most
+/// `MAX_PLUGIN_INIT_DISPATCH_ROUNDS`, and report how many callbacks ran. `0` when a dispatch already
+/// holds `dispatching`: a registrant that arrives inside a callback belongs to that dispatch, which
+/// drains what it fired, rather than to a second dispatch nested inside it.
+///
+/// The lock is held only long enough to take a batch out: every callback runs with the queue
+/// unlocked, because the exported registration entry takes that same lock and a plugin that
+/// registers from its own callback would otherwise lock against itself. A callback leaves the queue
+/// when it is taken out of it, so a dispatch that is reached twice fires each callback once.
+fn run_plugin_init_callbacks(queue: &Mutex<Vec<PluginInitCallback>>, dispatching: &'static AtomicBool) -> usize {
+    let Some(_dispatching) = PluginInitDispatchGuard::claim(dispatching) else {
+        return 0;
+    };
+
+    let mut fired = 0;
+
+    for _ in 0..MAX_PLUGIN_INIT_DISPATCH_ROUNDS {
+        let batch = match queue.lock() {
+            Ok(mut slot) => std::mem::take(&mut *slot),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+
+        if batch.is_empty() { break; }
+
+        for (callback, userdata) in batch {
+            // An unresolved registrant stays inert: never call through address 0.
+            if callback == 0 { continue; }
+
+            let callback: crate::core::plugin_api::GameInitializedCallback = unsafe { std::mem::transmute(callback) };
+            unsafe { callback(userdata as *mut std::ffi::c_void) };
+
+            fired += 1;
+        }
+    }
+
+    fired
 }
 
 pub struct Hachimi {
@@ -335,6 +692,12 @@ impl Hachimi {
     pub fn on_dlopen(&self, filename: &str, handle: usize) -> bool {
         let filename_lower = filename.to_lowercase();
 
+        // The writer side of the pair over the two detours: each one publishes the trampoline
+        // `hook` hands back with a release store, and the detour reads it with an acquire load.
+        // `Interceptor::hook` has already armed the target by the time it returns, so the store is
+        // the first thing done after it - the narrower the window in which a call can reach the
+        // detour with nothing published is, the better.
+
         #[cfg(target_os = "windows")]
         if filename_lower.contains("libnative.dll") {
             unsafe {
@@ -347,13 +710,13 @@ impl Hachimi {
 
                 if let Some(addr) = open_addr {
                     if let Ok(orig) = self.interceptor.hook(addr as usize, sqlite3_open_v2_hook as *const () as usize) {
-                        ORIG_SQLITE3_OPEN_V2 = Some(std::mem::transmute(orig));
+                        ORIG_SQLITE3_OPEN_V2.store(orig, atomic::Ordering::Release);
                         info!("Successfully hooked native sqlite3_open_v2 (Windows)");
                     }
                 }
                 if let Some(addr) = key_addr {
                     if let Ok(orig) = self.interceptor.hook(addr as usize, sqlite3_key_hook as *const () as usize) {
-                        ORIG_SQLITE3_KEY = Some(std::mem::transmute(orig));
+                        ORIG_SQLITE3_KEY.store(orig, atomic::Ordering::Release);
                         info!("Successfully hooked native sqlite3_key (Windows)");
                     }
                 }
@@ -373,13 +736,13 @@ impl Hachimi {
 
                 if !open_addr.is_null() {
                     if let Ok(orig) = self.interceptor.hook(open_addr as usize, sqlite3_open_v2_hook  as *const () as usize) {
-                        ORIG_SQLITE3_OPEN_V2 = Some(std::mem::transmute(orig));
+                        ORIG_SQLITE3_OPEN_V2.store(orig, atomic::Ordering::Release);
                         info!("Successfully hooked native sqlite3_open_v2 (Android)");
                     }
                 }
                 if !key_addr.is_null() {
                     if let Ok(orig) = self.interceptor.hook(key_addr as usize, sqlite3_key_hook as *const () as usize) {
-                        ORIG_SQLITE3_KEY = Some(std::mem::transmute(orig));
+                        ORIG_SQLITE3_KEY.store(orig, atomic::Ordering::Release);
                         info!("Successfully hooked native sqlite3_key (Android)");
                     }
                 }
@@ -400,6 +763,29 @@ impl Hachimi {
         }
         else {
             false
+        }
+    }
+
+    /// Backs `hachimi_register_on_game_initialized`: record one plugin `on_game_initialized`
+    /// callback. The queue and its dispatch belong here so the writer and the reader cannot drift
+    /// apart again - a registrant that arrives after the plugin `init()` pass already ran is fired
+    /// by this call, and one that arrives inside a callback is left to that callback's own dispatch.
+    pub fn register_plugin_init_callback(&self, callback: usize, userdata: usize) {
+        store_plugin_init_callback(&self.plugin_init_callbacks, (callback, userdata));
+
+        if plugin_init_callback_fires_on_arrival(&PLUGIN_INIT_WINDOW_CLOSED, &PLUGIN_INIT_DISPATCHING) {
+            self.dispatch_plugin_init_callbacks();
+        }
+    }
+
+    /// Run every plugin `on_game_initialized` callback that is waiting, each one once. Safe to call
+    /// from every arrival - the eager pass at the end of hook arming, the game's own `InitializeGame`
+    /// finishing, a soft reset - because a callback is out of the queue before it runs.
+    pub fn dispatch_plugin_init_callbacks(&self) {
+        let fired = run_plugin_init_callbacks(&self.plugin_init_callbacks, &PLUGIN_INIT_DISPATCHING);
+
+        if fired > 0 {
+            info!("Plugin init callbacks: {} fired", fired);
         }
     }
 
@@ -429,13 +815,20 @@ impl Hachimi {
 
         Hachimi::instance().start_translation_updater_thread();
 
-        for plugin in self.plugins.lock().unwrap().iter() {
+        for plugin in recover_lock(&self.plugins).iter() {
             info!("Initializing plugin: {}", plugin.name);
             let res = plugin.init();
             if !res.is_ok() {
                 info!("Plugin init failed");
             }
         }
+
+        // This pass is where a plugin registers its `on_game_initialized` callback, and it runs
+        // after the eager `GameSystem::on_game_initialized()` above, so the queue is dispatched
+        // here: after every registrant has had its turn, on the thread that ran the initialization
+        // pass, and the window is closed for anything that arrives later (C16 follow-up).
+        PLUGIN_INIT_WINDOW_CLOSED.store(true, atomic::Ordering::Release);
+        self.dispatch_plugin_init_callbacks();
     }
 
     pub fn get_data_path<P: AsRef<Path>>(&self, rel_path: P) -> PathBuf {
@@ -455,7 +848,7 @@ impl Hachimi {
     fn repair_tl_repo_state(&self) -> Result<(), Error> {
         let repos_path = self.get_data_path(".tl_repos");
         let old_data_dir = self.game.data_dir.join("localized_data");
-        let mut manager = self.tl_repo_manager.lock().unwrap();
+        let mut manager = recover_lock(&self.tl_repo_manager);
 
         if !repos_path.exists() && old_data_dir.is_dir() {
             info!("Found legacy 'localized_data' folder and no .tl_repos; migrating…");
@@ -571,7 +964,7 @@ impl Hachimi {
     }
 
     pub fn start_translation_updater_thread(self: Arc<Self>) {
-        let mut cmd_lock = self.tl_update_cmd.lock().unwrap();
+        let mut cmd_lock = recover_lock(&self.tl_update_cmd);
 
         // drop the old sender to signal the existing thread to exit.
         // Its recv_timeout will return Disconnected within 1 second.
@@ -1473,5 +1866,469 @@ impl Default for SkillFormatting {
             name_short_lines: 1,
             name_short_mult: 1.0,
             name_sp_mult: 1.0 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    // C16 follow-up: the queue a plugin fills through `hachimi_register_on_game_initialized`,
+    // driven through the same functions the shipped `on_hooking_finished` and
+    // `GameSystem::on_game_initialized` call. The callbacks are function pointers, so what they
+    // move has to be process state; each test keeps its own.
+
+    /// C2 / item 4: the chain that the 35 shipped `unwrap()`s stood on, driven end to end on one
+    /// cell. A writer dies holding a shared lock -> the flag persists and the data does not -> the
+    /// next acquirer is a frame a trampoline lands on -> `unwrap()` makes *that* call panic, and a
+    /// panic in a `nounwind` frame aborts the process (`0xC0000409`, measured out of process in
+    /// `target\scratch\i4_poison_repro.rs`). The frame here is the shipped shape: a lock taken
+    /// inside an `extern "C" fn`, reached through an address.
+    #[test]
+    fn a_poisoned_shared_lock_hands_the_next_frame_its_data_instead_of_a_panic() {
+        static CELL: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+        /// The wrapper shape: `MAP.lock().unwrap()...` inside the frame, now read through
+        /// `recover_lock`. The answer it has to give is the cell's own data, not a refusal.
+        extern "C" fn frame_len() -> i32 {
+            recover_lock(&CELL).len() as i32
+        }
+
+        // The mod's state, before the accident.
+        recover_lock(&CELL).extend([10, 20, 30]);
+
+        // Step 1: a thread dies holding the lock. `join` keeping this process alive is the half a
+        // detached thread gets for free; a hook frame gets no such half (step 3).
+        let writer = std::thread::spawn(|| {
+            let _held = recover_lock(&CELL);
+            panic!("a mod thread died holding the shared lock");
+        });
+        assert!(writer.join().is_err(), "the writer was expected to panic while holding the lock");
+
+        // Step 2: the flag is what persists, not the damage. Read it without an unwrap and the cell
+        // still hands over the three items it held.
+        match CELL.lock() {
+            Ok(guard) => panic!("the cell was expected to be poisoned; it answered Ok with {} items", guard.len()),
+            Err(poisoned) => assert_eq!(poisoned.into_inner().len(), 3, "the poisoning took the cell's data with it"),
+        }
+
+        // Step 3: the game calls the hook again, three times the way a per-frame hook calls it,
+        // through an address rather than as an inline call, so the boundary is a real `extern "C"`
+        // one. Each call answers the cell's data and none of them unwinds out of the frame.
+        let counted_before = poisoned_lock_recoveries();
+
+        let addr = frame_len as *const () as usize;
+        let through_trampoline: extern "C" fn() -> i32 = unsafe { std::mem::transmute(addr) };
+
+        for call in 0..3 {
+            assert_eq!(through_trampoline(), 3, "frame call {call} after a poisoning did not hand back the cell's data");
+        }
+
+        // And the acquirer poisons nothing itself: after three frame calls the next acquirer still
+        // gets the cell. `unwrap()` on the third of those calls would have been the abort.
+        assert_eq!(recover_lock(&CELL).len(), 3, "a frame call left the cell unusable for the next acquirer");
+
+        // Four poisoned acquisitions (three frame calls plus this one) are counted, which is what
+        // makes the detach line a number a run can read rather than a claim. `>=`: other tests run
+        // in this same process and share the counter.
+        let recovered = poisoned_lock_recoveries() - counted_before;
+        assert!(recovered >= 4, "the {recovered} recoveries after the poisoning did not cover the four acquirers");
+        assert!(poisoned_lock_report().contains("Poisoned shared locks recovered:"), "the line this item ends with is not the one a run reads");
+    }
+
+    /// The other shipped shape, at the sites that hold the GUI behind an `Option`:
+    /// `Gui::instance().map(|m| m.lock().unwrap())` with a `let ... else` that hands the call to the
+    /// game. The rule this pins is which event takes that branch: a **missing** cell does, a
+    /// **poisoned** one does not - the frame keeps working with the cell's own data, and the game's
+    /// own answer is not used as a cover for a poisoned lock.
+    #[test]
+    fn the_games_own_answer_is_for_a_missing_cell_and_not_for_a_poisoned_one() {
+        static PRESENT: OnceCell<Mutex<Vec<i32>>> = OnceCell::new();
+        static MISSING: OnceCell<Mutex<Vec<i32>>> = OnceCell::new();
+
+        /// -1 is what the shipped `let ... else` answers with: the window procedure's
+        /// `orig_fn(hwnd, umsg, ..)`, the game's own handling of the message.
+        extern "C" fn frame_answer(cell: &OnceCell<Mutex<Vec<i32>>>) -> i32 {
+            let Some(mut gui) = cell.get().map(|m| recover_lock(m)) else {
+                return -1;
+            };
+            gui.push(7);
+            gui.len() as i32
+        }
+
+        PRESENT.set(Mutex::new(Vec::new())).ok();
+
+        // Poison the present cell the way a per-frame panic does it.
+        let writer = std::thread::spawn(|| {
+            let _held = PRESENT.get().unwrap().lock().unwrap();
+            panic!("a frame died holding the GUI lock");
+        });
+        assert!(writer.join().is_err(), "the writer was expected to panic while holding the lock");
+
+        // A poisoned cell is still the GUI: the frame takes its branch, not the game's.
+        assert_eq!(frame_answer(&PRESENT), 1, "a poisoned GUI cell sent the message to the game instead of the GUI");
+        assert_eq!(frame_answer(&PRESENT), 2, "the second frame call lost what the first one put in the cell");
+
+        // A cell that is genuinely absent still answers the game's way - the inert branch is
+        // unchanged by this item, and it is only ever reached by an absent cell.
+        assert_eq!(frame_answer(&MISSING), -1, "a missing cell stopped answering the game's own handling");
+    }
+
+    #[test]
+    fn a_plugin_that_registers_after_the_initialization_pass_still_gets_its_callback() {
+        static QUEUE: Mutex<Vec<PluginInitCallback>> = Mutex::new(Vec::new());
+        static SEEN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+        static DISPATCHING: AtomicBool = AtomicBool::new(false);
+        static TAG_FIRST: i32 = 11;
+        static TAG_SECOND: i32 = 22;
+
+        unsafe extern "C" fn record_first(userdata: *mut std::ffi::c_void) {
+            recover_lock(&SEEN).push(unsafe { *(userdata as *const i32) });
+        }
+        unsafe extern "C" fn record_second(userdata: *mut std::ffi::c_void) {
+            recover_lock(&SEEN).push(unsafe { *(userdata as *const i32) });
+        }
+
+        // The order `on_hooking_finished` actually runs in: the eager `GameSystem::on_game_initialized()`
+        // dispatch, then the plugin `init()` pass - which is where a plugin registers - then the
+        // dispatch that closes the window. Before the fix the only reader sat inside the first of
+        // those three, so it ran on an empty queue and the two registrations below were never called.
+        let eager_pass = run_plugin_init_callbacks(&QUEUE, &DISPATCHING);
+
+        store_plugin_init_callback(&QUEUE, (record_first as usize, &TAG_FIRST as *const i32 as usize));
+        store_plugin_init_callback(&QUEUE, (record_second as usize, &TAG_SECOND as *const i32 as usize));
+
+        let after_plugin_init_pass = run_plugin_init_callbacks(&QUEUE, &DISPATCHING);
+
+        assert_eq!(eager_pass, 0, "the eager pass called a callback a plugin had not registered yet");
+        assert_eq!(after_plugin_init_pass, 2, "a plugin that registered after the eager pass was never called");
+        assert_eq!(*SEEN.lock().unwrap(), vec![11, 22], "the callbacks ran out of registration order");
+
+        // A callback leaves the queue when it runs, so every later arrival - the game's own
+        // `InitializeGame` finishing, a re-init, a soft reset - dispatches nothing. Each callback
+        // runs once per session, which is what C16's latch was for.
+        assert!(QUEUE.lock().unwrap().is_empty(), "a fired callback stayed in the queue");
+        assert_eq!(run_plugin_init_callbacks(&QUEUE, &DISPATCHING), 0, "a later arrival ran a callback again");
+        assert_eq!(run_plugin_init_callbacks(&QUEUE, &DISPATCHING), 0, "a third arrival ran a callback again");
+        assert_eq!(SEEN.lock().unwrap().len(), 2, "a callback ran more than once");
+
+        // And the dispatch left its own mark behind: a later registrant must still be able to fire.
+        assert!(!DISPATCHING.load(atomic::Ordering::Acquire), "a finished dispatch left the queue shut");
+    }
+
+    #[test]
+    fn a_registrant_that_takes_the_queue_from_inside_a_callback_proves_the_lock_is_released() {
+        static QUEUE: Mutex<Vec<PluginInitCallback>> = Mutex::new(Vec::new());
+        static DISPATCHING: AtomicBool = AtomicBool::new(false);
+        static FIRED: AtomicUsize = AtomicUsize::new(0);
+        static NESTED_DISPATCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static NESTED_DISPATCHES_THAT_RAN: AtomicUsize = AtomicUsize::new(0);
+
+        // Exactly what a plugin does when it calls `hachimi_register_on_game_initialized` from its
+        // own `on_game_initialized` callback: it takes the queue lock. If the dispatch still held
+        // that lock while it called the callback, this registration would block forever, so this
+        // test finishing at all is the proof that callbacks run with the queue unlocked. It also
+        // tries to start a second dispatch from inside the callback, which must decline.
+        unsafe extern "C" fn re_registering_callback(userdata: *mut std::ffi::c_void) {
+            FIRED.fetch_add(1, atomic::Ordering::Relaxed);
+            store_plugin_init_callback(&QUEUE, (re_registering_callback as usize, userdata as usize));
+
+            let nested = run_plugin_init_callbacks(&QUEUE, &DISPATCHING);
+            NESTED_DISPATCH_CALLS.fetch_add(1, atomic::Ordering::Relaxed);
+            if nested != 0 { NESTED_DISPATCHES_THAT_RAN.fetch_add(1, atomic::Ordering::Relaxed); }
+        }
+
+        store_plugin_init_callback(&QUEUE, (re_registering_callback as usize, 0));
+
+        let fired = run_plugin_init_callbacks(&QUEUE, &DISPATCHING);
+
+        // Each round took the registration the round before it queued, up to the ceiling, and the
+        // dispatch stopped there instead of chasing a callback that registers forever.
+        assert_eq!(fired, MAX_PLUGIN_INIT_DISPATCH_ROUNDS, "the re-entrant registrations were not dispatched");
+        assert_eq!(FIRED.load(atomic::Ordering::Relaxed), MAX_PLUGIN_INIT_DISPATCH_ROUNDS, "a dispatched callback did not run");
+        assert_eq!(NESTED_DISPATCH_CALLS.load(atomic::Ordering::Relaxed), MAX_PLUGIN_INIT_DISPATCH_ROUNDS, "a callback never tried to nest a dispatch");
+        assert_eq!(NESTED_DISPATCHES_THAT_RAN.load(atomic::Ordering::Relaxed), 0, "a dispatch nested inside a dispatch ran");
+
+        // What the last round queued is still in the queue for the next arrival rather than lost,
+        // and the queue is open again afterwards.
+        assert_eq!(QUEUE.lock().unwrap().len(), 1, "the bounded dispatch dropped a queued registrant");
+        assert!(!DISPATCHING.load(atomic::Ordering::Acquire), "a finished dispatch left the queue shut");
+
+        // A later arrival takes the registrant the ceiling stopped on, and the ceiling holds again
+        // instead of the chase going on forever.
+        assert_eq!(run_plugin_init_callbacks(&QUEUE, &DISPATCHING), MAX_PLUGIN_INIT_DISPATCH_ROUNDS,
+            "the registrant the ceiling stopped on was lost");
+        assert_eq!(QUEUE.lock().unwrap().len(), 1, "the second bounded dispatch lost the tail of the queue");
+    }
+
+    #[test]
+    fn an_unresolved_registrant_stays_inert() {
+        static QUEUE: Mutex<Vec<PluginInitCallback>> = Mutex::new(Vec::new());
+        static DISPATCHING: AtomicBool = AtomicBool::new(false);
+        static FIRED: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn counted_callback(_: *mut std::ffi::c_void) {
+            FIRED.fetch_add(1, atomic::Ordering::Relaxed);
+        }
+
+        store_plugin_init_callback(&QUEUE, (0, 0));
+        store_plugin_init_callback(&QUEUE, (counted_callback as usize, 0));
+
+        assert_eq!(run_plugin_init_callbacks(&QUEUE, &DISPATCHING), 1, "a zero callback address was called through");
+        assert_eq!(FIRED.load(atomic::Ordering::Relaxed), 1, "the real callback beside it did not run");
+        assert!(QUEUE.lock().unwrap().is_empty(), "an inert registrant stayed queued");
+    }
+
+    #[test]
+    fn the_registration_window_decides_whether_a_registrant_is_fired_on_arrival() {
+        static WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
+        static DISPATCHING: AtomicBool = AtomicBool::new(false);
+
+        // The plugin `init()` pass is still running: the registrant is queued for the dispatch that
+        // closes the window, so a plugin's own callback never fires inside its own `init()`.
+        assert!(!plugin_init_callback_fires_on_arrival(&WINDOW_CLOSED, &DISPATCHING),
+            "a registrant was fired in the middle of the plugin init pass");
+
+        // The pass has run, which is the case C16's latch stranded: the pass that would have taken
+        // this registrant already happened, so the call that registered it fires it.
+        WINDOW_CLOSED.store(true, atomic::Ordering::Release);
+        assert!(plugin_init_callback_fires_on_arrival(&WINDOW_CLOSED, &DISPATCHING),
+            "a registrant that arrived after the initialization pass was queued for a pass that already ran");
+
+        // A dispatch is in progress further up the same call stack - a callback that registers -
+        // and that dispatch drains what it fired, so this one is left to it instead of nesting.
+        DISPATCHING.store(true, atomic::Ordering::Release);
+        assert!(!plugin_init_callback_fires_on_arrival(&WINDOW_CLOSED, &DISPATCHING),
+            "a dispatch nested inside a dispatch was started");
+    }
+
+    #[test]
+    fn a_poisoned_queue_still_stores_and_dispatches_instead_of_panicking() {
+        static DISPATCHING: AtomicBool = AtomicBool::new(false);
+        static FIRED: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn counted_callback(_: *mut std::ffi::c_void) {
+            FIRED.fetch_add(1, atomic::Ordering::Relaxed);
+        }
+
+        let queue: Mutex<Vec<PluginInitCallback>> = Mutex::new(Vec::new());
+
+        // A plugin that faults while the queue is held poisons it. The exported registration entry
+        // and the dispatch both reach this queue from an `extern "C"` boundary, so neither may turn
+        // a later call into a panic back into third-party code (AGENTS section 6).
+        let poisoned = std::thread::scope(|s| {
+            let faulted = s.spawn(|| {
+                let _held = queue.lock().unwrap();
+                panic!("a plugin faulted while the queue was held");
+            });
+            faulted.join().is_err()
+        });
+
+        assert!(poisoned && queue.is_poisoned(), "the queue was not poisoned by the fault");
+
+        store_plugin_init_callback(&queue, (counted_callback as usize, 0));
+        assert_eq!(run_plugin_init_callbacks(&queue, &DISPATCHING), 1, "a poisoned queue stopped the plugin API working");
+        assert_eq!(FIRED.load(atomic::Ordering::Relaxed), 1, "the callback recovered from a poisoned queue was not called");
+    }
+
+    // C2's leftovers: the two native sqlite detours. A test process has no game sqlite to call
+    // (AGENTS section 4), so these drive the boundary itself - the `extern "C" fn` a MinHook
+    // trampoline lands on - with the original published, unpublished, or pointed at a stand-in the
+    // test wrote, and on key cells of their own rather than the process-wide `RETRIEVED_RAW_KEY`
+    // `il2cpp::sql::tests` owns. No test here ever puts a key into the shared lock.
+    //
+    // They do touch the two slots those detours read and the one-shot unlock flag, and the harness
+    // runs tests on several threads, so they take one turn between them: a stand-in published by one
+    // test must never be what another test is asserting is absent.
+    static SQLITE_TURN: Mutex<()> = Mutex::new(());
+
+    /// `Interceptor::hook` is create-and-arm (`windows/interceptor_impl.rs`), so a call can reach a
+    /// detour before this file has stored the address it forwards to. That window is where the old
+    /// body ran `ORIG_SQLITE3_*.unwrap()` on a `None`.
+    #[test]
+    fn a_native_sqlite_detour_with_no_original_published_stays_inert() {
+        let _turn = SQLITE_TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ORIG_SQLITE3_OPEN_V2.store(0, atomic::Ordering::Relaxed);
+        ORIG_SQLITE3_KEY.store(0, atomic::Ordering::Relaxed);
+
+        let key_hook: extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, i32) -> i32 = sqlite3_key_hook;
+        assert_eq!(key_hook(std::ptr::null_mut(), std::ptr::null(), 0), SQLITE_ERROR,
+            "a sqlite3_key call with no published original was forwarded through 0 instead of refused");
+
+        let mut db: *mut std::ffi::c_void = std::ptr::null_mut();
+        let open_hook: extern "C" fn(*const i8, *mut *mut std::ffi::c_void, i32, *const i8) -> i32 = sqlite3_open_v2_hook;
+        assert_eq!(open_hook(std::ptr::null(), &mut db as *mut *mut std::ffi::c_void, 0, std::ptr::null()), SQLITE_ERROR,
+            "an open nobody performed reported SQLITE_OK - the mod inventing a database");
+    }
+
+    #[test]
+    fn a_published_original_is_what_the_sqlite_detours_forward_to() {
+        let _turn = SQLITE_TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        static FORWARDED: AtomicUsize = AtomicUsize::new(0);
+
+        extern "C" fn fake_sqlite3_key(_db: *mut std::ffi::c_void, _p_key: *const std::ffi::c_void, n_key: i32) -> i32 {
+            FORWARDED.fetch_add(n_key as usize, atomic::Ordering::Relaxed);
+            0
+        }
+
+        ORIG_SQLITE3_KEY.store(fake_sqlite3_key as *const () as usize, atomic::Ordering::Release);
+
+        // `p_key` is null, so nothing is captured: this test proves the forwarding half and leaves the
+        // shared key lock exactly as it found it.
+        let key_hook: extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, i32) -> i32 = sqlite3_key_hook;
+        assert_eq!(key_hook(std::ptr::null_mut(), std::ptr::null(), 3), 0,
+            "the detour did not hand the game's sqlite3_key call to its original");
+        assert_eq!(FORWARDED.load(atomic::Ordering::Relaxed), 3, "the original was called with something other than the game's own arguments");
+
+        ORIG_SQLITE3_KEY.store(0, atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn the_key_capture_keeps_the_first_key_and_refuses_a_length_it_cannot_copy() {
+        static KEYS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+        // A latch of its own, seeded with this test's own address so it is never a candidate for the
+        // linker folding the shipped latches avoid; its value is only ever compared against null.
+        static RECORDED: AtomicPtr<()> =
+            AtomicPtr::new(the_key_capture_keeps_the_first_key_and_refuses_a_length_it_cannot_copy as *mut ());
+
+        let first: [u8; 4] = [b'a', b'b', b'c', b'd'];
+        let second: [u8; 3] = [b'x', b'y', b'z'];
+
+        // `n_key` is a length the game supplied. Both of these are refused before anything is copied:
+        // one is an out-of-bounds read, one is not a length at all, and a zero has nothing to copy.
+        record_key_into(&KEYS, &RECORDED, first.as_ptr() as *const std::ffi::c_void, i32::MAX);
+        record_key_into(&KEYS, &RECORDED, first.as_ptr() as *const std::ffi::c_void, -8);
+        record_key_into(&KEYS, &RECORDED, std::ptr::null(), 0);
+        assert!(KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty(),
+            "a key length this mod cannot copy was written into the record");
+        assert!(!RECORDED.load(atomic::Ordering::Acquire).is_null(),
+            "a refused capture spent the latch, so a key arriving after it could never be recorded");
+
+        record_key_into(&KEYS, &RECORDED, first.as_ptr() as *const std::ffi::c_void, first.len() as i32);
+        assert_eq!(*KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), first.to_vec(),
+            "the key the game handed over first is not the key recorded");
+
+        // Once a key is in hand the record is settled, and a settled capture reads nothing, copies
+        // nothing and takes no lock: not for the game's next key, and not for a pointer that is not a
+        // key at all. That last one is the C9 shape arriving after the record is closed.
+        record_key_into(&KEYS, &RECORDED, second.as_ptr() as *const std::ffi::c_void, second.len() as i32);
+        record_key_into(&KEYS, &RECORDED, 0x1000usize as *const std::ffi::c_void, 64);
+        assert_eq!(*KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), first.to_vec(),
+            "a later key replaced the one already in hand");
+        assert!(RECORDED.load(atomic::Ordering::Acquire).is_null(), "a settled record never spent its latch");
+
+        // The cap is what the record is bounded by, and the key the open detour applies is a length
+        // read back out of it.
+        assert!(MAX_SQLITE_KEY_BYTES >= 64, "the key cap is smaller than a sqlite key this game can pass");
+    }
+
+    #[test]
+    fn a_poisoned_key_lock_is_recovered_at_the_sqlite_boundaries() {
+        static KEYS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+        static RECORDED: AtomicPtr<()> =
+            AtomicPtr::new(a_poisoned_key_lock_is_recovered_at_the_sqlite_boundaries as *mut ());
+
+        let poisoned = std::thread::scope(|s| {
+            let faulted = s.spawn(|| {
+                let _held = KEYS.lock().unwrap();
+                panic!("a thread died holding the shared key lock");
+            });
+            faulted.join().is_err()
+        });
+
+        assert!(poisoned && KEYS.is_poisoned(), "the key lock was not poisoned by the fault");
+
+        // The old shape made every later sqlite call the game made panic across the boundary. The
+        // recovery keeps the record working, which is what `il2cpp::sql::key_retrieved` reads.
+        let key: [u8; 6] = [1, 2, 3, 4, 5, 6];
+        record_key_into(&KEYS, &RECORDED, key.as_ptr() as *const std::ffi::c_void, key.len() as i32);
+        assert_eq!(*KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), key.to_vec(),
+            "a poisoned key lock stopped the capture instead of recovering");
+    }
+
+    #[test]
+    fn the_open_detour_holds_the_key_lock_across_no_call_into_sqlite() {
+        let _turn = SQLITE_TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        static KEYS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+        static KEY_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static LOCK_STILL_HELD: AtomicUsize = AtomicUsize::new(0);
+
+        // The stand-in for the other end of the trampoline. It answers the one question the lock order
+        // raises: is the key lock free here? `std::Mutex` is not reentrant, so the honest version of
+        // this check would be a deadlock; `try_lock` reports the same fact without hanging the suite.
+        extern "C" fn fake_sqlite3_key(_db: *mut std::ffi::c_void, _p_key: *const std::ffi::c_void, _n_key: i32) -> i32 {
+            KEY_CALLS.fetch_add(1, atomic::Ordering::Relaxed);
+
+            match KEYS.try_lock() {
+                Ok(_free) => {}
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    LOCK_STILL_HELD.fetch_add(1, atomic::Ordering::Relaxed);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {}
+            }
+
+            0
+        }
+
+        let key: [u8; 5] = [9, 8, 7, 6, 5];
+        *KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = key.to_vec();
+        crate::il2cpp::sql::AUTO_UNLOCK_NEXT_DB.store(true, atomic::Ordering::Relaxed);
+        ORIG_SQLITE3_KEY.store(fake_sqlite3_key as *const () as usize, atomic::Ordering::Release);
+
+        // A handle this test invented. The stand-in never dereferences it, and `apply_retrieved_key`
+        // only reads the slot it is handed.
+        let mut pp_db: *mut std::ffi::c_void = 0x1234usize as *mut std::ffi::c_void;
+        apply_retrieved_key(&KEYS, &mut pp_db as *mut *mut std::ffi::c_void);
+
+        assert_eq!(KEY_CALLS.load(atomic::Ordering::Relaxed), 1, "the retrieved key was not applied to the database this open produced");
+        assert_eq!(LOCK_STILL_HELD.load(atomic::Ordering::Relaxed), 0,
+            "the shared key lock was still held across the call into sqlite3_key");
+        assert!(!crate::il2cpp::sql::AUTO_UNLOCK_NEXT_DB.load(atomic::Ordering::Relaxed),
+            "the one-shot unlock flag outlived the open it was armed for");
+
+        // And with no original published, the same call applies nothing rather than calling 0.
+        ORIG_SQLITE3_KEY.store(0, atomic::Ordering::Relaxed);
+        *KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = key.to_vec();
+        crate::il2cpp::sql::AUTO_UNLOCK_NEXT_DB.store(true, atomic::Ordering::Relaxed);
+        apply_retrieved_key(&KEYS, &mut pp_db as *mut *mut std::ffi::c_void);
+        assert_eq!(KEY_CALLS.load(atomic::Ordering::Relaxed), 1, "a call through an unpublished original reached sqlite");
+
+        crate::il2cpp::sql::AUTO_UNLOCK_NEXT_DB.store(false, atomic::Ordering::Relaxed);
+    }
+
+    /// The capture reads a pointer the game handed it (the C9 shape) standing on a boundary that
+    /// cannot unwind. On a target with no SEH frame the barrier cannot see a fault, so this is the
+    /// Windows half of the claim (AGENTS section 4).
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[test]
+    fn a_key_pointer_that_is_not_a_key_is_taken_by_the_barrier() {
+        static KEYS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+        static RECORDED: AtomicPtr<()> =
+            AtomicPtr::new(a_key_pointer_that_is_not_a_key_is_taken_by_the_barrier as *mut ());
+
+        let _turn = guard::barrier_turn();
+        let faults_before = guard::fault_trip_count();
+        let panics_before = guard::panic_trip_count();
+
+        // Inside the length clamp, and straight at an unmapped page.
+        let bogus = 0x1000usize as *const std::ffi::c_void;
+        record_key_into(&KEYS, &RECORDED, bogus, 64);
+
+        assert!(KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty(),
+            "a capture that faulted wrote a key anyway");
+        assert!(!RECORDED.load(atomic::Ordering::Acquire).is_null(),
+            "a capture the barrier stopped closed the record, so no later key could ever be taken");
+        assert_eq!(guard::fault_trip_count(), faults_before + 1, "the fault at the key capture was not taken by the barrier");
+        assert_eq!(guard::last_fault_code(), 0xC0000005, "what the barrier stopped was not an access violation");
+        assert_eq!(guard::panic_trip_count(), panics_before, "the capture was stopped as a panic, not a fault");
+
+        // The shipped detour, through the pointer shape a trampoline uses: the same fault, answered as
+        // no key captured and a refused call, and the process is still here to assert it.
+        let _sqlite_turn = SQLITE_TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ORIG_SQLITE3_KEY.store(0, atomic::Ordering::Relaxed);
+        let key_hook: extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, i32) -> i32 = sqlite3_key_hook;
+        assert_eq!(key_hook(std::ptr::null_mut(), bogus, 64), SQLITE_ERROR,
+            "the key detour answered a fault at its own boundary with something other than a refusal");
+        assert_eq!(guard::fault_trip_count(), faults_before + 2, "the fault at the shipped detour was not taken by the barrier");
     }
 }
