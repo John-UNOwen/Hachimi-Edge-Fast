@@ -42,10 +42,19 @@ pub const MAX_FACTOR: f32 = 20.0;
 pub enum Group {
     // Screen-to-screen transitions: view change fades, wipes, loading overlays.
     Transition,
-    // Training turn / race result screens: plates, count-ups, reward cascades.
+    // Race and career result screens: content fades, count-ups, reward cascades. This is the group the
+    // GUI's Result Screen Animation Speed option writes, and it is now exactly what that option's name
+    // promises. It used to carry the training turn's gates too, which is C58.
     Screens,
     // Story cutscene timeline.
     Story,
+    // The training turn's own gates: the stat plate cascade, the HP gauge blend, the cut status panel,
+    // and the plate classes' own durations. This group has no lever - no option, no slider, no preset
+    // arm writes it (C58, ledger item 59). Every duration in it is the length of a coroutine or a tween
+    // sequence whose completion is what the turn's coroutine resumes on, so shortening one changes what
+    // the flow waits for rather than how long a screen takes to look done. The doors in it stay armed
+    // because a run has to be able to read them; `factor` holds them at the number the game chose.
+    Training,
 }
 
 #[derive(Clone, Copy)]
@@ -78,12 +87,7 @@ const FIELDS: &[FieldSpec] = &[
     spec!("NowLoading", "BLACK_FADE_TIME", Group::Transition),
     spec!("NowLoading", "WHITE_OUT_HORSE_SHOE_FADE_TIME", Group::Transition),
 
-    // --- Training plates and result screens ---
-    spec!("TrainingParamChangeA2U", "ANIMATION_TIME_HIGH_SPEED", Group::Screens),
-    spec!("TrainingParamChangePlate", "TYPEWRITE_DURATION", Group::Screens),
-    spec!("TrainingParamChangePlate", "NEXT_WAIT_DURATION", Group::Screens),
-    spec!("SingleModeMainTrainingCuttController", "FLASH_LABEL_SPEED_UP_SUCCESS_IN", Group::Screens),
-    spec!("SingleModeMainTrainingCuttController", "FLASH_LABEL_SPEED_UP_FAILURE_IN", Group::Screens),
+    // --- Race and career result screens ---
     spec!("SingleModeResultContentBase", "FADE_DURATION", Group::Screens),
     spec!("SingleModeResultContentBase", "FADE_OFFSET", Group::Screens),
     spec!("SingleModeResultContentBase", "DELAY_OFFSET", Group::Screens),
@@ -118,6 +122,22 @@ const FIELDS: &[FieldSpec] = &[
     spec!("PartsSingleModeResultDifficultyRandomReward", "EFFECT_DELAY_WIN_WITH_HONOR", Group::Screens),
     spec!("PartsSingleModeResultDifficultyRandomReward", "EFFECT_DELAY_WIN_SMALL_WITH_HONOR", Group::Screens),
     spec!("PartsSingleModeResultDifficultyRandomReward", "EFFECT_DELAY_LOSE_WITH_HONOR", Group::Screens),
+
+    // --- The training turn's own gates ---
+    //
+    // These five stood in `Group::Screens` until item 59. They are the schedule the stat plate cascade
+    // and the training cut are built on - a plate's typewriter length, the wait between plates, the
+    // high speed animation time of the A2U plate, the result flash labels the cutt controller plays -
+    // and a duration the turn resumes on is not a result screen animation. `result_screen_speed` may not
+    // reach them. On this client every one is a `static const float` IL2CPP folded into its call sites
+    // (`X is a compile-time constant`, 0 field writes in every apply pass, C13), so this is the half of
+    // the group that was never live; it moves because it would be the same defect on a client where the
+    // fields have storage.
+    spec!("TrainingParamChangeA2U", "ANIMATION_TIME_HIGH_SPEED", Group::Training),
+    spec!("TrainingParamChangePlate", "TYPEWRITE_DURATION", Group::Training),
+    spec!("TrainingParamChangePlate", "NEXT_WAIT_DURATION", Group::Training),
+    spec!("SingleModeMainTrainingCuttController", "FLASH_LABEL_SPEED_UP_SUCCESS_IN", Group::Training),
+    spec!("SingleModeMainTrainingCuttController", "FLASH_LABEL_SPEED_UP_FAILURE_IN", Group::Training),
 
     // --- Story cutscenes ---
     spec!("StoryViewController", "CHARACTER_FADE_DURATION", Group::Story),
@@ -158,8 +178,10 @@ static DIRTY: AtomicBool = AtomicBool::new(false);
 // about to write already applied has nothing left to do. Returning a factor to 1.0 still
 // performs the single pass that puts the shipped values back, because the marker holding
 // the old factor differs from the 1.0 being asked for now.
-// Indexed by `group_index`: Transition, Screens, Story.
-static APPLIED_FACTORS: [AtomicU32; 3] = [const { AtomicU32::new(f32::NAN.to_bits()) }; 3];
+// Indexed by `group_index`: Transition, Screens, Story, Training. The Training marker is never written:
+// that group has no factor to apply (C58), so `plan_group` finds it satisfied by the game's own values
+// and its marker stays NAN for the life of the process.
+static APPLIED_FACTORS: [AtomicU32; 4] = [const { AtomicU32::new(f32::NAN.to_bits()) }; 4];
 
 // What a pass through `apply` costs, charged by the pass itself. C36 is a claim about cost, and a
 // cost claim belongs in `hachimi.log` (AGENTS section 2: a change that cannot be shown in the log
@@ -364,6 +386,11 @@ pub fn factor(group: Group) -> f32 {
         Group::Transition => TRANSITION_FACTOR.load(Ordering::Relaxed),
         Group::Screens => SCREENS_FACTOR.load(Ordering::Relaxed),
         Group::Story => STORY_FACTOR.load(Ordering::Relaxed),
+        // The training group has no lever behind it: not a constant this module is allowed to raise, and
+        // not a mirror any config can write. It is the answer `Group::Training` exists to carry - the
+        // turn's gates run at the length the game gave them (C58). A door that reads this gets the value
+        // it received, which `scale_duration` then hands back untouched at its `factor == 1.0` bail.
+        Group::Training => return 1.0,
     };
 
     f32::from_bits(bits)
@@ -1021,8 +1048,13 @@ pub fn hit_calls(slot: usize) -> usize {
     HIT_CALLS.get(slot).map(|counter| counter.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
-// The training scaling points as run 11 found them. The five these replaced installed in run 8 and
+// The training doors a run reads, as run 11 found them. The five these replaced installed in run 8 and
 // printed no call line in four career runs (C51), so they were hooks on doors this client never opens.
+//
+// They are the census of the training gates, not the list of what this fork scales: since item 59 both
+// slots hand the game the value the caller passed, and the counts are there because a run has to be able
+// to tell a gate the fork left alone from a gate the game never reached (A4). A slot printing `=0` and a
+// slot printing 36 are different facts even though neither door moved a number.
 //
 // `SingleModeMainViewTrainingCutStatus.PlayIn` was a third point here until run 26. That session read it
 // scaling 2.4 s to 0.12 s while three of its seven training cuts held the status panel off for 7866, 8182 and
@@ -1188,6 +1220,31 @@ fn mirror_config(config: &Config) {
     );
 
     note_pair_ceiling(ui, [transition, screens, story]);
+    note_training_doors_are_inert();
+}
+
+// The separation C58 / ledger item 59 installed has to be visible in `hachimi.log`, because the doors it
+// quiets are still armed: a door that hands the value it received prints `call N 1 -> 1 unchanged`, which
+// is the same shape as a hook the game never reached (A4). Without this line a run reading
+// `TrainingParamChangeUI.InitializePlateList=36` cannot tell "the lever no longer reaches this gate" from
+// "the game never called it". Said once per process, by the config pass that mirrors the levers, naming
+// the doors exactly as the training census names them.
+static TRAINING_DOORS_NOTE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this config pass got the line.
+fn note_training_doors_are_inert() -> bool {
+    if TRAINING_DOORS_NOTE_LOGGED.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+
+    let doors: Vec<&str> = TRAINING_HIT_SLOTS.iter().map(|(_, name)| *name).collect();
+
+    debug!(
+        "AnimationSpeed: training gates are not scaling points: {} hand the game the values they were passed; result_screen_speed reaches result screens only",
+        doors.join(", "),
+    );
+
+    true
 }
 
 // A clamp a run cannot see is a clamp that did not happen (AGENTS section 2). The pair ceiling shows
@@ -1222,17 +1279,24 @@ fn note_pair_ceiling(ui: f32, factors: [f32; 3]) -> bool {
 }
 
 // The factors as the write loop sees them: the mirrors, not the config. Indexed by
-// `group_index`.
-fn mirrored_factors() -> [f32; 3] {
-    [factor(Group::Transition), factor(Group::Screens), factor(Group::Story)]
+// `group_index`. The fourth is the training group's pinned 1.0 - it is in the array because the write
+// loop walks one slot per group, and it is 1.0 because no option writes that group.
+fn mirrored_factors() -> [f32; 4] {
+    [
+        factor(Group::Transition),
+        factor(Group::Screens),
+        factor(Group::Story),
+        factor(Group::Training),
+    ]
 }
 
-// The three speed groups, in the order `FIELDS` declares them.
+// The speed groups, in the order `Group` declares them and the order `APPLIED_FACTORS` is indexed.
 fn group_index(group: Group) -> usize {
     match group {
         Group::Transition => 0,
         Group::Screens => 1,
         Group::Story => 2,
+        Group::Training => 3,
     }
 }
 
@@ -1249,11 +1313,13 @@ fn plan_group(wanted: f32, applied: f32) -> bool {
 /// applied markers. `apply` runs this and the tests run this, so "does this pass touch the field
 /// table at all" is one shipped decision rather than a shape a test module copies. Whether a
 /// group has any field in it is the table's business; this answers only which groups are due.
-fn plan_pass(factors: [f32; 3]) -> [bool; 3] {
+fn plan_pass(factors: [f32; 4]) -> [bool; 4] {
     [
         plan_group(factors[0], f32::from_bits(APPLIED_FACTORS[0].load(Ordering::Acquire))),
         plan_group(factors[1], f32::from_bits(APPLIED_FACTORS[1].load(Ordering::Acquire))),
         plan_group(factors[2], f32::from_bits(APPLIED_FACTORS[2].load(Ordering::Acquire))),
+        // Never due: `plan_group(1.0, NAN)` is "the game's own values are what this group asks for".
+        plan_group(factors[3], f32::from_bits(APPLIED_FACTORS[3].load(Ordering::Acquire))),
     ]
 }
 
@@ -1261,7 +1327,7 @@ fn plan_pass(factors: [f32; 3]) -> [bool; 3] {
 /// in it had no baseline this pass, which is the state that asks the next pass to look again
 /// (a class whose static constructor has not run reads as zero until its scene loads). Leaving
 /// the marker unset is what turns "retry" into one pass per view change, not one per frame.
-fn finish_pass(rewrite: [bool; 3], factors: [f32; 3], no_baseline: [usize; 3]) {
+fn finish_pass(rewrite: [bool; 4], factors: [f32; 4], no_baseline: [usize; 4]) {
     for group in 0..rewrite.len() {
         if rewrite[group] && no_baseline[group] == 0 {
             APPLIED_FACTORS[group].store(factors[group].to_bits(), Ordering::Release);
@@ -1574,20 +1640,30 @@ def_getter_hook!(
 // (run 26, quoted at `TRAINING_HIT_SLOTS`): the float in position 0 is the play in *duration* the caller sets
 // up, while the animation itself runs on `CoroutinePlayIn/2 -> IEnumerator(float, int)` next door, and run 26
 // measured 7866, 8182 and 7866 ms of status panel held off in the same session that read `PlayIn 2.4 -> 0.12`.
-// The HP gauge blend time and the plate list interval are the training doors this fork does scale, and both
-// are doors whose value the game uses directly for the thing it draws.
+//
+// The two doors below are the training gates this fork still arms, and since item 59 they are armed to be
+// read, not to be scaled: both sit on the training turn's own presentation, `Group::Training` has no factor
+// behind it, and each hands the game the float it was passed.
 //
 // The HP gauge progress bar blend time, the only float the gauge class takes. Run 11 measured 63,731 frames on
-// the screen this class draws and never measured one animation door of it.
+// the screen this class draws and never measured one animation door of it - the census has read `=0` in every
+// run - so scaling it bought nothing and cost the training screen one more number a result screen slider moved.
 type HpGaugeSetBlendTimeFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
 def_detour! {
     HpGauge_SetBlendTimeSpeed(this: *mut Il2CppObject, time: f32) {
-            let scaled = scale_duration(time, Group::Screens);
+            let scaled = training_gate_duration(time);
         hit(11, "SingleModeMainViewHpGauge.SetProgressbarBlendTime", time, scaled);
 
         get_orig_fn!(HpGauge_SetBlendTimeSpeed, HpGaugeSetBlendTimeFn)(this, scaled);
     }
 }
+
+/// What a training gate door hands the game. This is item 59 in one call: the two armed training doors
+/// scale on `Group::Training`, and that group has no factor, so the value is the one the caller passed.
+/// The wrapper exists so the tests drive the same decision the armed detours make - a test that only reads
+/// `Group::Training` would still pass if a door went back to `Group::Screens`, which is the regression this
+/// item exists to keep out.
+pub fn training_gate_duration(value: f32) -> f32 { scale_duration(value, Group::Training) }
 
 // The plate cascade interval floor. This door is the only duration write this fork reaches on the
 // training screen that run 31 actually hit: 36 calls took the game's 1.0 s to 0.05 s, the census measured
@@ -1599,12 +1675,17 @@ def_detour! {
 // the cut-in is built on is a schedule the animation was not made for. 0.25 s is a quarter of the game's own
 // spacing: it keeps 4x of the 20x, and it is the value C62 tests against a career end run rather than a
 // number measured to be safe.
+//
+// Item 59 took the lever off this door, so the door hands the game its own interval and the floor below is
+// the guard on anything that ever tries to shorten it again, not something the shipped path reaches.
 pub const MIN_PLATE_INTERVAL_SEC: f32 = 0.25;
 
 /// The interval to hand `InitializePlateList`, with the floor applied and the game's own value as the
 /// ceiling. The floor may not raise a number above what the caller passed: making a cascade the game asked
 /// to run in 0.1 s take 0.25 s would be a second bug on the same door. A zero or non finite `scaled` means
-/// `scale_duration` already declined to touch the value, so it stays declined.
+/// `scale_duration` already declined to touch the value, so it stays declined. With `scaled` being the
+/// game's own interval - what `Group::Training` hands this door today - it is the identity, which is the
+/// state item 59 asked for.
 pub fn plate_cascade_interval(interval: f32, scaled: f32) -> f32 {
     if !interval.is_finite() || !scaled.is_finite() || interval <= 0.0 || scaled <= 0.0 {
         return interval;
@@ -1613,18 +1694,29 @@ pub fn plate_cascade_interval(interval: f32, scaled: f32) -> f32 {
     scaled.max(MIN_PLATE_INTERVAL_SEC).min(interval)
 }
 
+/// What the plate door hands `InitializePlateList`, in one call, on the mirrors as they stand: the group a
+/// training gate scales on, then C62's floor as the guard on the result. The armed detour calls this, so a
+/// test that calls it is driving the same decision the hook makes in game.
+pub fn plate_cascade_handoff(interval: f32) -> f32 { plate_cascade_interval(interval, training_gate_duration(interval)) }
+
 // The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
 // waited for a tap and 10,034 ms was the cut playing before it asked, while the cut's own timeline
 // reported 2.4 s of total length. The door on that path carrying a duration is `InitializePlateList`,
 // reached six times in the session on a float of 1.0, next to twelve gauge plays whose duration this
 // group had already cut from 2.4 s to 0.12 s. The list is a generic parameter and travels as a pointer
-// untouched (C48), and only the float is scaled. The door used to stand in TrainingCuttProbe, which
-// installs nothing unless debug_mode is on, and a speed option has to work for a player who never turns
-// that switch: the scaling points run 12 and 13 were only reachable because the probe happened to be on.
+// untouched (C48). Since item 59 the float travels untouched too: this door is `Group::Training`, which
+// has no factor behind it, because the interval is the beat `TrainingParamChangeUI` stores as
+// `_groupInterval` / `_sequence_interval` and `CoroutineEndCheck` waits through - the completion the
+// plate cascade closes on is what the turn's coroutine resumes on, and item 59's arm list is the
+// measurement of what happens when a result screen slider shortens it. The door stays armed for two
+// reasons: the census line `TrainingParamChangeUI.InitializePlateList=N` is one of the training doors a
+// run reads (C51), and `TrainingCuttProbe` cannot hook an address twice, so its plate cascade clocks are
+// fed from here (`note_plate_call`). The door used to stand in the probe itself, which installs nothing
+// unless debug_mode is on; it is back where a player who never turns that switch can still see it.
 type PlateInitializeListFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32);
 def_detour! {
     TrainingParamChangeUI_InitializePlateListSpeed(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
-            let scaled = plate_cascade_interval(interval, scale_duration(interval, Group::Screens));
+            let scaled = plate_cascade_handoff(interval);
 
         hit(12, "TrainingParamChangeUI.InitializePlateList", interval, scaled);
         TrainingCuttProbe::note_plate_call(this, interval);
@@ -1788,7 +1880,7 @@ pub fn apply() {
     // next pass looks at it again: a class whose static constructor has not run reads as
     // zero, and its shipped constant only appears once the scene that uses it is loaded.
     // That retry is one pass per view change or config change, not one per frame.
-    let mut no_baseline = [0usize; 3];
+    let mut no_baseline = [0usize; 4];
 
     for entry in entries.iter_mut() {
         let group = group_index(entry.group);
@@ -1877,7 +1969,8 @@ mod tests {
     struct PassTurn {
         _turn: MutexGuard<'static, ()>,
         saved_mirrors: [u32; 6],
-        saved_applied: [u32; 3],
+        saved_applied: [u32; 4],
+        saved_training_note: bool,
     }
 
     fn pass_turn() -> PassTurn {
@@ -1895,13 +1988,17 @@ mod tests {
             APPLIED_FACTORS[0].load(Ordering::Relaxed),
             APPLIED_FACTORS[1].load(Ordering::Relaxed),
             APPLIED_FACTORS[2].load(Ordering::Relaxed),
+            APPLIED_FACTORS[3].load(Ordering::Relaxed),
         ];
+        // The training gate note is a once per process latch, so a case that asks whether the line is
+        // owed has to start from "nothing has been said yet" like a fresh launch does.
+        let saved_training_note = TRAINING_DOORS_NOTE_LOGGED.swap(false, Ordering::AcqRel);
 
         for marker in APPLIED_FACTORS.iter() {
             marker.store(f32::NAN.to_bits(), Ordering::Release);
         }
 
-        PassTurn { _turn: turn, saved_mirrors, saved_applied }
+        PassTurn { _turn: turn, saved_mirrors, saved_applied, saved_training_note }
     }
 
     impl Drop for PassTurn {
@@ -1912,6 +2009,7 @@ mod tests {
             TIME_SCALE.store(self.saved_mirrors[3], Ordering::Release);
             UI_ANIMATION_SCALE.store(self.saved_mirrors[4], Ordering::Release);
             STORY_CHOICE_AUTO_SELECT_MULT.store(self.saved_mirrors[5], Ordering::Release);
+            TRAINING_DOORS_NOTE_LOGGED.store(self.saved_training_note, Ordering::Release);
 
             for group in 0..self.saved_applied.len() {
                 APPLIED_FACTORS[group].store(self.saved_applied[group], Ordering::Release);
@@ -1936,7 +2034,7 @@ mod tests {
     // whether the table is due, `finish_pass` records the groups it wrote. `no_baseline` is the
     // per group count the write loop hands back, so a test says which fields had no baseline
     // instead of pretending it can read them.
-    fn run_planned_pass(no_baseline: [usize; 3]) -> bool {
+    fn run_planned_pass(no_baseline: [usize; 4]) -> bool {
         let factors = mirrored_factors();
         let rewrite = plan_pass(factors);
 
@@ -2015,17 +2113,17 @@ mod tests {
         mirror_config(&Config::default());
         let factors = mirrored_factors();
 
-        assert_eq!(factors, [1.0, 1.0, 1.0], "a shipped default mirrored to a speed up");
+        assert_eq!(factors, [1.0, 1.0, 1.0, 1.0], "a shipped default mirrored to a speed up");
 
         // This is the exact decision `apply` bails on, before the entry lock and before the table.
-        assert_eq!(plan_pass(factors), [false, false, false],
+        assert_eq!(plan_pass(factors), [false, false, false, false],
             "a build with every option at its neutral default asked to rewrite a game field");
 
         for _ in 0..300 {
-            assert!(!run_planned_pass([0; 3]), "a pass at the shipped defaults reached the field table");
+            assert!(!run_planned_pass([0; 4]), "a pass at the shipped defaults reached the field table");
         }
 
-        for group in [Group::Transition, Group::Screens, Group::Story] {
+        for group in [Group::Transition, Group::Screens, Group::Story, Group::Training] {
             assert!(marker_of(group).is_nan(), "a pass at the shipped defaults marked group {} as written", group_index(group));
         }
     }
@@ -2042,7 +2140,7 @@ mod tests {
         let mut working = 0;
 
         for _ in 0..300 {
-            if run_planned_pass([0; 3]) {
+            if run_planned_pass([0; 4]) {
                 working += 1;
             }
         }
@@ -2054,7 +2152,7 @@ mod tests {
         println!(
             "C36, measured by the shipped plan: 300 ticks at transition x2 ask for one write pass, so that pass reaches at most {} fields instead of 300 passes over all {}. The counts are read off FIELDS, not off a call: the il2cpp read and write need the game's own FieldInfo, none of them resolve on this client (C13), and the apply line a run prints is what reports the calls really made.",
             transition,
-            field_count(Group::Transition) + field_count(Group::Screens) + field_count(Group::Story)
+            field_count(Group::Transition) + field_count(Group::Screens) + field_count(Group::Story) + field_count(Group::Training)
         );
     }
 
@@ -2067,24 +2165,28 @@ mod tests {
 
         config.result_screen_speed = 2.0;
         mirror_config(&config);
-        assert_eq!(plan_pass(mirrored_factors()), [false, true, false], "the wrong group was due");
-        assert!(run_planned_pass([0; 3]));
+        assert_eq!(plan_pass(mirrored_factors()), [false, true, false, false], "the wrong group was due");
+        assert!(run_planned_pass([0; 4]));
         assert_eq!(marker_of(Group::Screens), 2.0);
+        // C58 / item 59: the option that moves the result screen group is the one that used to move the
+        // training gates with it. Raising it now asks for one group, and the training group's marker stays
+        // "this module has never written it".
+        assert!(marker_of(Group::Training).is_nan(), "result_screen_speed reached the training group");
 
         config.transition_speed = 3.0;
         mirror_config(&config);
-        assert_eq!(plan_pass(mirrored_factors()), [true, false, false], "the screens group was due again");
-        assert!(run_planned_pass([0; 3]));
+        assert_eq!(plan_pass(mirrored_factors()), [true, false, false, false], "the screens group was due again");
+        assert!(run_planned_pass([0; 4]));
         assert_eq!(marker_of(Group::Transition), 3.0);
 
         config.story_speed = 2.0;
         mirror_config(&config);
-        assert_eq!(plan_pass(mirrored_factors()), [false, false, true], "the story group was not due");
-        assert!(run_planned_pass([0; 3]));
+        assert_eq!(plan_pass(mirrored_factors()), [false, false, true, false], "the story group was not due");
+        assert!(run_planned_pass([0; 4]));
 
         // A career run's worth of view changes after that: three factor changes, three passes.
         for _ in 0..40 {
-            assert!(!run_planned_pass([0; 3]), "an unchanged config re-planned a rewrite");
+            assert!(!run_planned_pass([0; 4]), "an unchanged config re-planned a rewrite");
         }
     }
 
@@ -2112,7 +2214,7 @@ mod tests {
 
         // The field holds the shipped value and the pass shortens it. The write half is the
         // shipped `scale_value` on the baseline the loop remembers.
-        assert!(run_planned_pass([0; 3]));
+        assert!(run_planned_pass([0; 4]));
         assert_eq!(scale_value(0.4, 4.0, Il2CppTypeEnum_IL2CPP_TYPE_R4), (0.4f32 / 4.0) as f64);
         assert_eq!(marker_of(Group::Story), 4.0);
 
@@ -2120,7 +2222,7 @@ mod tests {
         mirror_config(&config);
 
         assert!(plan_pass(mirrored_factors())[2], "turning the option off did not ask for the restore");
-        assert!(run_planned_pass([0; 3]));
+        assert!(run_planned_pass([0; 4]));
 
         // The restore is the remembered baseline divided by 1.0, so it puts the shipped value
         // back instead of writing 1.0 into a field that never held 1.0.
@@ -2128,7 +2230,7 @@ mod tests {
         assert_eq!(marker_of(Group::Story), 1.0);
 
         for _ in 0..100 {
-            assert!(!run_planned_pass([0; 3]), "the restore pass ran more than once");
+            assert!(!run_planned_pass([0; 4]), "the restore pass ran more than once");
         }
     }
 
@@ -2161,15 +2263,15 @@ mod tests {
 
         // No class in the group has run its static constructor, so the write loop counted a field
         // with no baseline and wrote nothing: `finish_pass` must leave that group's marker alone.
-        assert!(run_planned_pass([field_count(Group::Transition); 3]));
+        assert!(run_planned_pass([field_count(Group::Transition); 4]));
         assert!(marker_of(Group::Transition).is_nan(),
             "the group was marked applied at a factor none of its fields ever sat at");
 
         // The scene loads, the static constructor puts the shipped value in, and the next view
         // change pass finds it. That retry is one pass per view change, not one per frame.
-        assert!(run_planned_pass([0; 3]), "the retry pass did not look at the group again");
+        assert!(run_planned_pass([0; 4]), "the retry pass did not look at the group again");
         assert_eq!(marker_of(Group::Transition), 2.0);
-        assert!(!run_planned_pass([0; 3]), "the same factor was written a third time");
+        assert!(!run_planned_pass([0; 4]), "the same factor was written a third time");
     }
 
     #[test]
@@ -2237,8 +2339,10 @@ mod tests {
     // `MAX_FACTOR` ceiling and each was checked on its own, but a tween's real completion time is the
     // duration handed to the game divided by the clock `TweenManager::Update` is handed, so the pair
     // is what shortens the wait. The three rows are the ones the C58 concept measured in runs 17, 20
-    // and 26 beside `ui_animation 20` in the same config snapshot; the play in row is the door run 26
-    // took out of the scaling points, and it is here because it is the row the concept's table names.
+    // and 26 beside `ui_animation 20` in the same config snapshot, all three scaled on `Group::Screens`
+    // when they were read. Since item 59 only the count up row is still a door in that group: the play in
+    // row is the hook run 26 took out, and the plate row is a training gate that takes no group factor.
+    // The rows stay here because they are the arithmetic the pair ceiling bounds.
     const C58_TRAINING_ROWS: [(&str, f32); 3] = [
         ("SingleModeMainViewTrainingCutStatus.PlayIn", 2.4),
         ("TrainingParamChangeUI.InitializePlateList", 1.0),
@@ -2349,6 +2453,11 @@ mod tests {
                         duration_factor(group) >= 1.0,
                         "the bound turned a speed up into a slower animation than the game asked for"
                     );
+
+                    // The fourth group is deliberately off the ladder: nothing writes it, so a training
+                    // gate hands the game its own duration at every rung (C58, item 59).
+                    assert_eq!(duration_factor(Group::Training), 1.0, "a training gate took a factor at {configured}/{ui}");
+                    assert_eq!(training_gate_duration(1.0), 1.0, "a training duration moved at {configured}/{ui}");
                 }
             }
         }
@@ -2377,23 +2486,136 @@ mod tests {
         assert_eq!(duration_factor(Group::Screens), MAX_FACTOR, "a NAN clock changed a duration factor");
     }
 
+    // C58 / ledger item 59, spelled on the doors. The three rows are the ones the runs read beside
+    // `result 20`: `PlayIn 2.4 -> 0.120000005` (run 17, run 26), `InitializePlateList 1 -> 0.05` (run 20,
+    // run 31) and `CountupModifier_getDuration 0.16 -> 0.008` (run 17). Two of them are training gates and
+    // are no longer scaling points at all; the third is a reward screen count-up and stays in the group its
+    // option names.
     #[test]
-    fn the_plate_door_hands_the_game_its_own_interval_when_the_clock_layer_holds_its_20x() {
+    fn no_speed_option_the_config_editor_offers_reaches_a_training_gate() {
         let _turn = pass_turn();
 
-        // The `All levers` arm: `result 20` and `ui_animation 20` (core::settings_preset). C62 holds
-        // this door at 0.25 s because run 31 handed the game 0.05 s. With the pair bounded the clock
-        // layer has already taken its 20x out of the same completion, so the floor is never reached
-        // and the door hands the cascade the interval the game asked for.
-        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+        // Every state that puts the result screen group at its ceiling, over the clock ladder the sliders
+        // and the preset arms cover: the `All levers` pair (`result 20 / ui_animation 20`), the state run 31
+        // stalled in (`result 20` with the clock layer free to reach 20x on its own), and the shipped clock.
+        for screens in [1.0, 2.0, 5.0, MAX_FACTOR] {
+            for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+                mirror_config(&timing_config(MAX_FACTOR, screens, 10.0, ui));
 
-        let handed = plate_cascade_interval(1.0, scale_duration(1.0, Group::Screens));
-        assert_eq!(handed, 1.0, "the door still shortened the cascade on top of a 20x tween clock");
-        assert_eq!(completion_ms(handed, Group::Screens), 1000.0 / MAX_TWEEN_SPEED_PRODUCT);
+                assert_eq!(factor(Group::Training), 1.0, "an option wrote the training group");
+                assert_eq!(duration_factor(Group::Training), 1.0, "the training group took a share of the clock");
 
-        // A clock at the neutral 1.0 is the state C62's floor was written for: the lever is back.
+                // The two armed doors, on the numbers the runs handed them: the gauge blend time (the
+                // screen run 11 spent 63,731 frames on) and the plate interval (36 calls of 1.0 in run 31,
+                // a raw peak of 1.5 in run 18). These are the calls the armed detours make, so a door put
+                // back on a lever fails here rather than somewhere in a test's own arithmetic.
+                assert_eq!(training_gate_duration(1.0), 1.0, "result_screen_speed {screens} scaled the gauge blend time");
+                assert_eq!(training_gate_duration(1.5), 1.5, "the plate interval peak was shortened");
+                assert_eq!(
+                    plate_cascade_handoff(1.0),
+                    1.0,
+                    "the plate door handed the cascade something other than the beat the game asked for",
+                );
+                assert_eq!(plate_cascade_handoff(1.5), 1.5, "the plate door moved a raw peak");
+
+                // The pair ceiling still binds the group the option does write, so the fix is a separation
+                // and not a loosening: a result screen completion is no faster than it was on `58dc914`.
+                assert!(tween_speed(Group::Screens) <= MAX_TWEEN_SPEED_PRODUCT, "the result screen pair left its ceiling");
+
+                // What a training completion runs at is the tween clock alone, which is the state the C58
+                // concept's plain-Hachimi reading calls fast and still in order: a 1.0 s plate beat closes
+                // 50 ms after it opens at `ui_animation 20`, and 1.0 s with nothing on the clock.
+                assert!(
+                    ms_is(completion_ms(1.0, Group::Training), 1000.0 / ui_animation_scale()),
+                    "a training gate completed faster than the tween clock it sits on",
+                );
+                assert_eq!(tween_speed(Group::Training), ui_animation_scale(), "a training gate took a group factor as well as the clock");
+            }
+        }
+
+        // The shipped default is inert on the training door too - this fork does not pace the cascade at
+        // all unless a player asks for a lever, and no player can ask for this one.
+        mirror_config(&Config::default());
+        assert_eq!(plate_cascade_handoff(1.0), 1.0, "the shipped default changed the cascade's beat");
+        assert_eq!(training_gate_duration(2.4), 2.4, "the play in length a run measured moved on a training gate");
+    }
+
+    #[test]
+    fn the_plate_door_hands_the_game_its_own_interval_whatever_the_levers_do() {
+        let _turn = pass_turn();
+
+        // The `All levers` arm: `result 20` and `ui_animation 20` (core::settings_preset). Item 62 bounded
+        // the pair so this door handed 1.0 there, and item 59 took the lever off the door entirely, so the
+        // same reading holds at every other clock, including the neutral one C62's floor was written for.
+        for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+            mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, ui));
+
+            let handed = plate_cascade_handoff(1.0);
+            assert_eq!(handed, 1.0, "the door shortened the cascade on a {ui}x clock");
+            assert!(
+                ms_is(completion_ms(handed, Group::Training), 1000.0 / ui_animation_scale()),
+                "the plate completion is not the game's own interval over the clock it is measured on",
+            );
+        }
+
+        // C62's floor is a guard on this door, not a lever, and it still guards: whatever is ever scaled
+        // here has to clear a quarter of the game's own spacing before the door will hand it over.
         mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, 1.0));
-        assert_eq!(plate_cascade_interval(1.0, scale_duration(1.0, Group::Screens)), MIN_PLATE_INTERVAL_SEC);
+        assert_eq!(plate_cascade_interval(1.0, 1.0 / MAX_FACTOR), MIN_PLATE_INTERVAL_SEC);
+    }
+
+    // The defect this item closes, kept as an executable statement of what the door used to hand. The
+    // numbers are the ones `hachimi.log` printed: run 31's `InitializePlateList 1 -> 0.05` over 36 calls,
+    // and run 20's `1 -> 0.05` beside `ui_animation 20`.
+    #[test]
+    fn a_result_screen_lever_on_the_plate_door_hands_the_number_run_31_stalled_with() {
+        let _turn = pass_turn();
+
+        // `result 20` on a neutral tween clock - the hand-built config this fork's own rules exist to
+        // clamp, and the shape the run 31 build was in when it reached 0.05 s per plate.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, 1.0));
+
+        let on_the_result_group = scale_duration(1.0, Group::Screens);
+        let with_c62_floor = plate_cascade_interval(1.0, on_the_result_group);
+        let as_shipped = plate_cascade_handoff(1.0);
+
+        println!(
+            "C58 item 59, one plate call: the Screens group hands the plate gate {on_the_result_group} s ({} ms), C62's floor lifts that to {with_c62_floor} s, the separated door hands {as_shipped} s.",
+            on_the_result_group * 1000.0,
+        );
+
+        // The lever alone goes under the floor the fork wrote to catch it, which is the statement that a
+        // floor on the door was holding the door up instead of the door being out of the lever's reach.
+        assert!(on_the_result_group < MIN_PLATE_INTERVAL_SEC, "a result screen lever no longer reaches under the plate floor");
+        assert_eq!(with_c62_floor, MIN_PLATE_INTERVAL_SEC);
+
+        // And the shipped door is out of its reach: the game's own beat, whatever the sliders say.
+        assert_eq!(as_shipped, 1.0, "the plate door is still a scaling point");
+    }
+
+    #[test]
+    fn the_training_gates_are_out_of_the_group_the_result_screen_option_writes() {
+        // The other half of the conflation: `Group::Screens` carried the plate classes' own durations. They
+        // are `static const float` on this client - IL2CPP folds them into the call sites, `X is a
+        // compile-time constant`, 0 of 61 fields resolve (C13) - so no run ever saw them move, but a client
+        // where they have storage would have had them rewritten by a result screen slider.
+        let training_classes: Vec<&str> =
+            FIELDS.iter().filter(|spec| spec.group == Group::Training).map(|spec| spec.class).collect();
+
+        for class in ["TrainingParamChangeA2U", "TrainingParamChangePlate", "SingleModeMainTrainingCuttController"] {
+            assert!(training_classes.contains(&class), "{class} is not in the training group");
+        }
+
+        assert!(
+            FIELDS.iter().all(|spec| spec.group != Group::Screens || !spec.class.contains("Training")),
+            "a training class is still in the group result_screen_speed writes",
+        );
+        assert_eq!(FIELDS.len(), 61, "the field table moved entries; C13's 0 of 61 no longer says the same thing");
+        assert_eq!(
+            field_count(Group::Transition) + field_count(Group::Screens) + field_count(Group::Story) + field_count(Group::Training),
+            FIELDS.len(),
+            "a field spec is in no group",
+        );
     }
 
     #[test]
@@ -2419,6 +2641,17 @@ mod tests {
 
         // A mirror this module never stores still owes no line.
         assert!(!note_pair_ceiling(f32::NAN, [1.0, 1.0, 1.0]));
+    }
+
+    // C58 / ledger item 59. The training doors keep their hooks after losing their lever, and a door that
+    // hands the value it received looks like a hook the game never reached (A4), so the separation itself
+    // has to reach `hachimi.log` - once per launch, from the config pass that mirrors the levers.
+    #[test]
+    fn the_training_gate_note_is_owed_once_per_launch() {
+        let _turn = pass_turn();
+
+        assert!(note_training_doors_are_inert(), "a run was never told the training gates stopped being scaled");
+        assert!(!note_training_doors_are_inert(), "the same fact was printed on every config pass");
     }
 
     // egui 0.33.3 `Slider::set_value`: the value is clamped to the range, then snapped to

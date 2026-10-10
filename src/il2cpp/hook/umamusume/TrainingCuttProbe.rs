@@ -2593,9 +2593,11 @@ pub fn report_if_due() {
         );
     }
 
-    // The scaling points the mod already installs on the training screen. They printed install lines in
-    // run 8 and no call line, and this probe cannot hook those addresses a second time, so their own
-    // call counts ride along on this line (A21).
+    // The two doors AnimationSpeed arms on the training screen. They printed install lines in run 8 and no
+    // call line, and this probe cannot hook those addresses a second time, so their own call counts ride
+    // along on this line (A21). Since item 59 they are counts only: AnimationSpeed hands both gates the
+    // value the game passed, so `InitializePlateList=36` says the game reached the door 36 times, not that
+    // this fork shortened it 36 times (C58). The label stays as the arm recipes in LEDGER name it.
     let mut doors = String::new();
 
     for (slot, name) in AnimationSpeed::TRAINING_HIT_SLOTS.iter() {
