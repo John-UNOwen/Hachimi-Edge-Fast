@@ -43,7 +43,11 @@ or a decision is taken, not as a scratch pad. The split and the evidence rule ar
   all* at its default. Users opt in.
 - **Clamp in code, not just in the GUI.** Sliders allow 0.1..=1000.0. Hard ceilings live in code
   (`MAX_FACTOR = 20.0`, `MAX_TIME_SCALE = 5.0` in `AnimationSpeed.rs`). C5, C22 and C24 are what
-  happens when they don't.
+  happens when they don't. `MAX_TWEEN_SPEED_PRODUCT` is the ceiling on the levers that reach one completion
+  together - the group factors, `ui_animation_scale`, and the whole `Time.timeScale` this fork's write layer left
+  in the game, because the clock the ui lever multiplies is `Time.deltaTime`, which is that scale times real
+  elapsed time. `ui_animation_scale` is capped at the product over that scale and never trimmed below the neutral
+  1.0, so the bound trims what this fork puts on the channel and never slows the game (C58, ledger item 62).
 - **Client side presentation only.** Do not speed things up by skipping server calls, faking
   success callbacks, changing simulation results, or touching purchase, legality, SQLite key or
   network paths (see C3, C6, C12, C20, C21, C31). `Time.timeScale` is a simulation lever, not an

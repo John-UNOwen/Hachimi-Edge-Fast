@@ -118,7 +118,9 @@ fn scale_game_write(value: f32, lever: f32) -> f32 {
         // compounding, but a bounded multiply-twice is not what "never multiply the current
         // value" asks for. Pass it through, and leave `GAME_REQUESTED` on the raw request the
         // produced number was derived from: recording the scaled echo there is what would
-        // compound the baseline a later `apply()` scales from.
+        // compound the baseline a later `apply()` scales from. The two completion-clock mirrors
+        // are left alone for the same reason: the scale this layer reported when it produced that
+        // number is still the one the game's clock is carrying.
         log_call(value, value, lever, true);
         return value;
     }
@@ -132,7 +134,9 @@ fn scale_game_write(value: f32, lever: f32) -> f32 {
     if lever == 1.0 {
         // Neutral fast exit: at the shipped default this hook has nothing to change, so the
         // value goes to the original as it came, with no scaling, no ceiling arithmetic and no
-        // lock.
+        // lock. Recorded as the game's own scale with nothing added, which is what clears a raise
+        // an earlier lever left on the completion ceiling `AnimationSpeed` prices.
+        AnimationSpeed::note_time_scale_write(value, value);
         log_call(value, value, lever, false);
         return value;
     }
@@ -148,6 +152,12 @@ fn scale_game_write(value: f32, lever: f32) -> f32 {
     // The number the game now holds *from this layer*, for the echo check above and the
     // never-lower guard in `plan_write`.
     PRODUCED.store(scaled.to_bits(), Ordering::Release);
+
+    // And both halves of what this layer left in the game's clock, for the ceiling that bounds a completion:
+    // `ui_animation_scale` multiplies `Time.deltaTime`, which is `Time.timeScale` times real elapsed time, so the
+    // scale written here is under the tween clock rather than beside it, and `AnimationSpeed` prices the pair
+    // against the whole number the channel carries and names the share the lever added (C58).
+    AnimationSpeed::note_time_scale_write(value, scaled);
 
     log_call(value, scaled, lever, false);
 
@@ -281,6 +291,10 @@ pub fn apply() {
 
     info!("Time::apply: game {game_value} x lever {lever} -> {desired}");
 
+    // The same report the hook makes for a write it scales: this is the raise this layer is about
+    // to put on the clock the tween completion is measured on (C58, item 62).
+    AnimationSpeed::note_time_scale_write(game_value, desired);
+
     unsafe {
         // Recorded as ours before the write reaches the game: the detour passes an APPLYING
         // write through without re-scaling it, and the number this write leaves behind is one
@@ -351,7 +365,7 @@ mod tests {
     // read and what a run has to confirm is written in the ledger.
     struct Game {
         // The turn this case is running in, held for as long as the fixture lives.
-        _turn: std::sync::MutexGuard<'static, ()>,
+        _turn: HookTurn,
         unity: f32,
         writes: Vec<f32>,
     }
@@ -379,6 +393,7 @@ mod tests {
 
             if let Some(desired) = plan_write(game_value, lever, current, ours) {
                 PRODUCED.store(desired.to_bits(), Ordering::Release);
+                AnimationSpeed::note_time_scale_write(game_value, desired);
                 self.writes.push(desired);
                 self.unity = desired;
             }
@@ -387,18 +402,28 @@ mod tests {
 
     // The hook's state is process wide and `cargo test` runs cases on several threads, so the
     // cases that drive it take turns and each starts from the state a fresh process holds: no
-    // game request recorded, no lever applied, counter at zero.
+    // game request recorded, no lever applied, counter at zero, nothing raised. The speed module's
+    // mirror turn is taken first and held for the whole case: `scale_game_write` and `apply` report
+    // the raise they produced into `AnimationSpeed`, which is a mirror the completion ceiling reads
+    // and the speed cases take their own turn over.
     static HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn hook_turn() -> std::sync::MutexGuard<'static, ()> {
+    struct HookTurn {
+        _mirrors: std::sync::MutexGuard<'static, ()>,
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn hook_turn() -> HookTurn {
+        let mirrors = AnimationSpeed::speed_mirror_turn();
         let turn = HOOK_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         GAME_REQUESTED.store(f32::NAN.to_bits(), Ordering::Release);
         APPLIED_LEVER.store(f32::NAN.to_bits(), Ordering::Release);
         PRODUCED.store(f32::NAN.to_bits(), Ordering::Release);
         CALLS.store(0, Ordering::Relaxed);
+        AnimationSpeed::note_time_scale_write(1.0, 1.0);
 
-        turn
+        HookTurn { _mirrors: mirrors, _turn: turn }
     }
 
     #[test]
@@ -440,6 +465,50 @@ mod tests {
         assert_eq!(game.writes, vec![5.0], "expected the game's 4.0 raised to the ceiling");
         assert!(game.unity >= 4.0, "the game's fast forward was slowed to the configured value");
         assert!(game.unity <= AnimationSpeed::MAX_TIME_SCALE);
+    }
+
+    // C58 / ledger item 62, on the number the completion ceiling needs from this layer. `ui_animation_scale`
+    // multiplies the `Time.deltaTime` DOTween is handed, and `Time.deltaTime` is `Time.timeScale` times real
+    // elapsed time, so what this layer leaves in the game *is* the clock a completion is divided by, and the
+    // factor it added is only its share of it. These are the three states the write path has: the game holding
+    // 1.0, the game going above 1.0 with the lever taking it to the ceiling, and the game holding a scale past it.
+    #[test]
+    fn the_time_scale_this_layer_produces_is_reported_to_the_completion_ceiling() {
+        let lever = AnimationSpeed::MAX_TIME_SCALE;
+        let mut game = Game::new();
+
+        // What `hachimi.log` printed in every run this ledger has, `Time::set_timeScale call 2: 1 -> 1
+        // (lever x5)` beside `time_scale 5` in the same snapshot. Nothing was raised, so the ceiling stays
+        // exactly where those runs left it.
+        game.game_write(1.0, lever);
+        assert_eq!(game.unity, 1.0);
+        assert_eq!(AnimationSpeed::time_scale_produced(), 1.0, "a write that changed nothing left a scale the completion ceiling prices");
+        assert_eq!(AnimationSpeed::time_scale_raise(), 1.0, "a write that changed nothing raised the clock the completion ceiling prices");
+
+        // The state a shipped config reaches that no run has read: the game writes its own fast forward and
+        // the lever takes it to the ceiling. The completion clock is the 5.0 that landed in the game, of which
+        // 2.5x is this fork's doing; pricing only the 2.5x left 2.0x of the channel the completion ran on.
+        game.game_write(2.0, lever);
+        assert_eq!(game.unity, AnimationSpeed::MAX_TIME_SCALE);
+        assert_eq!(AnimationSpeed::time_scale_produced(), 5.0, "the scale this layer handed the setter is not the one the completion ceiling prices");
+        assert_eq!(AnimationSpeed::time_scale_raise(), 2.5, "the raise this layer wrote is missing from the line a run reads");
+
+        // A scale the game reached past the ceiling is the game's own and this layer raised nothing. It is still
+        // the scale the delta channel carries, so the ui lever is capped under it; the fork's own share is the
+        // 1.0 that says it added nothing.
+        game.game_write(8.0, lever);
+        assert_eq!(game.unity, 8.0);
+        assert_eq!(AnimationSpeed::time_scale_produced(), 8.0, "the scale the game is holding is not the scale the completion clock carries");
+        assert_eq!(AnimationSpeed::time_scale_raise(), 1.0, "a clock the game holds on its own was counted as this fork's speed-up");
+
+        // What the ceiling then does with those numbers. At `ui_animation 20` a Unity holding 5.0 leaves the ui
+        // clock 4x, so the delta channel is 20x and not 100x, and the state every run measured - Unity at 1.0 -
+        // is unchanged rung for rung.
+        assert_eq!(AnimationSpeed::ui_clock_of(AnimationSpeed::MAX_UI_ANIMATION_SCALE, 5.0), 4.0, "the ui clock was not capped by the scale under it");
+        assert_eq!(AnimationSpeed::delta_clock_of(AnimationSpeed::MAX_UI_ANIMATION_SCALE, 5.0), AnimationSpeed::MAX_TWEEN_SPEED_PRODUCT, "the ui clock and the scale under it multiplied past the pair ceiling");
+        assert_eq!(AnimationSpeed::delta_clock_of(AnimationSpeed::MAX_UI_ANIMATION_SCALE, 1.0), AnimationSpeed::MAX_UI_ANIMATION_SCALE, "the state every run measured no longer prices what it priced before");
+        assert_eq!(AnimationSpeed::ui_clock_of(1.0, 8.0), 1.0, "the cap trimmed the ui lever to hold down a scale the game reached on its own");
+        assert_eq!(AnimationSpeed::time_scale_raise_of(1.0, lever), 1.0, "the lever counted as a raise it never applied");
     }
 
     #[test]
@@ -543,35 +612,17 @@ mod tests {
         assert_eq!(plan_write(4.0, 2.0, 1.0, false), Some(5.0));
     }
 
-    // Captures what the counter actually writes to the log. "Installed is not the same as
-    // called" (A4) is only closed if a run at the shipped default can see the line at all.
-    static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-    struct Capture;
-
-    impl log::Log for Capture {
-        fn enabled(&self, _metadata: &log::Metadata) -> bool {
-            true
-        }
-
-        fn log(&self, record: &log::Record) {
-            let line = record.args().to_string();
-            CAPTURED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(line);
-        }
-
-        fn flush(&self) {}
-    }
-
-    static CAPTURE: Capture = Capture;
-
+    // Reads back what the counter actually writes to the log. "Installed is not the same as called" (A4)
+    // is only closed if a run at the shipped default can see the line at all. The sink is the one
+    // `AnimationSpeed` installs, because `log` holds a single logger per process and a second capture
+    // would leave this case reading an empty one. `hook_turn` already holds the speed module's mirror
+    // turn, which is the lock every other case that captures takes, so no other case's lines land in the
+    // window and nothing here has to be cleared.
     #[test]
     fn the_neutral_default_reports_that_the_hook_was_reached() {
         let _turn = hook_turn();
 
-        let _ = log::set_logger(&CAPTURE);
-        log::set_max_level(log::LevelFilter::Trace);
-
-        CAPTURED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+        AnimationSpeed::capture_log();
 
         // Ten neutral calls, run through `scale_game_write`: the function the detour runs for a
         // value the game wrote, at the lever a shipped build holds.
@@ -580,8 +631,7 @@ mod tests {
             assert_eq!(CALLS.load(Ordering::Relaxed), index + 1, "the counter missed a call");
         }
 
-        let captured = CAPTURED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let lines: Vec<&String> = captured.iter().filter(|line| line.contains("Time::set_timeScale")).collect();
+        let lines = AnimationSpeed::captured_lines("Time::set_timeScale");
 
         assert_eq!(lines.len(), CALL_DETAIL_LIMIT, "expected the first {CALL_DETAIL_LIMIT} calls to be logged, got {}", lines.len());
         assert!(lines.iter().all(|line| line.contains("1 -> 1 (lever x1)")), "the neutral line does not show a value passing through: {lines:?}");

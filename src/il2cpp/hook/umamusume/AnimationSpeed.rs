@@ -10,9 +10,11 @@
 // silently, so one table serves every region.
 use std::ffi::{CStr, CString};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::os::raw::{c_int, c_void};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use once_cell::sync::Lazy;
 
@@ -38,7 +40,7 @@ const FIELD_ATTRIBUTE_LITERAL: c_int = 0x40;
 // the number this module honours.
 pub const MAX_FACTOR: f32 = 20.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
     // Screen-to-screen transitions: view change fades, wipes, loading overlays.
     Transition,
@@ -55,6 +57,80 @@ pub enum Group {
     // the flow waits for rather than how long a screen takes to look done. The doors in it stay armed
     // because a run has to be able to read them; `factor` holds them at the number the game chose.
     Training,
+}
+
+// Which clock a duration door's completion is measured on, and therefore whether the two speed layers meet
+// on it at all (C58, ledger item 62).
+//
+// The bound is a statement about a completion: a completion takes the duration it was handed over the clock
+// it is advanced on, so the pair composes only where the duration a door shortened and the clock
+// `tween_clocks` multiplies are both about that one completion. What `duration_factor` priced before this
+// enum existed was a `Group`, and a group names which option wrote a lever. It says nothing about what the
+// value paces. That is how a bound written to stop 400x on one completion also reached every value in the
+// group, including the ones the clock layer never advances - a Unity coroutine yield (`WaitProbe`'s two
+// doors; run 18 armed 7 of them for 6,150 ms and `ui_animation_scale` is on none of them), a
+// `WaitForFixedUpdate` poll (run 21 read one in all five training cuts), a timeline a component steps in
+// `LateUpdate`, and the `independentTime` half of a tween the game marked time scale independent, which
+// `f1a6584` took out of the multiply (C5). A value on those channels trimmed by `ui_animation 20` runs at
+// 1.0 where its own option asked for up to `MAX_FACTOR`: up to 20x slower in wall clock than the state every
+// run in this ledger measured, and a one-layer completion at `MAX_FACTOR` is already under the ceiling the
+// bound exists to hold, so the trim bought no safety there.
+//
+// The other half is just as fixed: a pace this fork has not read is not a licence to drop the bound. The
+// count-up door is the one `Group::Screens` duration door a career session has been measured reaching
+// (`CountupModifier_getDuration 0.16 -> 0.008`, run 17, in the same snapshot as `result 20`), and the dump
+// this fork read for its classification names count-ups on both channels, so the classification is
+// unproven, and unproven is the bounded side. `Gallop.PartsFanRaidFanNumCounter::CountUp/2 ->
+// IEnumerator(long, bool)` (`introspect.log:16707`) steps one through a coroutine and its `MoveNext/0`
+// (16693) is the machine doing it, while `Gallop.TextCountUpVertexCommon` (15873-15893) renders one through
+// `_tween [class<DG.Tweening.Tween>]` and `_timeLine [class<Gallop.TweenAnimationTimelineComponent>]`, and
+// `Gallop.PartsSingleModeResultFanRaid::CountUpTextFadeInFromRight/7 (class<Gallop.CountupModifier>,
+// class<UnityEngine.UI.Text>, ulong, ulong, float, float, class<System.Action>)` (24196) feeds one into a
+// result screen tween beside `AnimationDelayFunc/2 -> void(float, Action)` (24197) and the `countUpDelay` its
+// closures capture (24189-24192). Nothing in a signature dump says which of those the 0.16 s lands on, and
+// `measured_pace` is the arithmetic that says so when a run has read one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pace {
+    /// The value is handed to animation measured on the delta channel `tween_clocks` multiplies. The two
+    /// layers compose on this completion, and `MAX_TWEEN_SPEED_PRODUCT` is the ceiling on it. The payload is
+    /// the dump line, or the run line, that put the door here.
+    ///
+    /// The lane says which channel, not which levers: that channel is the game's `Time.deltaTime`, so every
+    /// clock this fork writes is under a door on it, `ui_animation_scale` and the whole scale the
+    /// `Time.timeScale` write layer left in the game together (`delta_clock`), not the ui lever on its own. A
+    /// door on this lane is priced by every lever the bound covers.
+    TweenMeasured(&'static str),
+
+    /// The value is consumed on a channel `ui_animation_scale` provably does not reach. No pair composes on
+    /// it: the group's own `MAX_FACTOR` cap is the whole of the ceiling it needs, so the trim is not applied
+    /// and the door hands its group's full ask. Taking a speed-up out of a duration on this lane is a
+    /// slowdown of a completion the clock layer never paid for, which is the shape AGENTS section 5 refuses.
+    /// The payload names the channel and the reading that put the door here.
+    OffTweenClock(&'static str),
+
+    /// Nothing this fork has read says which channel the completion runs on. Bounded as if composed, against
+    /// `delta_clock()`, because the failure this item was written to stop is the fast one; the cost of the
+    /// safe side and the measurement that would move the door are written at the door.
+    Unproven,
+}
+
+impl Pace {
+    /// Whether this pace leaves the door under `MAX_TWEEN_SPEED_PRODUCT`.
+    pub const fn bounds_the_pair(self) -> bool {
+        match self {
+            Pace::OffTweenClock(_) => false,
+            Pace::TweenMeasured(_) | Pace::Unproven => true,
+        }
+    }
+
+    /// The evidence a pace stands on: `None` only for `Unproven`, which is the honest answer and the reason
+    /// a door on it is bounded.
+    pub const fn evidence(self) -> Option<&'static str> {
+        match self {
+            Pace::TweenMeasured(line) | Pace::OffTweenClock(line) => Some(line),
+            Pace::Unproven => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -237,6 +313,94 @@ static STORY_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static TIME_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static UI_ANIMATION_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 
+// What the `Time.timeScale` write layer last handed Unity's setter, and the factor it added to the value it
+// was handed, mirrored so the tween clock prices a completion without a config load. The pair ceiling reads
+// the first one and the log line names both: `Time.deltaTime` is `Time.timeScale` times real elapsed time,
+// so the channel `ui_animation_scale` multiplies carries the whole number this layer put into
+// `Time.timeScale`, not only the factor it added to the game's request. 1.0 on both means Unity is holding
+// the neutral speed, which is what every recorded run read: `Time::set_timeScale call 2: 1 -> 1 (lever x5)`
+// in run 30 with `time_scale 5` in that run's snapshot, because `apply_time_scale` raises only a value the
+// game wrote above 1.0 and this client holds 1.0. `UnityEngine_CoreModule::Time` is the only writer, and
+// both mirrors move in that one call (C58, item 62).
+//
+// The record is of what this layer handed the setter, which is the only way this module knows the number: the
+// `set_timeScale` detour is on Unity's own setter, so every game write arrives through it, and the two ceilings
+// this fork owns (`apply_time_scale` and the story getters' `scale_time_scale`) both stop at `MAX_TIME_SCALE`.
+// A scale this fork could not have produced is therefore a pass-through, and the line names it: run 19 read
+// `StoryTimelineController_setTimeScale 8` with no `set_timeScale` call line beside it, so Unity held 1.0 there.
+static TIME_SCALE_PRODUCED: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+static TIME_SCALE_RAISE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+
+// The turn every test case that moves or reads these mirrors takes. `UnityEngine_CoreModule::Time`'s
+// produced write moves `TIME_SCALE_PRODUCED` and `TIME_SCALE_RAISE`, which the completion ceiling reads and
+// the ceiling line names, so its cases hold the same turn; `hook_turn` takes it before its own lock, which is
+// the only order either module uses.
+#[cfg(test)]
+static SPEED_MIRROR_TURN: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn speed_mirror_turn() -> std::sync::MutexGuard<'static, ()> {
+    SPEED_MIRROR_TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+// The owed lines are the evidence a speed item closes on (AGENTS section 2), so a test has to read the
+// sentence a counter actually wrote, not just the bool saying one was owed: a line no test ever looked at
+// is where C58's `over the 2.5x ... (1x: it raised nothing)` sat unnoticed. The `log` crate holds one
+// logger per process, so every case that reads a line back shares this capture and installs it once - two
+// captures each trying to install would send the loser's lines to the winner's sink and leave the loser
+// reading an empty one. The case's `speed_mirror_turn` guard is what keeps another case's lines out of the
+// window; a caller that only counts lines holding one needle is not disturbed by the rest.
+#[cfg(test)]
+static CAPTURED_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static CAPTURED_INSTALL: std::sync::Once = std::sync::Once::new();
+
+#[cfg(test)]
+struct CapturedLog;
+
+#[cfg(test)]
+impl log::Log for CapturedLog {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let line = record.args().to_string();
+        CAPTURED_LINES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(line);
+    }
+
+    fn flush(&self) {}
+}
+
+#[cfg(test)]
+static CAPTURED_LOG: CapturedLog = CapturedLog;
+
+/// Open a capture window: install the process logger if no case has taken it yet, drop what earlier cases
+/// left behind, and read at the level every owed `debug!` line is written at.
+#[cfg(test)]
+pub(crate) fn capture_log() {
+    CAPTURED_INSTALL.call_once(|| {
+        let _ = log::set_logger(&CAPTURED_LOG);
+    });
+
+    log::set_max_level(log::LevelFilter::Trace);
+
+    CAPTURED_LINES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+}
+
+/// The captured lines holding `needle`, oldest first.
+#[cfg(test)]
+pub(crate) fn captured_lines(needle: &str) -> Vec<String> {
+    CAPTURED_LINES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|line| line.contains(needle))
+        .cloned()
+        .collect()
+}
+
 // The story choice multiplier both sites read, already clamped. NAN means "leave the game's value
 // alone", which is what a non finite or non positive delay means and what every build holds until
 // the first config pass.
@@ -274,12 +438,15 @@ pub const MIN_UI_ANIMATION_SCALE: f32 = 0.1;
 // the clock it is measured on, so what the game waits on is shortened by the *product*. Each layer has
 // its own ceiling of `MAX_FACTOR` and neither one looked at the other, so a pair that is legal twice
 // reached 400x. That is what the runs read: `InitializePlateList 1 -> 0.05` (run 20) and
-// `CountupModifier_getDuration 0.16 -> 0.008` (run 17) beside `ui_animation 20` in the same snapshot,
-// which is 2.5 ms and 0.4 ms against a 5 ms frame at `target_fps 200` - a completion that finishes
-// before the coroutine waiting on it is parked on it. Run 31 ended 26 min 43 s on the career end
-// screen (`SceneDefine::ViewId` 1501) with that door the only training duration write the run reached,
-// `cut runs 4 wall 8283 ms timeline 0 ms`, and `CutInTimelineController::UpdateSpeed()` growing 3,456
-// to 46,652 while every door that advances a flow had frozen.
+// `CountupModifier_getDuration 0.16 -> 0.008` (run 17) beside `ui_animation 20` in the same snapshot. Each
+// completion is inside the frame of the run that printed it: 2.5 ms on run 20's 16.7 ms frame
+// (`target_fps 60`), 0.4 ms on run 17's 5.6 ms frame (`target_fps 200`, 88,728 frames over 499,199 ms) - a
+// completion that finishes before the coroutine waiting on it is parked on it. Run 31 ended 26 min 43 s on the
+// career end screen (`SceneDefine::ViewId` 1501) with that door the only training duration write the run
+// reached, `1 -> 0.05` on its own 16.9 ms frame (28,662 frames over 484,037 ms at `target_fps 60`; the string
+// `target_fps 200` is nowhere in that run's log), `cut runs 4 wall 8283 ms timeline 0 ms`, and
+// `CutInTimelineController::UpdateSpeed()` growing 3,456 to 46,652 while every door that advances a flow had
+// frozen.
 //
 // The pair therefore gets the same ceiling each layer already has: 20x on one completion, the end of
 // the range the C58 concept's plain-Hachimi reading calls fast and still in order (2.4 s of play in
@@ -287,6 +454,40 @@ pub const MIN_UI_ANIMATION_SCALE: f32 = 0.1;
 // is the half that knows which group the value belongs to; the clock half is global to every tween in
 // the game, including ones this fork never touched, so trimming it there would slow tweens the group
 // factor has nothing to do with.
+//
+// The ceiling speaks about a completion both layers reach, and a door reaches it through its `Pace`, not
+// through the group its option happens to sit in. On `TweenMeasured` and `Unproven` the duration half backs
+// off to the headroom the clock left, so one completion is shortened by at most this number. On
+// `OffTweenClock` the clock layer is not on the completion at all, the pair never composes, and the group's
+// own `MAX_FACTOR` - the same 20.0 - is the ceiling that completion needs; trimming it there would take out
+// speed the clock never paid for and leave a completion up to 20x slower than the state the runs measured.
+// A door therefore leaves the trim only with the line that says its value is not measured on this clock, and
+// a door whose channel nothing has read stays bounded: run 17's `CountupModifier_getDuration 0.16 ->
+// 0.007999999` beside `ui_animation 20` is 0.4 ms against a 5 ms frame, and it was reached on the one
+// `Group::Screens` duration door a career session actually calls.
+//
+// The clock this ceiling prices is the game's own `Time.deltaTime`, so the `time_scale` lever is under it too,
+// and pricing only the duration and the ui lever left a third one free. `DOTweenComponent.Update` hands
+// `TweenManager::Update` `Time.deltaTime`, and `Time.deltaTime` is `Time.timeScale` times real elapsed time, so
+// a tween on the delta channel is advanced by the ui clock *on top of* whatever Unity is holding in
+// `Time.timeScale`: `tDeltaTime = (t.isIndependentUpdate ? independentTime : deltaTime) * t.timeScale`. This
+// fork writes that number through `apply_time_scale`, up to `MAX_TIME_SCALE`, and what it writes is the whole
+// product, not the factor it added to the game's request: a request of 2.0 under a lever of 5 hands the setter
+// 5.0, so `ui_animation 20` under that Unity is 100x on one completion while the factor this fork added is
+// 2.5x. Pricing the 2.5x priced 2.5 of a 5 channel and left the completion running 4 ms on a state the ceiling
+// printed 8 ms about, so `delta_clock_of` prices the produced scale - the number the channel carries - and
+// `ui_clock_of` caps the half this module multiplies at `MAX_TWEEN_SPEED_PRODUCT` over it. The ceiling bounds
+// what this fork puts on the channel, and it holds that at every state the writer can reach: a raise is capped
+// at `MAX_TIME_SCALE`, so a scale past the ceiling can only be there as a pass-through of a number the game
+// asked for (run 19 read the training cut at its own 8.0000 while the write hook logged `1 -> 1`), and there the
+// cap floors the ui lever at 1.0 and the fork's share of the channel is nothing. What stays outside the ceiling
+// is the `independentTime` channel `f1a6584` took out of the multiply and the story timeline's own time scale,
+// which answers to `MAX_TIME_SCALE`. The story half is outside it on a measurement, not an assumption:
+// runs 1, 2 and 30 read `StoryTimeline_getTimeScaleAfterEndStory 1 -> 5` in the same sessions that read
+// `Time::set_timeScale call N: 1 -> 1`, so raising the number the story timeline steps its clips by raised
+// nothing Unity's `Time.deltaTime` carries on this client. Stated plainly because it is the difference between
+// a bound and a claim: every `set_timeScale` call line in every run log this ledger holds is `1 -> 1`, so the
+// 100x state is reachable in a shipped config and is not a number a run measured.
 pub const MAX_TWEEN_SPEED_PRODUCT: f32 = MAX_FACTOR;
 
 // The story choice auto select lever. `StoryChoiceController::CheckChoiceAutoTap` scales the
@@ -380,22 +581,130 @@ pub fn ui_animation_scale() -> f32 {
     f32::from_bits(UI_ANIMATION_SCALE.load(Ordering::Acquire))
 }
 
+/// The factor `apply_time_scale` added to the value it was handed: what this fork put on top of the game's
+/// own clock. A value at or below 1.0 is the game's pause, its slow motion or its neutral speed and comes
+/// back unchanged, so the raise is 1.0 and the lever reached nothing. A value the game already held above
+/// `MAX_TIME_SCALE` passes through untouched, so a cut running at its own 8.0000 is not this fork's
+/// speed-up. The name of the number the clock carries is `time_scale_produced`; this one is what the log
+/// line says about the fork's own share.
+pub fn time_scale_raise_of(value: f32, lever: f32) -> f32 {
+    if !value.is_finite() || !lever.is_finite() || value <= 0.0 {
+        return 1.0;
+    }
+
+    (apply_time_scale(value, lever) / value).max(1.0).min(MAX_TIME_SCALE)
+}
+
+/// The raise as the log reads it. A mirror that is not a number, which `note_time_scale_write` never stores,
+/// is read as the neutral 1.0 the way every other mirror here is read.
+pub fn time_scale_raise() -> f32 {
+    let raise = f32::from_bits(TIME_SCALE_RAISE.load(Ordering::Acquire));
+
+    if !raise.is_finite() { 1.0 } else { raise.max(1.0) }
+}
+
+/// The number the `Time.timeScale` write layer last handed Unity's setter, floored at the neutral 1.0: a
+/// pause or a slow motion shortens no completion, so it asks the pair ceiling for no headroom. This is the
+/// scale `Time.deltaTime` carries, so it is the number a completion on the delta channel is divided by, and
+/// the number `ui_animation_scale` has to leave room under. A scale the game reached on its own above
+/// `MAX_TIME_SCALE` is in it unchanged: the ceiling prices the channel the completion ran on, and a scale the
+/// game is holding is not this fork's speed-up but is still the speed the completion ran at.
+pub fn time_scale_produced() -> f32 {
+    let produced = f32::from_bits(TIME_SCALE_PRODUCED.load(Ordering::Acquire));
+
+    if !produced.is_finite() { 1.0 } else { produced.max(1.0) }
+}
+
+/// Record both halves of a produced write: `value` is what the game asked for, `produced` is the number the
+/// write layer handed the setter. A write that changed nothing records 1.0 on the raise, which is what clears
+/// a raise an earlier config left behind when the lever goes back to neutral. `Time.rs` calls it at its two
+/// produced writes and never on the echoed one, where the game is handing this layer its own product back and
+/// the number the clock is carrying is the one already recorded.
+///
+/// Returns whether the pair ceiling line is owed for the clock this write left behind, so a scale that
+/// appears mid-session reaches `hachimi.log` in the same sentence a config change does. The latch inside
+/// `note_pair_ceiling` is keyed on the composed clock and the ui cap it leaves, so one line per state the
+/// levers actually settle to, and a produced write that changes neither changes no line. Nothing here reaches
+/// a config load or a game pointer: `mirrored_factors` reads the same atomics every scaling detour reads.
+pub fn note_time_scale_write(value: f32, produced: f32) -> bool {
+    let raise = if value.is_finite() && produced.is_finite() && value > 0.0 {
+        (produced / value).max(1.0).min(MAX_TIME_SCALE)
+    } else {
+        1.0
+    };
+
+    let scale = if produced.is_finite() { produced.max(1.0) } else { 1.0 };
+
+    TIME_SCALE_RAISE.store(raise.to_bits(), Ordering::Release);
+    TIME_SCALE_PRODUCED.store(scale.to_bits(), Ordering::Release);
+
+    // The three groups a factor writes; `mirrored_factors`' fourth slot is the training group's pinned 1.0,
+    // which is not a lever and has no headroom to name on the line.
+    let factors = mirrored_factors();
+
+    note_pair_ceiling(ui_animation_scale(), [factors[0], factors[1], factors[2]])
+}
+
+/// The `Time.timeScale` the delta channel carries, floored at the neutral 1.0. A pause or a slow motion is
+/// not a speed-up, so it asks for no headroom; a number the game holds above the pair ceiling is left what
+/// it is, because the bound is about what this fork may put on a completion and never about pulling a game
+/// scale down (AGENTS section 5: an option must not slow the game).
+fn carried_time_scale(produced: f32) -> f32 {
+    if produced.is_finite() { produced.max(1.0) } else { 1.0 }
+}
+
+/// The multiplier `ui_animation_scale` is allowed to put on the delta channel once the scale this fork's
+/// write layer left in `Time.timeScale` is counted against `MAX_TWEEN_SPEED_PRODUCT`. The scale is inside
+/// this lever's headroom because the lever multiplies `Time.deltaTime`, and `Time.deltaTime` already carries
+/// `Time.timeScale`: at a Unity holding 5.0 a 20x ui clock runs 4x, so the channel is 20x and not 100x. Below
+/// the cap the lever is exactly what the config says, and the cap only ever lowers it, so the slider's 0.1
+/// floor is not turned into a faster clock. Its own floor is 1.0: trimming the lever below that would make
+/// this fork the reason a game animation ran slower than the game asked, which a ceiling never does. A mirror
+/// that is not a number is the neutral 1.0.
+pub fn ui_clock_of(ui: f32, produced: f32) -> f32 {
+    let scale = carried_time_scale(produced);
+
+    if !ui.is_finite() {
+        return 1.0;
+    }
+
+    ui.max(0.0).min((MAX_TWEEN_SPEED_PRODUCT / scale).max(1.0))
+}
+
+/// The multiplier the delta channel carries: the ui clock above, times the whole scale under it. Under a scale
+/// at or below the pair ceiling - which is every scale this module's own ceilings let it write, because a raise
+/// stops at `MAX_TIME_SCALE` - the number is at most `MAX_TWEEN_SPEED_PRODUCT`. Past the ceiling it is the
+/// game's own scale unchanged: the cap floors at 1.0, and a scale that high can only have arrived as a
+/// pass-through, where this fork added nothing. That is why the duration headroom below can be priced against
+/// this number instead of against one lever.
+pub fn delta_clock_of(ui: f32, produced: f32) -> f32 {
+    ui_clock_of(ui, produced) * carried_time_scale(produced)
+}
+
+/// The same, read from the mirrors. This is the number a completion on the delta channel is shortened by
+/// before any duration door is touched, and `MAX_TWEEN_SPEED_PRODUCT` is a ceiling on what this fork's
+/// levers put there (C58, item 62).
+pub fn delta_clock() -> f32 { delta_clock_of(ui_animation_scale(), time_scale_produced()) }
+
 /// The two elapsed time channels of one DOTween tick, exactly as `DOTween/TweenManager.rs` hands them
-/// to the game: the `deltaTime` half multiplied by the clamped mirror, and the `independentTime` half
-/// passed on as the caller computed it (C5, the half this line used to scale as well).
+/// to the game: the `deltaTime` half multiplied by the clamped mirror, capped by what the pair ceiling
+/// leaves once the scale this fork's write layer left in `Time.timeScale` is counted, and the
+/// `independentTime` half passed on as the caller computed it (C5, the half this line used to scale as well).
 ///
 /// The lever is a clock on the delta channel only because DOTween reads the other one per tween.
 /// `DG.Tweening.Core.TweenManager.Update(tween, deltaTime, independentTime, ..)` advances a tween by
 /// `float tDeltaTime = (t.isIndependentUpdate ? independentTime : deltaTime) * t.timeScale;`, and
-/// `DOTweenComponent.Update` computes that argument from `Time.unscaledDeltaTime`. A tween the game
-/// marked time scale independent (`SetUpdate(true)`, `DOTween.defaultTimeScaleIndependent`) is therefore
-/// measured on wall clock on purpose, and that is how UI keeps animating while `Time.timeScale` is 0 -
-/// a paused race, a story wait. Multiplying it took wall clock out of a tween the game had deliberately
+/// `DOTweenComponent.Update` computes the `independentTime` argument from `Time.unscaledDeltaTime`. A tween
+/// the game marked time scale independent (`SetUpdate(true)`, `DOTween.defaultTimeScaleIndependent`) is
+/// therefore measured on wall clock on purpose, and that is how UI keeps animating while `Time.timeScale` is
+/// 0 - a paused race, a story wait. Multiplying it took wall clock out of a tween the game had deliberately
 /// taken out of every time lever this fork touches: at `MAX_UI_ANIMATION_SCALE` a 1 s real time UI tween
-/// finished in 50 ms, pause included. A mirror that is not a number - which this module never stores -
-/// is read as the neutral 1.0, the way `duration_factor` reads it.
+/// finished in 50 ms, pause included. The other argument is `Time.deltaTime`, which is `Time.timeScale` times
+/// real elapsed time, so the multiply below sits on top of the scale the `Time.timeScale` write layer left in
+/// the game rather than beside it (C58, item 62). A mirror that is not a number - which this module never
+/// stores - is read as the neutral 1.0, the way `duration_factor` reads it.
 pub fn tween_clocks(delta_time: f32, independent_time: f32) -> (f32, f32) {
-    let scale = ui_animation_scale();
+    let scale = ui_clock_of(ui_animation_scale(), time_scale_produced());
 
     // Fast exit at the neutral setting: no work on a tween tick that nothing speeds up.
     if scale == 1.0 || !scale.is_finite() {
@@ -426,8 +735,18 @@ pub fn factor(group: Group) -> f32 {
 // the value has no writable storage (see the init log). The methods that play the
 // animation still receive it as a plain argument, so scaling the argument is the same
 // adjustment applied one level earlier, and it does not care how the caller stores it.
+//
+// The bounded default: a door that does not name a pace is trimmed by the pair ceiling, the same way every
+// duration door this fork arms is (C58, ledger item 62). Stepping out of the trim is a named act -
+// `scale_paced` with a `Pace::OffTweenClock` that carries the line saying the completion is not measured on
+// this clock - and never something a door falls into by omission.
 pub fn scale_duration(value: f32, group: Group) -> f32 {
-    let factor = duration_factor(group);
+    scale_paced(value, group, Pace::Unproven)
+}
+
+/// The value a door hands the game, on the pace that door stands on.
+pub fn scale_paced(value: f32, group: Group, pace: Pace) -> f32 {
+    let factor = duration_factor_at(group, pace);
 
     if factor == 1.0 || !value.is_finite() || value == 0.0 {
         return value;
@@ -438,39 +757,141 @@ pub fn scale_duration(value: f32, group: Group) -> f32 {
     value / factor
 }
 
-/// The headroom a duration in this group has left under `MAX_TWEEN_SPEED_PRODUCT`, which is what a
-/// duration door scales by. `ui_animation_scale` is read from the same live mirror the DOTween
-/// `Update` detour multiplies the tween clock by, so the shorter this fork has already made every
-/// tween that runs on that clock, the less a group factor may take out of the duration handed to the
-/// game. A tween the game marked time scale independent is measured on the unscaled channel and takes
-/// the group factor alone, which this bound over-counts - a ceiling is a ceiling, not a target. At the
-/// neutral clock the headroom is `MAX_FACTOR` and every door scales exactly as it did; at
-/// `ui_animation 20` nothing is left, and a duration door hands on the number it received. A mirror
-/// below 1.0 (the slider's 0.1 floor slows the tween clock) leaves the group's own `MAX_FACTOR` ceiling
-/// in force, and a mirror that is not a number - which this module never stores - is read as the
-/// neutral 1.0.
+/// The headroom a door has left under `MAX_TWEEN_SPEED_PRODUCT`, on its pace.
 ///
-/// The result never goes under 1.0: this is a ceiling on a speed-up, never a lever that slows the
-/// game (AGENTS section 5).
-pub fn duration_factor(group: Group) -> f32 {
+/// On the two bounded lanes the number the duration is priced against is `delta_clock()`: the
+/// `ui_animation_scale` the DOTween `Update` detour multiplies the tween clock by, capped by what is left
+/// once the scale the `Time.timeScale` write layer left in the game is counted, times that scale. The shorter
+/// this fork has already made every tween that runs on that clock, the less a group factor may take out of the
+/// duration handed to the game. At both levers neutral the headroom is `MAX_FACTOR` and the door scales exactly
+/// as it did; at `ui_animation 20` with Unity holding 1.0, or `ui_animation 20` beside a Unity holding the 5.0
+/// this fork's lever wrote, nothing is left and the door hands on the number it received. A clock below 1.0
+/// (the slider's 0.1 floor slows the tween clock) leaves the group's own `MAX_FACTOR` ceiling in force, and a
+/// mirror that is not a number - which this module never stores - is read as the neutral 1.0.
+///
+/// On `OffTweenClock` the clock layer is not on the completion, so there is no pair to price: the door gets
+/// its group's whole factor, which `normalize` already holds at `MAX_FACTOR`, and the ceiling is satisfied
+/// by that factor alone. This is the half that stops the bound being a slowdown: a value the clock never
+/// advances is not trimmed by it, whatever the clock is set to.
+///
+/// Neither lane ever returns more than the group's own factor, and neither goes under 1.0: this is a ceiling
+/// on a speed-up, never a lever that slows the game (AGENTS section 5). The `1.0` floor is what holds that
+/// promise when Unity is holding a scale past the ceiling: the channel is already faster than the bound, the
+/// bound has no headroom left to give, and the door hands the game its own duration.
+pub fn duration_factor_at(group: Group, pace: Pace) -> f32 {
     let factor = factor(group);
-    let ui = ui_animation_scale();
 
-    // Fast path, and the shipped state: with the clock layer neutral this is the group's own factor,
-    // no division, and `MAX_FACTOR / ui` would be a wider bound than the group already has.
-    if ui <= 1.0 || !ui.is_finite() {
+    // A completion the multiplied clock does not measure is not a pair, and the trim on it is a slowdown of
+    // a lever the clock never touched. The group's own cap is its ceiling.
+    if !pace.bounds_the_pair() {
         return factor;
     }
 
-    factor.min(MAX_TWEEN_SPEED_PRODUCT / ui)
+    let clock = delta_clock();
+
+    // Fast path, and the shipped state: with both clock levers neutral this is the group's own factor,
+    // no division, and `MAX_TWEEN_SPEED_PRODUCT / clock` would be a wider bound than the group already has.
+    if clock <= 1.0 || !clock.is_finite() {
+        return factor;
+    }
+
+    factor.min((MAX_TWEEN_SPEED_PRODUCT / clock).max(1.0))
 }
 
-/// The speed a completion in this group actually runs at: the factor the duration is shortened by,
-/// times the factor the clock it is measured on is sped up by. `MAX_TWEEN_SPEED_PRODUCT` is a
-/// statement about this number, not about either lever, and a test that only reads the levers cannot
-/// see the defect it bounds (C58).
-pub fn tween_speed(group: Group) -> f32 {
-    duration_factor(group) * ui_animation_scale()
+/// The headroom of a door that has not said what it paces. Every armed duration door reads the trim through
+/// this, or through `scale_paced` on a bounded pace (C58, ledger item 62).
+pub fn duration_factor(group: Group) -> f32 { duration_factor_at(group, Pace::Unproven) }
+
+/// The speed a completion runs at under the bound: the factor the duration is shortened by, times the factor
+/// the clock it is measured on is sped up by. `MAX_TWEEN_SPEED_PRODUCT` is a statement about this number,
+/// not about either lever, and a test that only reads the levers cannot see the defect it bounds (C58).
+///
+/// The clock here is `delta_clock()`, not `ui_animation_scale` alone: the argument the tween library
+/// multiplies is `Time.deltaTime`, which is `Time.timeScale` times real elapsed time, and `Time.timeScale`
+/// holds the whole number the `time_scale` write layer handed the setter. Pricing only the ui half left that
+/// channel unpriced, and pricing only the factor the layer added to a game write left the rest of it unpriced:
+/// a 20x ui lever under a Unity holding 5.0 is 100x on the completion, and a game write of 2.0 raised to 5.0
+/// was priced as 2.5x of it.
+///
+/// On a door whose completion the clock layer never reaches, the clock is not in the number: the group factor
+/// is the whole speed that completion runs at, and the same ceiling binds it there.
+///
+/// What the ceiling holds in every state is this fork's share of the channel: `ui_clock_of` times the factor
+/// the write layer added, which cannot pass `MAX_TWEEN_SPEED_PRODUCT` because the cap is `MAX_TWEEN_SPEED_PRODUCT`
+/// over the whole scale under the lever. The number below equals it whenever Unity is holding a scale at or
+/// below the ceiling, which is every scale any layer of this module is allowed to write: a pass-through of a
+/// scale past 20x is the game's own speed, and holding it down would be this fork slowing the game.
+pub fn completion_speed(group: Group, pace: Pace) -> f32 {
+    let factor = duration_factor_at(group, pace);
+
+    if !pace.bounds_the_pair() {
+        return factor;
+    }
+
+    factor * delta_clock()
+}
+
+/// The composed speed of a door that has not said what it paces.
+pub fn tween_speed(group: Group) -> f32 { completion_speed(group, Pace::Unproven) }
+
+// The floors a completion measurement has to clear before `measured_pace` believes it. A completion under 20 ms
+// is one to four frames at the frame budgets this fork measures at: run 17's clock read 5.6 ms a frame
+// (`target_fps 200`, 88,728 frames over 499,199 ms) and run 31's read 16.9 ms (`target_fps 60`, 28,662 frames
+// over 484,037 ms). A completion shorter than the floor cannot say which of them it was measured on, and a
+// clock closer to neutral than 4x cannot separate "the duration the door handed" from "that duration over 20".
+// Both say when a measurement says nothing.
+const MEASUREMENT_MIN_WALL_SEC: f32 = 0.02;
+const MEASUREMENT_OFF_CLOCK_MAX_RATIO: f32 = 1.5;
+pub const MEASUREMENT_MIN_CLOCK: f32 = 4.0;
+
+// How far the wall time may run past the duration it was handed before the reading stops being a clean one.
+// Off the multiplied clock a completion closes at about the length it was handed; a wall time several times
+// that length is a start delay ahead of the animation, or a yield that is one step of a longer chain, and
+// neither says anything about which clock the door's own duration is measured on. Without this ceiling a 6 s
+// delay in front of a 0.16 s count-up at `ui_animation 20` closes 308 ms later and answers `OffTweenClock`,
+// which is the 20x speed-up handed to a completion the run has not shown the clock is absent from. The band
+// is generous in the other direction on purpose: a coroutine polled on the fixed update clock (run 21 read one
+// in all five training cuts) closes a 0.16 s yield a frame or two late.
+const MEASUREMENT_OFF_CLOCK_MIN_RATIO: f32 = 0.5;
+
+/// What a run's measurement of one completion says about its pace, which is the only thing that moves a door
+/// between the bounded lanes and `OffTweenClock` (C58, ledger item 62). `handed` is the duration the door's own
+/// hit line printed it gave the game, `wall` is how long that completion actually took, and `clock` is
+/// `delta_clock()`: the multiplier the delta channel carried in the same config snapshot, the ui cap over the
+/// whole scale the `Time.timeScale` write layer left in the game. A completion running on the game's own clock
+/// on top of that reads a ratio higher than the clock asked for, and a higher ratio still answers
+/// `TweenMeasured`.
+///
+/// A completion that ran at the duration it was handed was measured on a channel the clock layer does not
+/// reach. A completion that ran at about the speed that clock was set to was measured on the channel it
+/// multiplies. Anything else - a completion inside one frame, a completion far longer than the duration it was
+/// handed, a clock near neutral, a wall time part of the way between the two candidates - says the door is not
+/// cleanly on one channel, and a door that is not cleanly on one channel stays bounded: the answer this
+/// function withholds is the answer a door keeps its bound on.
+pub fn measured_pace(handed: f32, wall: f32, clock: f32) -> Option<Pace> {
+    if !handed.is_finite() || !wall.is_finite() || !clock.is_finite() {
+        return None;
+    }
+
+    if handed <= 0.0 || wall < MEASUREMENT_MIN_WALL_SEC || clock < MEASUREMENT_MIN_CLOCK {
+        return None;
+    }
+
+    let ratio = handed / wall;
+
+    if ratio <= MEASUREMENT_OFF_CLOCK_MAX_RATIO {
+        if ratio < MEASUREMENT_OFF_CLOCK_MIN_RATIO {
+            return None;
+        }
+
+        return Some(Pace::OffTweenClock("measured: the completion ran at the duration the door handed it, on a channel this fork's clock levers did not reach"));
+    }
+
+    if ratio >= clock * 0.5 {
+        return Some(Pace::TweenMeasured("measured: the completion ran on the delta channel this fork's clock levers multiply"));
+    }
+
+    None
 }
 
 // A frame count never drops below one frame: the coroutines that advance animation
@@ -1279,29 +1700,125 @@ fn note_training_doors_are_inert() -> bool {
 // A clamp a run cannot see is a clamp that did not happen (AGENTS section 2). The pair ceiling shows
 // up on a door's hit line as a value handed on unchanged, which reads the same as a hook the game
 // never reached, so the config pass - once per setting change or view change, never a detour - says
-// it once for each clock setting that binds it. `PAIR_CEILING_LOGGED_UI` holds the clock value last
-// written; `normalize_ui_animation_scale` cannot produce 0.0, so its 0 sentinel means "nothing owed".
-static PAIR_CEILING_LOGGED_UI: AtomicU32 = AtomicU32::new(0);
+// it once for each clock setting that binds it, and it says it door by door: which armed doors the trim
+// reaches because the pair composes on them, which it reaches because nothing has measured otherwise, and
+// which it does not reach at all. `PAIR_CEILING_LOGGED_CLOCK` holds the pair of numbers the line states about
+// the clock, the composed delta clock and the ui cap it leaves; `normalize_ui_animation_scale` cannot produce
+// 0.0 and `delta_clock_of` returns 1.0 for a mirror it cannot read, so its 0 sentinel means "nothing owed".
+// The cap is in the key because a `Time.timeScale` write moves it while leaving the composed clock where the
+// last line said it: `ui_animation 20` over a Unity holding 1.0 and over a Unity holding 5.0 are both a 20x
+// channel, at a 20x ui clock and a 4x one, and the second is a clamp a run has to be able to see.
+static PAIR_CEILING_LOGGED_CLOCK: AtomicU64 = AtomicU64::new(0);
 
-/// Whether this config pass got the line. `ui <= 1.0` binds nothing and clears the marker, so an arm
-/// switch back to a binding clock later in the same session is a window a run can still see.
+/// The latch key for one announced clock: the composed clock and the ui cap that produced it.
+fn pair_ceiling_key(clock: f32, cap: f32) -> u64 {
+    ((clock.to_bits() as u64) << 32) | cap.to_bits() as u64
+}
+
+/// The word a lane is read under in `hachimi.log`.
+fn pace_lane(pace: Pace) -> &'static str {
+    match pace {
+        Pace::TweenMeasured(_) => PACE_LANE_TWEEN_MEASURED,
+        Pace::OffTweenClock(_) => PACE_LANE_OFF_CLOCK,
+        Pace::Unproven => PACE_LANE_UNPROVEN,
+    }
+}
+
+const PACE_LANE_TWEEN_MEASURED: &str = "tween measured";
+const PACE_LANE_UNPROVEN: &str = "unproven, bounded";
+const PACE_LANE_OFF_CLOCK: &str = "off the tween clock, whole group factor";
+
+/// The armed doors grouped by the lane their bound reaches them on, in the order `ARMED_DOOR_PACES` holds
+/// them. A door that ever appears under "off the tween clock" got there through a measurement this file armed,
+/// and the line is where a run reads that none has - the same `countup_pace` the door scales with, so the lanes
+/// a career run reads and the lanes the shipped code trims on are one fact rather than two that can drift.
+fn armed_door_lanes() -> String {
+    let mut lanes = String::new();
+
+    for lane in [PACE_LANE_TWEEN_MEASURED, PACE_LANE_UNPROVEN, PACE_LANE_OFF_CLOCK] {
+        let doors: Vec<&str> = ARMED_DOOR_PACES
+            .iter()
+            .filter(|(door, _, pace)| pace_lane(armed_door_pace(door, *pace)) == lane)
+            .map(|(door, _, _)| *door)
+            .collect();
+
+        if doors.is_empty() {
+            continue;
+        }
+
+        if !lanes.is_empty() {
+            lanes.push_str("; ");
+        }
+
+        let _ = write!(lanes, "{lane}: {}", doors.join(", "));
+    }
+
+    lanes
+}
+
+/// What the line says about this fork's share of the scale Unity is holding. The share is a fact about the
+/// clock the line is pricing, so it is read off the raise that clock carries and never written into the
+/// sentence: the neutral 1.0 means the write layer added nothing and the whole scale is what the game put
+/// there, and a raise above 1.0 is named with its own number, because a sentence that prices a 2.5x scale
+/// cannot also claim it raised nothing. The literal this replaces said so whatever the raise was, and every
+/// test for the line asked only whether it was owed, so no gate could see the sentence contradict the number
+/// beside it (C58, ledger item 62).
+fn time_scale_raise_note(raise: f32) -> String {
+    if raise > 1.0 {
+        // The same words `note_countup_completion` prints, so the ceiling line and a completion line name the
+        // share of the game's clock this fork put there with one phrase a run can grep.
+        format!("{raise}x of it the time_scale lever added")
+    } else {
+        String::from("the time_scale lever raised nothing")
+    }
+}
+
+/// Whether this config pass got the line. The delta clock - the ui cap over the whole scale the
+/// `Time.timeScale` write layer left in the game - is what binds the ceiling, so a scale the write layer
+/// produced is a fact the line is owed for even with `ui_animation` neutral, and a clock back at 1.0 clears
+/// the marker so an arm switch into a binding clock later in the same session is a window a run can still see.
 fn note_pair_ceiling(ui: f32, factors: [f32; 3]) -> bool {
-    if ui <= 1.0 || !ui.is_finite() {
-        PAIR_CEILING_LOGGED_UI.store(0, Ordering::Release);
+    let produced = time_scale_produced();
+    let raise = time_scale_raise();
+    let clock = delta_clock_of(ui, produced);
+    let cap = ui_clock_of(ui, produced);
+
+    if clock <= 1.0 || !clock.is_finite() {
+        PAIR_CEILING_LOGGED_CLOCK.store(0, Ordering::Release);
         return false;
     }
 
-    if PAIR_CEILING_LOGGED_UI.swap(ui.to_bits(), Ordering::AcqRel) == ui.to_bits() {
+    let key = pair_ceiling_key(clock, cap);
+
+    if PAIR_CEILING_LOGGED_CLOCK.swap(key, Ordering::AcqRel) == key {
         return false;
     }
+
+    let lanes = armed_door_lanes();
+    let lever_note = time_scale_raise_note(raise);
+
+    // The owed reading, stated on the line a run reads, in the tense the door is actually in: bounded while
+    // nothing has measured it, moved once the bracket has. A clamp a run cannot see is a clamp that did not
+    // happen, and a door that moved out of the clamp has to be as visible as one held in it.
+    let countup = match countup_pace() {
+        Pace::OffTweenClock(_) => "has moved off the trim on a measured completion wall time and hands its group's whole factor",
+        Pace::TweenMeasured(_) => "is held at the trim on a measured completion wall time",
+        Pace::Unproven => "is bounded until one is read",
+    };
 
     debug!(
-        "AnimationSpeed: pair ceiling {product}x on one completion: ui_animation {ui}x leaves {headroom}x for a group factor (transition {transition}, result {screens}, story {story})",
+        "AnimationSpeed: pair ceiling {product}x on one completion both layers reach: ui_animation {ui}x over the {produced}x Unity is holding in Time.timeScale from this fork's write layer ({lever_note}) is a {clock}x delta clock, so the ui clock runs {cap}x and {headroom}x is left for a group factor (transition {transition}, result {screens}, story {story}); the 20x bounds what this fork puts on the delta channel - the independentTime channel a time scale independent tween is advanced on and the story timeline's own time scale (MAX_TIME_SCALE {max_time_scale}x) are outside it, and a Time.timeScale past the ceiling is the game's own, left where the game put it; the trim reaches each armed door through its pace - {lanes}; a door leaves the trim only on a measured completion wall time, and {COUNTUP_DOOR} {countup}",
         product = MAX_TWEEN_SPEED_PRODUCT,
-        headroom = (MAX_TWEEN_SPEED_PRODUCT / ui).min(MAX_FACTOR),
+        produced = produced,
+        lever_note = lever_note,
+        clock = clock,
+        cap = cap,
+        headroom = (MAX_TWEEN_SPEED_PRODUCT / clock).max(1.0).min(MAX_FACTOR),
         transition = factors[0],
         screens = factors[1],
         story = factors[2],
+        max_time_scale = MAX_TIME_SCALE,
+        lanes = lanes,
     );
 
     true
@@ -1410,9 +1927,9 @@ fn read_static(field: *mut FieldInfo, kind: Il2CppTypeEnum) -> f64 {
 // The arithmetic one write performs, kept apart from the il2cpp call so the passes are
 // testable without a game (see the tests at the end of this file).
 //
-// This half scales by `factor(group)` alone, not by `duration_factor(group)`: it is the one place the
-// module shortens a duration without the `MAX_TWEEN_SPEED_PRODUCT` pair bound (C58, ledger item 62). It
-// is not an oversight to patch here. The table mixes `f32` durations with `i4` frame counts, and frame
+// This half scales by `factor(group)` alone, not by `duration_factor(group)`: the field table has no clock
+// layer to pair it with, and the group's own `MAX_FACTOR` cap is the ceiling these writes have (C58, ledger
+// item 62). It is not an oversight to patch here. The table mixes `f32` durations with `i4` frame counts, and frame
 // counts are polled on the frame clock the tween layer does not speed up, so a bound applied per group
 // would also cap half the entries that have no pair to bound; and one `APPLIED_FACTORS` marker per group
 // cannot record a duration factor and a frame count factor at once, which is the marker that decides
@@ -1576,9 +2093,391 @@ pub fn init(umamusume: *const Il2CppImage) {
 // Each site states the answer its getter gives when it cannot reach its own original: 0.0 for a
 // duration (no wait - a value the game itself uses and `scale_duration` already refuses to change),
 // `MIN_TIME_SCALE` for a playback scale (the game's own speed, because a 0 scale is a pause).
-def_getter_hook!(CountupModifier_getDuration, Group::Screens, scale_duration, 8, no_answer { 0.0 });
-def_getter_hook!(TextModifier_getDuration, Group::Screens, scale_duration, 9, no_answer { 0.0 });
-def_getter_hook!(TextModifier_getDelay, Group::Screens, scale_duration, 10, no_answer { 0.0 });
+//
+// The pace every armed duration door stands on, with the line that put it there. This is where item 62's
+// bound is aimed: the trim reaches a door through this table and not through the group its option sits in, so
+// it cannot reach a door whose completion the clock layer is not on, and it cannot be lifted off a door by a
+// classification nobody read. Two of these lanes trim the same way - `TweenMeasured` because the pair composes
+// there, `Unproven` because nothing has said it does not - and only `OffTweenClock` leaves the trim, with the
+// reading that put the door there carried inside the variant.
+//
+// A door belongs on `TweenMeasured` only when the lines it cites put the completion on that channel. A field
+// being present says what a class holds, not which half of it measures a completion, so where the dump names both
+// channels for the value a door hands, the door is `Unproven`. The count up door and the text modifier pair are
+// the two in that shape below, and each carries the lines that put it there.
+//
+// The wipe fades are animation this class builds as tweens: `PlayFadeFrontCanvas/5 -> void(float, float,
+// float, class<System.Action>, struct<DG.Tweening.Ease:4B>)` (`introspect.log:18317`) carries a DOTween ease
+// in the same class as the door, and the class' two coroutine paths, `SetupCrossFadeAsync/1` and
+// `PlayCrossFadeAsync/1` (18319-18320), take an `Action` and no duration at all. Nothing in this client's dump
+// hands the float `PlayFadeNowLoading` is given to a yield.
+pub const PACE_NOW_LOADING_WIPE: Pace = Pace::TweenMeasured("NowLoading::PlayFadeFrontCanvas/5 -> void(float, float, float, class<System.Action>, struct<DG.Tweening.Ease:4B>) (introspect.log:18317); NowLoading::SetupCrossFadeAsync/1 and PlayCrossFadeAsync/1 (18319-18320) are IEnumerator(Action) with no duration argument");
+
+// The result parts' fades are tweeners the class holds in a list and can skip or complete: `field
+// _fadeInSequenceList [generic<System.Collections.Generic.List<DG.Tweening.Tweener>:24B>] (24272), next to
+// `SkipFadeInTween/0` (24264) and `CompleteFadeInTween/1 -> void(bool)` (24265) - the skip path this fork's
+// auto skip option already drives.
+pub const PACE_RESULT_CONTENT_FADE: Pace = Pace::TweenMeasured("SingleModeResultContentBase::field _fadeInSequenceList [generic<System.Collections.Generic.List<DG.Tweening.Tweener>:24B>] (introspect.log:24272) with SkipFadeInTween/0 (24264) and CompleteFadeInTween/1 -> void(bool) (24265)");
+
+// The grand result's own fade door. `field _fadeInCircle [class<DG.Tweening.Tweener>]` and `field _skipDelay
+// [class<DG.Tweening.Tween>]` (26077-26078) are the tween handles in the class the door belongs to.
+pub const PACE_GRAND_RESULT_FADE: Pace = Pace::TweenMeasured("TeamStadiumGrandResultViewController::field _fadeInCircle [class<DG.Tweening.Tweener>] and _skipDelay [class<DG.Tweening.Tween>] (introspect.log:26077-26078)");
+
+// The text modifier's lengths are entries in a tween timeline: `SetTimelineData/1 -> void(class<Gallop.
+// TweenAnimationTimelineData>)` (15946) stores `field _timelineData` (15989), whose keys carry `field Duration
+// [public float]` / `field Delay [public float]` (26535-26536), and the class holds a tween handle, `field _tweener
+// [class<DG.Tweening.Tweener>]` (16000), built by `GetTweener/0 -> class<DG.Tweening.Tweener>()` (15972) with its
+// compiler closure `<GetTweener>b__52_2/0 -> void()` (15985). A tweener is advanced on the channel `tween_clocks`
+// multiplies.
+//
+// The same block names a second clock, and it is the half the first classification did not read. `LateUpdate/0`
+// (15979) and `UpdateTime/0` (15980) are this component's own per frame step, and the class holds the state such a
+// step runs on: `field _totalTime` (15991), `_internalTime` (15992), `_lastInternalTime` (15993), `_frameCount`
+// (15995), beside `field <TimeScale>k__BackingField` (16004) with `get_TimeScale/0`+`set_TimeScale/1` (15961-15962),
+// a scale the component keeps to itself. The clock the bound prices is `ui_animation_scale` over the whole
+// `Time.timeScale` Unity is holding, so a component stepping its own time is on it only if that step reads
+// `Time.deltaTime`, and no signature dump says whether it does. Nothing in the block says which of the two halves
+// advances the timeline whose length `get_Duration/0` (15952) reports, so the lane is not shown and the door is
+// `Unproven`. That is the bounded side and it hands the game the same number the claimed lane did, because
+// `duration_factor_at` prices `TweenMeasured` and `Unproven` on one branch; only the claim comes off.
+//
+// Two readings from the same block are owed a run before these doors are settled. The block dumps no duration
+// field for the class, while a setter for the number the getter door scales sits on the adapter it holds,
+// `get_TimelineAdapter/0 -> class<Gallop.TimelineDataAdapter>()` (15960) over `Gallop.TimelineDataAdapter::
+// set_Duration/1 -> void(float)` (16009) at its `field <Duration>k__BackingField` (16011), which is the read,
+// modify, write shape AGENTS section 5 refuses; absence in a truncated dump proves nothing (A8). No run has read
+// either door (installed is not called, A4).
+pub const PACE_TEXT_MODIFIER_TIMELINE: Pace = Pace::Unproven;
+
+// The training gates have no lever behind them (item 59), so which lane they sit on cannot move a number in
+// this build. `Unproven` is the honest answer and it is the bounded one: the plate interval is stored beside
+// `_groupPlaySequence [class<DG.Tweening.Sequence>]`, which is tween-shaped, while C54 and C62 both measured
+// that the interval is not the beat the cascade actually waits on. Nothing has read which.
+pub const PACE_TRAINING_GATE: Pace = Pace::Unproven;
+
+// The count-up door is the one `Group::Screens` duration door a career session has been measured reaching
+// (`CountupModifier_getDuration 0.16 -> 0.008`, run 17, in the same snapshot as `result 20`), so it is the
+// door item 62's bound exists to hold on, and its pace is `Unproven`: the dump names count-up consumers on
+// both channels, so no reading puts it on one of them.
+//
+// The line first read as proof, `Gallop.PartsFanRaidEventResult::StartCoutup/1 -> IEnumerator(class<
+// CountupModifier>)` (`introspect.log:16650`), takes a modifier and says nothing about what steps the
+// count-up, and the class that owns it builds its animations as DOTween work: `BuildPlayInAnimation/0`,
+// `BuildPlayOutAnimation/1 -> void(class<System.Action>)`, `PlayNextAnimation/0` and `CreateAnimationQueueAction/1
+// -> class<System.Action>(class<System.Action>)` (16636-16639) over `_showItemSequence [class<DG.Tweening.
+// Sequence>]` and `_animationQueue [generic<System.Collections.Generic.Queue<System.Action>:32B>]`
+// (16687-16688). `Gallop.CountupModifier` itself (15899-15941) carries no coroutine anywhere: `OnPlay/0`,
+// `OnComplete/0`, `OnUpdateText/1 -> void(float)` and `GetProgress/2 -> float(int, float)` (15918-15921) over
+// `_valueCurve [class<UnityEngine.AnimationCurve>]` and `_countupDuration`. Consumers sit on both channels:
+// `Gallop.TextCountUpVertexCommon` (15873-15893) draws a count-up through `_tween [class<DG.Tweening.Tween>]`
+// and `_timeLine [class<Gallop.TweenAnimationTimelineComponent>]`, `Gallop.PartsSingleModeResultFanRaid::
+// CountUpTextFadeInFromRight/7` (24196) feeds one into a result screen tween beside `AnimationDelayFunc/2 ->
+// void(float, Action)` (24197) and the `countUpDelay` its closures capture (24189-24192), while `Gallop.
+// PartsFanRaidFanNumCounter`'s `CountUp/2 -> IEnumerator(long, bool)` (16707) and its `MoveNext/0` (16693)
+// step one through a coroutine. No signature dump says which channel the 0.16 s this door hands lands on.
+//
+// So the door is bounded, and what it owes before it is not is a completion wall time, not a longer look at
+// the dump: `CountupModifier::OnPlay/0` and `OnComplete/0` (15918-15919) bracket one count-up on the same
+// instance this getter is called on, so that pair gives the wall time of the completion the door paced, and
+// `measured_pace(handed, wall, ui)` says which channel it ran on. That bracket is armed in the shipped tree
+// (`CountupModifier_OnPlay`, `CountupModifier_OnComplete`), it feeds `countup_pace`, and `countup_pace` is what
+// this door scales with, so a verdict a run reads moves the door and a verdict nobody has read leaves it here.
+// Until one is read the door stays bounded, and with it the 8 ms completion rather than the 0.4 ms the ledger
+// row prints as a fortieth of a frame. The wrapper is what the armed hook and the tests both call, so a door
+// put back on an untrimmed scale fails a test rather than only moving a line.
+pub const PACE_COUNTUP: Pace = Pace::Unproven;
+
+/// The door's name in `ARMED_DOOR_PACES` and in `hachimi.log`. One spelling so the census row, the lane the log
+/// prints and the lane this door scales on cannot be three different facts.
+pub const COUNTUP_DOOR: &str = "CountupModifier.get_Duration";
+
+/// Every duration door this fork arms, and the pace its bound reaches it on. `note_pair_ceiling` prints this
+/// table door by door and `every_armed_duration_door_states_the_pace_its_bound_reaches_it_on` asserts against
+/// it, so the lanes a career run reads in `hachimi.log` and the lanes the shipped code trims on are one fact
+/// rather than two that can drift apart. A door that is armed and not listed here is a door no bound reaches.
+///
+/// A row on a bounded pace is a completion measured on the game's `Time.deltaTime`, so the clock that bound
+/// prices at that door is `delta_clock()`: `ui_animation_scale` capped by what is left under
+/// `MAX_TWEEN_SPEED_PRODUCT` once the whole scale the `Time.timeScale` write layer left in the game is
+/// counted, times that scale. A row on `OffTweenClock` is a completion that clock is measured not to reach, and
+/// no lever of this module's touches it. Both are named on the line a run reads, next to the lever the 20x does
+/// not cover.
+pub const ARMED_DOOR_PACES: &[(&str, Group, Pace)] = &[
+    ("NowLoading.PlayFadeNowLoading", Group::Transition, PACE_NOW_LOADING_WIPE),
+    ("NowLoading.PlayInNowLoading", Group::Transition, PACE_NOW_LOADING_WIPE),
+    ("NowLoading.PlayOutNowLoading", Group::Transition, PACE_NOW_LOADING_WIPE),
+    ("SingleModeResultContentBase.FadeInContent", Group::Screens, PACE_RESULT_CONTENT_FADE),
+    ("SingleModeResultContentBase.FadeInContentFromRight", Group::Screens, PACE_RESULT_CONTENT_FADE),
+    ("SingleModeResultContentBase.FadeInContentFromBottom", Group::Screens, PACE_RESULT_CONTENT_FADE),
+    ("TeamStadiumGrandResultViewController.FadeInContentFromRight", Group::Screens, PACE_GRAND_RESULT_FADE),
+    ("TextModifier.get_Duration", Group::Screens, PACE_TEXT_MODIFIER_TIMELINE),
+    ("TextModifier.get_Delay", Group::Screens, PACE_TEXT_MODIFIER_TIMELINE),
+    (COUNTUP_DOOR, Group::Screens, PACE_COUNTUP),
+    ("TrainingParamChangeUI.InitializePlateList", Group::Training, PACE_TRAINING_GATE),
+    ("SingleModeMainViewHpGauge.SetProgressbarBlendTime", Group::Training, PACE_TRAINING_GATE),
+];
+
+/// What the armed count-up door hands the game: the value it received, on the pace this door currently stands
+/// on. `countup_pace` is `PACE_COUNTUP` - the bounded one - until this file's own bracket has read a completion
+/// wall time that says otherwise, so the shipped state is the bounded one and a door leaving it is a door a run
+/// measured (`note_countup_completion` is the only writer of that lane).
+pub fn countup_screen_duration(value: f32, group: Group) -> f32 {
+    let scaled = match countup_pace() {
+        Pace::OffTweenClock(proof) => measured_off_clock_duration(value, group, proof),
+        pace => scale_paced(value, group, pace),
+    };
+
+    note_countup_handed(value, scaled);
+
+    scaled
+}
+
+def_getter_hook!(CountupModifier_getDuration, Group::Screens, countup_screen_duration, 8, no_answer { 0.0 });
+
+// The reading the count-up door owes (see `PACE_COUNTUP`): one completion's wall time, read in a game run, and
+// the only thing that can move this door off the pair bound. `Gallop.CountupModifier` dumps `OnPlay/0 -> void()`
+// and `OnComplete/0 -> void()` (`introspect.log:15918-15919`) - the two ends of one count-up on the instance
+// `get_Duration` is called on - so bracketing them gives the wall time of the completion this door paced, and
+// `measured_pace` is the arithmetic that says what that wall time means. Both wrappers are observe only: each
+// hands the game its own call, the barrier's `Panicked` answer owes it too, and nothing here writes a value or
+// reaches a duration, so measuring a completion cannot shorten or lengthen the completion it measures.
+//
+// The lane starts where `PACE_COUNTUP` says it starts and moves on a verdict, never on a reading of a
+// signature. `COUNTUP_MEASURED_MIN_SAMPLES` is why one completion is not enough: the dump names count-up
+// consumers on both channels, so one count-up on one instance is a sample of one consumer, not of this door.
+const COUNTUP_LANE_UNPROVEN: u8 = 0;
+const COUNTUP_LANE_TWEEN_MEASURED: u8 = 1;
+const COUNTUP_LANE_OFF_CLOCK: u8 = 2;
+const COUNTUP_MEASURED_MIN_SAMPLES: usize = 2;
+
+// The proof a measured lane carries. `Pace` carries a `&'static str`, so the numbers a run read go on the log
+// line and these say what the numbers meant.
+const COUNTUP_MEASURED_TWEEN_PROOF: &str = "measured: the count-up bracket closed a completion at about the duration the door handed it divided by the delta clock, the ui cap over the Time.timeScale this fork's write layer left in the game";
+const COUNTUP_MEASURED_OFF_CLOCK_PROOF: &str = "measured: the count-up bracket closed a completion at about the duration the door handed it while ui_animation_scale was binding, the channel that lever does not reach";
+
+// Four open brackets: a result screen plays several count-ups at once, and a bracket that only ever holds one
+// instance closes them all as unmatched, which is the same blind spot the door it was written to prove out has.
+// Fixed-size atomics, so the bracket costs no allocation and no lock (AGENTS section 6).
+const COUNTUP_BRACKET_SLOTS: usize = 4;
+const COUNTUP_COMPLETION_DETAIL_LIMIT: usize = 4;
+const COUNTUP_COMPLETION_CHUNK: usize = 512;
+const MS_PER_SECOND: f32 = 1000.0;
+const NS_PER_SECOND: f32 = 1_000_000_000.0;
+
+static COUNTUP_LANE: AtomicU8 = AtomicU8::new(COUNTUP_LANE_UNPROVEN);
+static COUNTUP_RAW: AtomicU32 = AtomicU32::new(0);
+static COUNTUP_HANDED: AtomicU32 = AtomicU32::new(0);
+static COUNTUP_OPEN_INSTANCE: [AtomicPtr<Il2CppObject>; COUNTUP_BRACKET_SLOTS] = [const { AtomicPtr::new(std::ptr::null_mut()) }; COUNTUP_BRACKET_SLOTS];
+static COUNTUP_OPEN_AT_NS: [AtomicU64; COUNTUP_BRACKET_SLOTS] = [const { AtomicU64::new(0) }; COUNTUP_BRACKET_SLOTS];
+static COUNTUP_OPEN_HANDED: [AtomicU32; COUNTUP_BRACKET_SLOTS] = [const { AtomicU32::new(0) }; COUNTUP_BRACKET_SLOTS];
+static COUNTUP_OPEN_RAW: [AtomicU32; COUNTUP_BRACKET_SLOTS] = [const { AtomicU32::new(0) }; COUNTUP_BRACKET_SLOTS];
+static COUNTUP_PLAYS: AtomicUsize = AtomicUsize::new(0);
+static COUNTUP_COMPLETIONS: AtomicUsize = AtomicUsize::new(0);
+static COUNTUP_UNMATCHED: AtomicUsize = AtomicUsize::new(0);
+static COUNTUP_OFF_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+static COUNTUP_TWEEN_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+static COUNTUP_BRACKET_START: OnceLock<Instant> = OnceLock::new();
+
+/// The door's live pace: the dump-backed default, or the lane a run's bracket measured. This is what
+/// `countup_screen_duration` scales with and what `armed_door_lanes` prints, so the lane the log names and the
+/// lane the bound reaches are read from one place.
+pub fn countup_pace() -> Pace {
+    match COUNTUP_LANE.load(Ordering::Acquire) {
+        COUNTUP_LANE_TWEEN_MEASURED => Pace::TweenMeasured(COUNTUP_MEASURED_TWEEN_PROOF),
+        COUNTUP_LANE_OFF_CLOCK => Pace::OffTweenClock(COUNTUP_MEASURED_OFF_CLOCK_PROOF),
+        _ => PACE_COUNTUP,
+    }
+}
+
+/// The pace `ARMED_DOOR_PACES` lists for one door, read as the door actually stands on it. Only the count-up
+/// door has a lane a run can move; every other row is the dump line written at it.
+fn armed_door_pace(door: &str, listed: Pace) -> Pace {
+    if door == COUNTUP_DOOR { countup_pace() } else { listed }
+}
+
+/// What the armed door handed the game on its last call, and what the game handed it. `CountupModifier` reads
+/// one duration through this one door, so these are the numbers the door's own hit line prints and the bracket
+/// prices a completion against. Two relaxed stores on a door the runs reach on result screens, not a frame path.
+pub fn note_countup_handed(raw: f32, handed: f32) {
+    COUNTUP_RAW.store(raw.to_bits(), Ordering::Release);
+    COUNTUP_HANDED.store(handed.to_bits(), Ordering::Release);
+}
+
+/// The counts a run reads: completions closed on a bracket this door opened, and closures that found no open
+/// bracket on their instance. A bracket armed and reached is a different fact from a bracket armed and matched
+/// (A4), and the second one is what a verdict needs.
+pub fn countup_bracket_counts() -> (usize, usize) {
+    (COUNTUP_COMPLETIONS.load(Ordering::Relaxed), COUNTUP_UNMATCHED.load(Ordering::Relaxed))
+}
+
+fn countup_now_ns() -> u64 {
+    match COUNTUP_BRACKET_START.get() {
+        Some(start) => start.elapsed().as_nanos() as u64,
+        None => 0,
+    }
+}
+
+/// `CountupModifier::OnPlay/0`: open a bracket on this instance, carrying the duration the door last handed.
+/// `now_ns` is an argument so the pairing is a testable thing; the wrapper takes it from the process clock, and
+/// a bracket with no clock behind it (no install, so no `COUNTUP_BRACKET_START`) opens nothing.
+pub fn countup_play(this: *mut Il2CppObject, now_ns: u64) -> bool {
+    let handed = f32::from_bits(COUNTUP_HANDED.load(Ordering::Acquire));
+
+    // A door that never ran, or one that handed the game a zero, has no duration to price a completion with.
+    if this.is_null() || now_ns == 0 || !handed.is_finite() || handed <= 0.0 {
+        return false;
+    }
+
+    let plays = COUNTUP_PLAYS.fetch_add(1, Ordering::Relaxed);
+    let free = COUNTUP_OPEN_AT_NS.iter().position(|slot| slot.load(Ordering::Acquire) == 0);
+    let slot = free.unwrap_or(plays % COUNTUP_BRACKET_SLOTS);
+
+    COUNTUP_OPEN_INSTANCE[slot].store(this, Ordering::Release);
+    COUNTUP_OPEN_HANDED[slot].store(handed.to_bits(), Ordering::Release);
+    COUNTUP_OPEN_RAW[slot].store(f32::from_bits(COUNTUP_RAW.load(Ordering::Acquire)).to_bits(), Ordering::Release);
+    // Last, because a non zero time is what says this slot is open. Written first, a completion could read a
+    // half written bracket.
+    COUNTUP_OPEN_AT_NS[slot].store(now_ns, Ordering::Release);
+
+    true
+}
+
+/// `CountupModifier::OnComplete/0`: close the bracket on this instance and ask `measured_pace` what the pair
+/// says. `None` means the closure found no open bracket, or the reading says nothing, and both leave the door
+/// on the bounded side it started on.
+pub fn countup_complete(this: *mut Il2CppObject, now_ns: u64) -> Option<Pace> {
+    let slot = if this.is_null() {
+        None
+    } else {
+        COUNTUP_OPEN_INSTANCE
+            .iter()
+            .enumerate()
+            .find(|(_, instance)| instance.load(Ordering::Acquire) == this)
+            .map(|(index, _)| index)
+            .filter(|index| COUNTUP_OPEN_AT_NS[*index].load(Ordering::Acquire) != 0)
+    };
+
+    let Some(index) = slot else {
+        COUNTUP_UNMATCHED.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+
+    let opened_at = COUNTUP_OPEN_AT_NS[index].load(Ordering::Acquire);
+    let handed = f32::from_bits(COUNTUP_OPEN_HANDED[index].load(Ordering::Acquire));
+    let raw = f32::from_bits(COUNTUP_OPEN_RAW[index].load(Ordering::Acquire));
+
+    COUNTUP_OPEN_AT_NS[index].store(0, Ordering::Release);
+    COUNTUP_OPEN_INSTANCE[index].store(std::ptr::null_mut(), Ordering::Release);
+
+    let wall = (now_ns.saturating_sub(opened_at)) as f32 / NS_PER_SECOND;
+
+    note_countup_completion(handed, raw, wall, delta_clock())
+}
+
+/// The verdict line, and the only writer of `COUNTUP_LANE`. Every door that leaves the pair bound got there
+/// through this function, which is what makes the bound provable rather than permanent. `clock` is
+/// `delta_clock()`, the multiplier the delta channel carried - the ui cap over the whole scale the
+/// `Time.timeScale` write layer left in the game - because that is the speed a completion on that channel ran
+/// at.
+pub fn note_countup_completion(handed: f32, raw: f32, wall: f32, clock: f32) -> Option<Pace> {
+    let calls = COUNTUP_COMPLETIONS.fetch_add(1, Ordering::Relaxed) + 1;
+    let verdict = measured_pace(handed, wall, clock);
+
+    // The fork's usual first N then every N: a completion is not a frame path, but a session with a lot of
+    // count-ups is not a reason to write a line per one either.
+    if calls <= COUNTUP_COMPLETION_DETAIL_LIMIT || calls % COUNTUP_COMPLETION_CHUNK == 0 {
+        debug!(
+            "AnimationSpeed: count-up completion {calls}: the door handed {handed} s and the same instance closed {} ms later at a {}x delta clock (ui_animation {}, Time.timeScale {} from this fork's write layer, {}x of it the time_scale lever added) -> {}; {} closures with no open bracket on that instance",
+            wall * MS_PER_SECOND,
+            clock,
+            ui_animation_scale(),
+            time_scale_produced(),
+            time_scale_raise(),
+            verdict_word(verdict),
+            COUNTUP_UNMATCHED.load(Ordering::Relaxed),
+        );
+    }
+
+    if let Some(pace) = verdict {
+        countup_lane_note(pace, raw, handed, wall, clock);
+    }
+
+    verdict
+}
+
+fn verdict_word(verdict: Option<Pace>) -> &'static str {
+    match verdict {
+        // The same words `armed_door_lanes` prints, so a completion line and the lane line name one thing.
+        Some(pace) => pace_lane(pace),
+        None => "nothing, the door stays unproven and bounded",
+    }
+}
+
+fn countup_lane_note(pace: Pace, raw: f32, handed: f32, wall: f32, clock: f32) {
+    match pace {
+        Pace::OffTweenClock(_) => { COUNTUP_OFF_SAMPLES.fetch_add(1, Ordering::Relaxed); },
+        Pace::TweenMeasured(_) => { COUNTUP_TWEEN_SAMPLES.fetch_add(1, Ordering::Relaxed); },
+        Pace::Unproven => return,
+    }
+
+    let off = COUNTUP_OFF_SAMPLES.load(Ordering::Relaxed);
+    let tween = COUNTUP_TWEEN_SAMPLES.load(Ordering::Relaxed);
+
+    // A reading has to repeat before it moves a door, and a run that answers both ways has named a count-up
+    // consumer rather than this door: the dump puts count-ups on both channels. A contradicted reading leaves
+    // the door on the bounded side, which is the side that cannot re-open the 400x state item 62 was written
+    // to stop.
+    let wanted = if off >= COUNTUP_MEASURED_MIN_SAMPLES && tween == 0 {
+        COUNTUP_LANE_OFF_CLOCK
+    } else if tween >= COUNTUP_MEASURED_MIN_SAMPLES && off == 0 {
+        COUNTUP_LANE_TWEEN_MEASURED
+    } else {
+        return;
+    };
+
+    if COUNTUP_LANE.swap(wanted, Ordering::AcqRel) == wanted {
+        return;
+    }
+
+    // `countup_screen_duration` after the swap: the number the door hands from here, read through the door
+    // itself rather than asserted about it.
+    let now_hands = countup_screen_duration(raw, Group::Screens);
+    let completion = match countup_pace() {
+        Pace::OffTweenClock(_) => now_hands * MS_PER_SECOND,
+        _ => now_hands / clock * MS_PER_SECOND,
+    };
+
+    info!(
+        "AnimationSpeed: {COUNTUP_DOOR} moves to the {} lane on {off} off clock and {tween} clock completions: the door handed {handed} s and the same instance closed {} ms later at a {}x delta clock (ui_animation {}, Time.timeScale {} from this fork's write layer, {}x of it the time_scale lever added); the door hands {now_hands} s from here and that completion runs {completion} ms",
+        pace_lane(countup_pace()),
+        wall * MS_PER_SECOND,
+        clock,
+        ui_animation_scale(),
+        time_scale_produced(),
+        time_scale_raise(),
+    );
+}
+
+/// The word one bracket door deserves on the install line: resolved and armed, or there with nothing this
+/// wrapper can stand on. A bracket with one end missing measures nothing, and a run has to be able to see that
+/// rather than infer it from a completion line that never comes (A4).
+pub const fn bracket_door_state(addr: usize) -> &'static str {
+    if addr == 0 { "is there with no method this wrapper can stand on" } else { "armed" }
+}
+
+/// The lane a door moves to when a run has measured its completion off the multiplied clock: the group's whole
+/// factor, never trimmed. A door comes here through `measured_pace`, carrying the reading that put it here in
+/// `proof`, and `countup_screen_duration` is the armed door that routes through it once its bracket has read
+/// that verdict twice. `a_door_the_tween_clock_never_reaches_keeps_its_groups_whole_factor` drives the same
+/// lane through the macro the installed hooks are built by.
+pub fn measured_off_clock_duration(value: f32, group: Group, proof: &'static str) -> f32 {
+    scale_paced(value, group, Pace::OffTweenClock(proof))
+}
+
+pub fn text_modifier_timeline_duration(value: f32, group: Group) -> f32 { scale_paced(value, group, PACE_TEXT_MODIFIER_TIMELINE) }
+
+def_getter_hook!(TextModifier_getDuration, Group::Screens, text_modifier_timeline_duration, 9, no_answer { 0.0 });
+def_getter_hook!(TextModifier_getDelay, Group::Screens, text_modifier_timeline_duration, 10, no_answer { 0.0 });
 def_getter_hook!(StoryTimeline_getTimeScaleEventWipe, Group::Story, scale_time_scale, 14, no_answer { MIN_TIME_SCALE });
 def_getter_hook!(StoryTimeline_getTimeScaleAfterEndStory, Group::Story, scale_time_scale, 15, no_answer { MIN_TIME_SCALE });
 
@@ -1625,6 +2524,41 @@ def_getter_hook!(
     GetterThatScalesCleanly, Group::Screens, scale_duration, 17,
     no_answer { 0.0 },
     orig { Some(game_getter_that_answers_2_4) },
+    after_call {}
+);
+
+// The count-up door as the armed one is built: `Group::Screens`, the scale half the installed hook calls,
+// and the 0.16 s the runs read out of the client coming back from the game half. A test that only read
+// `scale_duration` would still pass if this door were put back onto a scale that steps out of the pair trim;
+// this one reads the same wrapper the armed detour calls.
+#[cfg(test)]
+#[inline(never)]
+extern "C" fn game_getter_that_answers_the_shipped_countup_length(_this: *mut Il2CppObject) -> f32 {
+    0.16
+}
+
+#[cfg(test)]
+def_getter_hook!(
+    CountupDoorOnThePairTrim, Group::Screens, countup_screen_duration, 17,
+    no_answer { 0.0 },
+    orig { Some(game_getter_that_answers_the_shipped_countup_length) },
+    after_call {}
+);
+
+// The same door on the lane a measured completion moves a door to: the same `Group::Screens`, the same 0.16 s
+// answering out of the game half, and a scale half that takes the group's whole factor because the completion
+// it paces is not measured on the clock the pair bound prices. Built by the same macro the installed hooks use,
+// so the off clock lane is a door a test can drive rather than a formula a test copies.
+#[cfg(test)]
+fn wait_paced_countup(value: f32, group: Group) -> f32 {
+    measured_off_clock_duration(value, group, "test door: this 0.16 s paces a Unity coroutine yield, the channel WaitProbe's two doors stand on (run 18 armed 7 waits for 6,150 ms and ui_animation_scale reached none of them)")
+}
+
+#[cfg(test)]
+def_getter_hook!(
+    CountupDoorOffTheTweenClock, Group::Screens, wait_paced_countup, 17,
+    no_answer { 0.0 },
+    orig { Some(game_getter_that_answers_the_shipped_countup_length) },
     after_call {}
 );
 
@@ -1691,12 +2625,14 @@ def_detour! {
 /// scale on `Group::Training`, and that group has no factor, so the value is the one the caller passed.
 /// The wrapper exists so the tests drive the same decision the armed detours make - a test that only reads
 /// `Group::Training` would still pass if a door went back to `Group::Screens`, which is the regression this
-/// item exists to keep out.
-pub fn training_gate_duration(value: f32) -> f32 { scale_duration(value, Group::Training) }
+/// item exists to keep out. Its pace is written down too (PACE_TRAINING_GATE) so the day a lever is ever put
+/// back on this door, the lane the bound reaches it on is already stated.
+pub fn training_gate_duration(value: f32) -> f32 { scale_paced(value, Group::Training, PACE_TRAINING_GATE) }
 
 // The plate cascade interval floor. This door is the only duration write this fork reaches on the
-// training screen that run 31 actually hit: 36 calls took the game's 1.0 s to 0.05 s, the census measured
-// 9 cascades closing in 338.2 ms mean, and that session ended stuck on `SingleModeSuccessionEvent`
+// training screen that run 31 actually hit: its one hit line took the game's 1.0 s to 0.05 s
+// (`run log/hachimi-run31.log` line 1184) and its census measured 9 cascades closing in 338.2 ms mean (that
+// log line 2505), and that session ended stuck on `SingleModeSuccessionEvent`
 // (view 1501) with `CutInTimelineController::UpdateSpeed()` still called every frame while every door that
 // advances a flow had frozen 3.5 s earlier. The literals that pace the cut-in around the cascade
 // (`INSPIRATION_TYPEWRITE_DELAY`, `INSPIRATION_MINI_MODEL_MOTION_WAIT`, `INSPIRATION_WIPE_TIME_SCALE`) are
@@ -1759,10 +2695,40 @@ def_detour! {
 type GrandResultFadeInFromRightFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32);
 def_detour! {
     TeamStadiumGrandResult_FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32) {
-            let scaled = scale_duration(duration, Group::Screens);
+            let scaled = scale_paced(duration, Group::Screens, PACE_GRAND_RESULT_FADE);
         hit(6, "TeamStadiumGrandResultViewController.FadeInContentFromRight", duration, scaled);
 
         get_orig_fn!(TeamStadiumGrandResult_FadeInContentFromRight, GrandResultFadeInFromRightFn)(this, content, scaled);
+    }
+}
+
+// The two ends of the count-up bracket, on the doors the client's own dump names: `Gallop.CountupModifier::
+// OnPlay/0 -> void()` and `OnComplete/0 -> void()` (`introspect.log:15918-15919`). These are the reading
+// `PACE_COUNTUP` says the count-up door owes, and they are the only doors in this tree that say what one
+// count-up's completion took in wall clock. Observe only: each wrapper hands the game its own call, the
+// barrier's `Panicked` answer owes it as well, and the bracket writes no game value, so the measurement cannot
+// change the thing it measures (the shape `WaitProbe`'s two yield doors already hold to).
+type CountupVoidFn = extern "C" fn(this: *mut Il2CppObject);
+
+def_detour! {
+    CountupModifier_OnPlay(this: *mut Il2CppObject) {
+            countup_play(this, countup_now_ns());
+
+        get_orig_fn!(CountupModifier_OnPlay, CountupVoidFn)(this);
+    }
+    bail {
+        get_orig_fn!(CountupModifier_OnPlay, CountupVoidFn)(this)
+    }
+}
+
+def_detour! {
+    CountupModifier_OnComplete(this: *mut Il2CppObject) {
+            countup_complete(this, countup_now_ns());
+
+        get_orig_fn!(CountupModifier_OnComplete, CountupVoidFn)(this);
+    }
+    bail {
+        get_orig_fn!(CountupModifier_OnComplete, CountupVoidFn)(this)
     }
 }
 
@@ -1797,6 +2763,35 @@ fn install_getters(umamusume: *const Il2CppImage) {
     install_getter!(classes, TextModifier_getDelay, TextModifier, get_Delay);
     install_getter!(classes, StoryTimeline_getTimeScaleEventWipe, StoryTimelineController, get_TimeScaleEventWipe);
     install_getter!(classes, StoryTimeline_getTimeScaleAfterEndStory, StoryTimelineController, get_TimeScaleAfterEndStory);
+
+    // The count-up bracket, armed beside the door it measures. Two `new_hook!` calls rather than one helper
+    // standing on both doors, because `new_hook!` keys `disabled_hooks` on the site's own id and one helper
+    // would give the two ends of one bracket the same key (C27): putting one door down would put both down.
+    // Both ends are needed for a reading, so the census line says which of them resolved.
+    if let Some(class) = classes.get("CountupModifier").copied() {
+        let on_play = unsafe { resolve_method(class, "OnPlay", &[], Il2CppTypeEnum_IL2CPP_TYPE_VOID) };
+        let on_complete = unsafe { resolve_method(class, "OnComplete", &[], Il2CppTypeEnum_IL2CPP_TYPE_VOID) };
+
+        if on_play != 0 || on_complete != 0 {
+            // The bracket's clock starts here, on the install path, so a completion is never timed against a
+            // base that does not exist yet.
+            let _ = COUNTUP_BRACKET_START.set(Instant::now());
+        }
+
+        if on_play != 0 {
+            new_hook!(on_play, CountupModifier_OnPlay);
+        }
+
+        if on_complete != 0 {
+            new_hook!(on_complete, CountupModifier_OnComplete);
+        }
+
+        info!(
+            "AnimationSpeed: count-up completion bracket on CountupModifier: OnPlay {}, OnComplete {}; a completion closed on the instance the door handed is what moves the door off the pair bound",
+            bracket_door_state(on_play),
+            bracket_door_state(on_complete),
+        );
+    }
 
     if let Some(class) = classes.get("TeamStadiumGrandResultViewController").copied() {
         let addr = unsafe { resolve_method(
@@ -1992,18 +2987,74 @@ mod tests {
     // runs cases on several threads, so the cases that drive it take turns and hand the state
     // back when they finish. A turn starts with every applied marker at NAN, the state a process
     // that has never written a group holds, which is also the state a build at the shipped
-    // defaults is in.
-    static PASS_TEST_LOCK: Mutex<()> = Mutex::new(());
+    // defaults is in. The turn is the one `speed_mirror_turn` hands out, because `Time.rs`'s
+    // produced time scale write moves a mirror this module's ceiling reads.
+
+    // The count-up bracket is process state too: a case that reads a verdict into the door's lane has to hand
+    // the lane, the samples behind it and the door's last handed value back, so that every case starts where a
+    // fresh launch does and the door's lane cannot leak between tests running on other threads. An open bracket
+    // is not saved: a bracket is a count-up in flight, and the state a case hands back is the state a launch
+    // that is not mid-count-up holds.
+    struct CountupBracketState {
+        lane: u8,
+        raw: u32,
+        handed: u32,
+        off_samples: usize,
+        tween_samples: usize,
+        completions: usize,
+        unmatched: usize,
+    }
+
+    fn take_countup_bracket() -> CountupBracketState {
+        let state = CountupBracketState {
+            lane: COUNTUP_LANE.load(Ordering::Relaxed),
+            raw: COUNTUP_RAW.load(Ordering::Relaxed),
+            handed: COUNTUP_HANDED.load(Ordering::Relaxed),
+            off_samples: COUNTUP_OFF_SAMPLES.load(Ordering::Relaxed),
+            tween_samples: COUNTUP_TWEEN_SAMPLES.load(Ordering::Relaxed),
+            completions: COUNTUP_COMPLETIONS.load(Ordering::Relaxed),
+            unmatched: COUNTUP_UNMATCHED.load(Ordering::Relaxed),
+        };
+
+        COUNTUP_LANE.store(COUNTUP_LANE_UNPROVEN, Ordering::Release);
+        COUNTUP_RAW.store(0, Ordering::Release);
+        COUNTUP_HANDED.store(0, Ordering::Release);
+        COUNTUP_OFF_SAMPLES.store(0, Ordering::Release);
+        COUNTUP_TWEEN_SAMPLES.store(0, Ordering::Release);
+        COUNTUP_COMPLETIONS.store(0, Ordering::Release);
+        COUNTUP_UNMATCHED.store(0, Ordering::Release);
+
+        for slot in COUNTUP_OPEN_AT_NS.iter() {
+            slot.store(0, Ordering::Release);
+        }
+
+        for instance in COUNTUP_OPEN_INSTANCE.iter() {
+            instance.store(std::ptr::null_mut(), Ordering::Release);
+        }
+
+        state
+    }
+
+    fn restore_countup_bracket(state: &CountupBracketState) {
+        COUNTUP_LANE.store(state.lane, Ordering::Release);
+        COUNTUP_RAW.store(state.raw, Ordering::Release);
+        COUNTUP_HANDED.store(state.handed, Ordering::Release);
+        COUNTUP_OFF_SAMPLES.store(state.off_samples, Ordering::Release);
+        COUNTUP_TWEEN_SAMPLES.store(state.tween_samples, Ordering::Release);
+        COUNTUP_COMPLETIONS.store(state.completions, Ordering::Release);
+        COUNTUP_UNMATCHED.store(state.unmatched, Ordering::Release);
+    }
 
     struct PassTurn {
         _turn: MutexGuard<'static, ()>,
-        saved_mirrors: [u32; 6],
+        saved_mirrors: [u32; 8],
         saved_applied: [u32; 4],
         saved_training_note: bool,
+        saved_countup: CountupBracketState,
     }
 
     fn pass_turn() -> PassTurn {
-        let turn = PASS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let turn = speed_mirror_turn();
 
         let saved_mirrors = [
             TRANSITION_FACTOR.load(Ordering::Relaxed),
@@ -2012,6 +3063,8 @@ mod tests {
             TIME_SCALE.load(Ordering::Relaxed),
             UI_ANIMATION_SCALE.load(Ordering::Relaxed),
             STORY_CHOICE_AUTO_SELECT_MULT.load(Ordering::Relaxed),
+            TIME_SCALE_RAISE.load(Ordering::Relaxed),
+            TIME_SCALE_PRODUCED.load(Ordering::Relaxed),
         ];
         let saved_applied = [
             APPLIED_FACTORS[0].load(Ordering::Relaxed),
@@ -2023,11 +3076,22 @@ mod tests {
         // owed has to start from "nothing has been said yet" like a fresh launch does.
         let saved_training_note = TRAINING_DOORS_NOTE_LOGGED.swap(false, Ordering::AcqRel);
 
+        // A turn starts where a launch that has never written `Time.timeScale` starts: the state every
+        // recorded run was in, and the one the completion ceiling has to stay inert in.
+        TIME_SCALE_RAISE.store(1.0f32.to_bits(), Ordering::Release);
+        TIME_SCALE_PRODUCED.store(1.0f32.to_bits(), Ordering::Release);
+
         for marker in APPLIED_FACTORS.iter() {
             marker.store(f32::NAN.to_bits(), Ordering::Release);
         }
 
-        PassTurn { _turn: turn, saved_mirrors, saved_applied, saved_training_note }
+        PassTurn {
+            _turn: turn,
+            saved_mirrors,
+            saved_applied,
+            saved_training_note,
+            saved_countup: take_countup_bracket(),
+        }
     }
 
     impl Drop for PassTurn {
@@ -2038,7 +3102,10 @@ mod tests {
             TIME_SCALE.store(self.saved_mirrors[3], Ordering::Release);
             UI_ANIMATION_SCALE.store(self.saved_mirrors[4], Ordering::Release);
             STORY_CHOICE_AUTO_SELECT_MULT.store(self.saved_mirrors[5], Ordering::Release);
+            TIME_SCALE_RAISE.store(self.saved_mirrors[6], Ordering::Release);
+            TIME_SCALE_PRODUCED.store(self.saved_mirrors[7], Ordering::Release);
             TRAINING_DOORS_NOTE_LOGGED.store(self.saved_training_note, Ordering::Release);
+            restore_countup_bracket(&self.saved_countup);
 
             for group in 0..self.saved_applied.len() {
                 APPLIED_FACTORS[group].store(self.saved_applied[group], Ordering::Release);
@@ -2441,22 +3508,54 @@ mod tests {
     // and 26 beside `ui_animation 20` in the same config snapshot, all three scaled on `Group::Screens`
     // when they were read. Since item 59 only the count up row is still a door in that group: the play in
     // row is the hook run 26 took out, and the plate row is a training gate that takes no group factor.
-    // The rows stay here because they are the arithmetic the pair ceiling bounds.
+    // The rows are the arithmetic the bounded lanes actually perform. A door names its pace in
+    // `ARMED_DOOR_PACES` and scales through `scale_paced`, so the count up row is the same call the installed
+    // hook makes at slot 8 through `countup_screen_duration`; what that door hands at the pair state is
+    // asserted on the wrapper itself by
+    // `the_count_up_door_a_career_session_reaches_hands_the_trim_bounded_value`.
     const C58_TRAINING_ROWS: [(&str, f32); 3] = [
         ("SingleModeMainViewTrainingCutStatus.PlayIn", 2.4),
         ("TrainingParamChangeUI.InitializePlateList", 1.0),
         ("CountupModifier.get_Duration", 0.16),
     ];
 
-    // `target_fps 200`, the setting the C58 session ran with, is a 5 ms frame. Run 17's own frame
-    // clock measured about 182 fps, 5.5 ms a frame, so the budget is not generous.
-    const FRAME_MS_AT_200_FPS: f32 = 5.0;
+    // The frame every completion assertion in this module holds. `target_fps 200` is the fastest setting any
+    // C58 run was played at: run 17's snapshot carried it and its own clock measured 88,728 frames over
+    // 499,199 ms, 5.6 ms a frame, and the session log copied to `run log/hachimi.log` line 14 carried it too.
+    // The bar is the nominal 200 fps budget, so it is stricter than the frame it is quoted from and stricter
+    // than the 16.7 ms budget run 20, run 26 and run 31 were all played at. No completion is priced against a
+    // frame looser than the one it ran on.
+    const FRAME_MS_AT_200_FPS: f32 = 1000.0 / 200.0;
 
-    /// Wall clock a completion takes on the mirrors as they stand: what the door hands the game, over
-    /// the clock the tween library is given. This is the number a coroutine resumes on, and neither
-    /// lever on its own is it.
+    // Run 31's own frame, for the claims about the run that stalled 26 min 43 s on `view 1501`. Its snapshot
+    // reads `target_fps 60` (`run log/hachimi-run31.log` line 15) and a preset arm never moves `target_fps`
+    // (`core::settings_preset`), so the `All levers` arm that log records at line 1068 left it there. Its
+    // stalled screen counted 28,662 frames over 484,037 ms (that log line 1690) and its frame totals read
+    // 16.8 ms a frame, so 16.9 ms is the frame that stall sat in. It never ran at `target_fps 200`.
+    const RUN31_FRAME_MS: f32 = 484037.0 / 28662.0;
+
+    /// Wall clock a completion takes on the mirrors as they stand: what the door hands the game, over the
+    /// channel the shipped detour actually advances a tween by. That channel is what `tween_clocks` multiplies
+    /// the `deltaTime` argument by, times the `Time.timeScale` that argument already carries into it, so it is
+    /// read off the arithmetic the game runs and not off the module's own model: a ceiling priced on the wrong
+    /// multiplier is precisely what a test that divides by that model cannot see (C58, item 62).
     fn completion_ms(raw: f32, group: Group) -> f32 {
-        scale_duration(raw, group) / ui_animation_scale() * 1000.0
+        scale_duration(raw, group) / shipped_delta_channel() * 1000.0
+    }
+
+    /// The multiplier a delta channel tween advances at, taken from `tween_clocks` itself and the mirror
+    /// `Time.rs` writes. It has to be the same number `delta_clock()` prices, and the frame sweep says so.
+    fn shipped_delta_channel() -> f32 {
+        let (tick, _) = tween_clocks(1.0, 1.0);
+
+        tick * time_scale_produced()
+    }
+
+    /// The model and the shipped channel, named together where they have to agree.
+    fn assert_clock_is_the_shipped_channel(what: &str) {
+        let channel = shipped_delta_channel();
+
+        assert!(ms_is(channel, delta_clock()), "{what}: the detour advances a delta channel tween at {channel}x while the ceiling prices {}x", delta_clock());
     }
 
     fn ms_is(value: f32, expected: f32) -> bool { (value - expected).abs() < 0.01 }
@@ -2585,6 +3684,867 @@ mod tests {
         assert_eq!(duration_factor(Group::Screens), MAX_FACTOR, "a NAN clock changed a duration factor");
     }
 
+    // C58 / ledger item 62, on the multiplier a completion actually runs at. `tween_clocks` multiplies the
+    // `deltaTime` argument, and that argument is what `DOTweenComponent.Update` computed from `Time.deltaTime`,
+    // which is `Time.timeScale` times real elapsed time. The shipped `set_timeScale` detour writes that number
+    // through `apply_time_scale` up to `MAX_TIME_SCALE`, and what it writes is the whole product: a game request
+    // of 2.0 under a lever of 5 hands the setter 5.0. Pricing the channel with the 2.5x the layer *added* left
+    // the other 2.0x of it unpriced, so the ceiling trimmed the ui lever to 8x, believed the channel was 20x, and
+    // the 0.16 s count-up it just handed on closed in 4 ms on a state the same test asserted closed in 8 ms.
+    // Stated as the runs have it: every `set_timeScale` call line in every run log this ledger holds is `1 -> 1`,
+    // so the state below is reachable in a shipped config and is not a number a run measured.
+    #[test]
+    fn the_scale_the_write_layer_leaves_in_the_game_is_the_scale_the_completion_runs_on() {
+        let _turn = pass_turn();
+
+        let frame = 1.0 / 60.0;
+        let lever = MAX_TIME_SCALE;
+        let game_value = 2.0;
+
+        // The pair the state is reached with: `result 20`, `ui_animation 20`, and a game that wrote its own 2.0
+        // fast forward while the lever was 5. The rung is built the way the write layer builds it, through the
+        // same `apply_time_scale` the shipped detour calls, so the pair recorded is a pair that writer can produce.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        let produced = apply_time_scale(game_value, lever);
+        assert!(ms_is(produced, MAX_TIME_SCALE), "the shipped writer no longer takes a 2.0 request to the ceiling: {produced}");
+        assert!(note_time_scale_write(game_value, produced), "a scale that bound the ceiling owed no line");
+
+        assert!(ms_is(time_scale_produced(), produced), "the mirror does not hold what the layer handed the setter: {}", time_scale_produced());
+        assert!(ms_is(time_scale_raise(), 2.5), "the factor this fork added is not the one the line names: {}", time_scale_raise());
+        assert!(ms_is(delta_clock(), MAX_TWEEN_SPEED_PRODUCT), "the delta clock is not the ui cap times the scale under it: {}", delta_clock());
+
+        // The state the re-aimed ceiling priced, kept as arithmetic so it cannot come back: cap the ui lever by
+        // the 2.5x the layer added and the channel it leaves behind carries 8 x 5.0.
+        let raise_cap = MAX_TWEEN_SPEED_PRODUCT / time_scale_raise();
+        let raise_channel = raise_cap * time_scale_produced();
+        let raise_ms = 0.16 / raise_channel * 1000.0;
+        let priced_ms = completion_ms(0.16, Group::Screens);
+
+        println!(
+            "C58 item 62, the scale under the clock: a ui clock trimmed by the {}x this fork added ran {}x over the {}x Unity is holding, closing the 0.16 s count-up in {raise_ms} ms, under one {FRAME_MS_AT_200_FPS} ms frame, while the same state printed a {}x ceiling; priced on the scale the channel carries, the ui clock runs {}x, the delta clock {}x, and the completion runs {priced_ms} ms",
+            time_scale_raise(), raise_channel, time_scale_produced(), MAX_TWEEN_SPEED_PRODUCT,
+            ui_clock_of(MAX_UI_ANIMATION_SCALE, produced), delta_clock(),
+        );
+
+        assert!(raise_ms < FRAME_MS_AT_200_FPS, "the state the bound exists to stop is no longer measurable here: {raise_ms} ms");
+        assert!(raise_channel > MAX_TWEEN_SPEED_PRODUCT, "the channel the old ceiling left unpriced is no longer past the ceiling it was written for: {raise_channel}x");
+
+        // The clock the DOTween detour is handed on that state: the ui lever trimmed to a quarter, because the
+        // channel it multiplies already carries 5.0.
+        let (delta, independent) = tween_clocks(frame, frame);
+        assert!(ms_is(delta, frame * (MAX_TWEEN_SPEED_PRODUCT / MAX_TIME_SCALE)), "the ui clock was not capped to what the scale under it leaves: {delta} per frame");
+        assert!(ms_is(delta * produced, frame * MAX_TWEEN_SPEED_PRODUCT), "the channel still multiplied past the pair ceiling on the number both layers sit on");
+        assert_eq!(independent, frame, "the cap reached the channel this fork does not multiply");
+
+        // The completion, and the number the ceiling speaks about, now agree.
+        assert!(ms_is(priced_ms, 160.0 / MAX_TWEEN_SPEED_PRODUCT), "the count up completion is not the pair ceiling's 8 ms: {priced_ms} ms");
+        assert!(priced_ms >= FRAME_MS_AT_200_FPS, "the count up completion lands under one {FRAME_MS_AT_200_FPS} ms frame at a config the ceiling was written to stop");
+        assert_eq!(tween_speed(Group::Screens), MAX_TWEEN_SPEED_PRODUCT, "the pair still multiplies once the scale is inside it");
+        assert_eq!(duration_factor(Group::Screens), 1.0, "a group took headroom the clock levers had already spent");
+
+        // The fork's own share of that channel: the ui clock it is allowed to run, times the factor it added.
+        assert!(ui_clock_of(MAX_UI_ANIMATION_SCALE, produced) * time_scale_raise() <= MAX_TWEEN_SPEED_PRODUCT, "this fork's two levers still multiplied past the ceiling between them");
+
+        // The armed door on that state, read through the wrapper the installed hook is built by: at the ceiling
+        // it hands the game its own 0.16 s, and on the channel this fork holds that completion is the ceiling's
+        // 8 ms rather than the fortieth of a frame run 17 printed.
+        let door: extern "C" fn(*mut Il2CppObject) -> f32 = CountupDoorOnThePairTrim;
+        let handed_by_door = door(std::ptr::null_mut());
+        assert!(ms_is(handed_by_door, 0.16), "the count-up door stopped handing the game its own 0.16 s at the pair ceiling");
+
+        let door_ms = handed_by_door / shipped_delta_channel() * 1000.0;
+        assert!(ms_is(door_ms, 160.0 / MAX_TWEEN_SPEED_PRODUCT), "the door's completion runs {door_ms} ms, not the pair ceiling's 8 ms");
+        assert!(door_ms >= FRAME_MS_AT_200_FPS, "the count-up door hands a completion that closes in {door_ms} ms, under one {FRAME_MS_AT_200_FPS} ms frame");
+        assert!(ms_is(door_ms, priced_ms), "the armed door closes in {door_ms} ms while the pair bound prices {priced_ms} ms");
+
+        // The trim is on the channel, not on a group: the same scale beside a neutral ui slider leaves the group
+        // the headroom the channel has left, because that is what the ceiling prices.
+        mirror_config(&timing_config(MAX_FACTOR, MAX_FACTOR, MAX_FACTOR, 1.0));
+        assert!(ms_is(duration_factor(Group::Screens), MAX_TWEEN_SPEED_PRODUCT / produced), "the scale the game is holding did not take headroom off the group factors");
+        assert_eq!(tween_speed(Group::Screens), MAX_TWEEN_SPEED_PRODUCT, "the scale under a neutral ui clock still left a group at the ceiling");
+    }
+
+    // The half that keeps this a bound and not a slowdown: a write that reached nothing reaches no completion,
+    // and a cap that only ever lowers a lever cannot turn the slider's 0.1 floor into a faster clock, nor trim
+    // the lever under the neutral 1.0 to hold down a scale the game reached on its own.
+    #[test]
+    fn a_time_scale_that_raised_nothing_leaves_the_clock_at_what_the_runs_measured() {
+        let _turn = pass_turn();
+
+        // A process that has never written `Time.timeScale` is in the state every recorded run was in.
+        assert!(ms_is(time_scale_produced(), 1.0), "a build that has written nothing holds a scale");
+        assert!(ms_is(time_scale_raise(), 1.0), "a build that has written nothing holds a raise");
+
+        // The two write rules, with no state involved: only a value the game wrote above 1.0 is raised (C12),
+        // and a scale the game holds past the ceiling passes through. `produced` is what the layer hands the
+        // setter and what the completion is divided by; `raise` is the share of it this fork added.
+        for (game_value, lever, produced_expected, raise_expected) in [
+            (0.0f32, MAX_TIME_SCALE, 1.0f32, 1.0f32),   // the game's pause, read as no speed-up
+            (0.5, MAX_TIME_SCALE, 1.0, 1.0),            // its slow motion, the same
+            (1.0, MAX_TIME_SCALE, 1.0, 1.0),            // every `1 -> 1 (lever x5)` line in the run logs
+            (1.0, 1.0, 1.0, 1.0),                       // the shipped default
+            (1.5, MAX_TIME_SCALE, MAX_TIME_SCALE, MAX_TIME_SCALE / 1.5),
+            (2.0, MAX_TIME_SCALE, MAX_TIME_SCALE, 2.5),
+            (4.0, MAX_TIME_SCALE, MAX_TIME_SCALE, 1.25),
+            (5.0, MAX_TIME_SCALE, MAX_TIME_SCALE, 1.0),  // the ceiling already reached: nothing added
+            (8.0, MAX_TIME_SCALE, 8.0, 1.0),             // run 19's cut at its own 8.0000, passed through
+            (2.0, 1.0, 2.0, 1.0),                        // a neutral lever on a fast forward
+            (f32::NAN, MAX_TIME_SCALE, 1.0, 1.0),
+        ] {
+            let handed = apply_time_scale(game_value, lever);
+            note_time_scale_write(game_value, handed);
+
+            assert!(ms_is(time_scale_produced(), produced_expected), "a {game_value} write with lever {lever} left {} in the game's clock, not {produced_expected}", time_scale_produced());
+            assert!(ms_is(time_scale_raise(), raise_expected), "a {game_value} write with lever {lever} added {raise_expected}x and the mirror holds {}", time_scale_raise());
+            assert!(ms_is(time_scale_raise_of(game_value, lever), raise_expected), "the pure write rule disagrees with what the mirror recorded for {game_value}/{lever}");
+            assert!(time_scale_produced() >= 1.0, "a scale at or below the neutral one became a completion multiplier");
+
+            // The fork's own share of the channel stays inside the ceiling at the widest ui lever it can be
+            // handed, whatever the game asked for underneath it.
+            assert!(ui_clock_of(MAX_UI_ANIMATION_SCALE, produced_expected) * raise_expected <= MAX_TWEEN_SPEED_PRODUCT, "this fork's share of the clock reached {}x at {game_value}/{lever}", ui_clock_of(MAX_UI_ANIMATION_SCALE, produced_expected) * raise_expected);
+        }
+
+        // The state every recorded run was in, rung by rung: Unity holding 1.0, so the clock and every headroom
+        // are what the transition gap baselines and the 20x pair were measured on.
+        for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 4.0, 5.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+            assert_eq!(ui_clock_of(ui, 1.0), ui, "a neutral scale changed the ui clock at {ui}");
+            assert_eq!(delta_clock_of(ui, 1.0), ui, "a neutral scale changed the completion clock at {ui}");
+        }
+
+        // Any pair of the ui lever and a scale the write layer can hand the game, including the shipped
+        // maximums: the channel is at most the pair ceiling, the ui half is never raised above what the config
+        // asked for, never trimmed under the neutral 1.0 by this fork, and the completion is never slower than
+        // the ui lever alone.
+        for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 4.0, 5.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+            for scale in [1.0f32, 1.25, 2.0, 2.5, MAX_TIME_SCALE] {
+                let clock = delta_clock_of(ui, scale);
+                let cap = ui_clock_of(ui, scale);
+
+                assert!(clock <= MAX_TWEEN_SPEED_PRODUCT, "{ui} under a Unity holding {scale} reached {clock}x on one completion");
+                assert!(cap <= ui, "the cap raised the ui clock above the config at {ui}/{scale}");
+                assert!(cap >= ui.min(1.0), "the cap trimmed the ui lever under where the config or the neutral clock put it at {ui}/{scale}");
+                assert!(clock >= ui, "the scale under the clock made the completion slower than the ui lever alone at {ui}/{scale}");
+            }
+        }
+
+        // A scale past the ceiling can only be there because the game asked for it, and the bound says what it
+        // will not do about that: the cap floors at the neutral 1.0, the fork's share is nothing, and the scale
+        // is priced as the speed the completion really ran at rather than hidden from the ceiling.
+        assert!(ms_is(ui_clock_of(MAX_UI_ANIMATION_SCALE, 8.0), MAX_TWEEN_SPEED_PRODUCT / 8.0), "a game 8.0 did not take its share out of the ui clock: {}", ui_clock_of(MAX_UI_ANIMATION_SCALE, 8.0));
+        assert!(ms_is(delta_clock_of(MAX_UI_ANIMATION_SCALE, 8.0), MAX_TWEEN_SPEED_PRODUCT), "a 20x ui lever under a game 8.0 is not priced as the {}x it runs at", delta_clock_of(MAX_UI_ANIMATION_SCALE, 8.0));
+        assert!(ms_is(ui_clock_of(1.0, 40.0), 1.0), "the cap trimmed the ui lever to hold down a scale the game reached on its own: {}", ui_clock_of(1.0, 40.0));
+        assert!(delta_clock_of(1.0, 40.0) >= 40.0, "a game scale past the ceiling disappeared from the clock the completion ran on");
+
+        // The slider's floor is a slow down of the clock, and the cap never touches it.
+        assert_eq!(ui_clock_of(MIN_UI_ANIMATION_SCALE, MAX_TIME_SCALE), MIN_UI_ANIMATION_SCALE, "the cap turned a slowed clock into a faster one");
+
+        // A mirror that is not a number is the neutral clock on both halves.
+        assert_eq!(ui_clock_of(f32::NAN, MAX_TIME_SCALE), 1.0, "a NAN ui mirror became a multiplier");
+        assert_eq!(delta_clock_of(f32::NAN, 1.0), 1.0, "a NAN ui mirror became a clock with a scale in it");
+        assert_eq!(ui_clock_of(20.0, f32::NAN), MAX_UI_ANIMATION_SCALE, "a NAN scale capped a clock it cannot price");
+    }
+
+    // The attribution of that frame, kept executable. 5 ms is what `target_fps 200` costs and what run 17 ran
+    // at; it is not run 31's frame. Run 31 ran at `target_fps 60` and its own census counted 28,662 frames over
+    // 484,037 ms on the screen it stalled on. A bar re-aimed at the stalled run's frame would flatter every
+    // completion this module prices, so the strict bar stays and this test names where each figure comes from.
+    #[test]
+    fn the_frame_the_completion_assertions_hold_is_the_strictest_frame_any_c58_run_measured() {
+        // 5.0 ms is the budget of a 200 fps frame, not a number read off a run.
+        assert!(ms_is(FRAME_MS_AT_200_FPS, 1000.0 / 200.0), "{FRAME_MS_AT_200_FPS} is no longer the budget of a 200 fps frame");
+
+        // Run 17's clock: 88,728 frames over 499,199 ms, 5.6 ms a frame, on `target_fps 200`. The bar is
+        // stricter than the frame it is quoted from.
+        let run17 = 499199.0 / 88728.0;
+        assert!(run17 > FRAME_MS_AT_200_FPS && run17 < 6.0, "run 17's measured frame is {run17} ms, not the 5.6 ms its clock read");
+
+        // And stricter than the 60 fps budget run 20, run 26 and run 31 were each played at, so no C58 reading
+        // is priced against a frame looser than the one it ran on.
+        assert!(FRAME_MS_AT_200_FPS < 1000.0 / 60.0, "the completion bar is looser than a 60 fps frame");
+
+        // Run 31: `target_fps 60` in its snapshot, 28,662 frames over 484,037 ms on `view 1501`. It is a 16.9 ms
+        // run, so a 5 ms claim about it names a setting that run never had.
+        assert!(RUN31_FRAME_MS > 1000.0 / 60.0, "run 31's {RUN31_FRAME_MS} ms frame is faster than the 60 fps its snapshot reads");
+        assert!(RUN31_FRAME_MS < 20.0, "run 31's frame is {RUN31_FRAME_MS} ms, not the 16.9 ms its census read");
+        assert!(FRAME_MS_AT_200_FPS < RUN31_FRAME_MS, "the completion bar fell to the stalled run's own {RUN31_FRAME_MS} ms frame");
+
+        let stricter = RUN31_FRAME_MS / FRAME_MS_AT_200_FPS;
+        assert!(stricter > 3.0, "the bar is only {stricter}x stricter than run 31's frame");
+
+        println!(
+            "C58 item 62, the frame the completion assertions hold: {FRAME_MS_AT_200_FPS} ms at `target_fps 200`, run 17's measured {run17} ms at that setting, and run 31's {RUN31_FRAME_MS} ms at `target_fps 60` ({stricter}x stricter than the frame the stall sat in)",
+        );
+    }
+
+    // The invariant the whole item exists to hold, over every config the three levers can be left in: no
+    // completion an armed door prices lands under one frame, and no door runs slower than its own option asked.
+    // The frame is the 5 ms budget of `target_fps 200`, the setting run 17 ran at, which is 3.4x stricter than
+    // the 16.9 ms frame run 31 stalled on at `target_fps 60`. The rungs are written the way the
+    // `Time.timeScale` write layer writes them - a value the game asked for and the lever on top of it, through
+    // the shipped `apply_time_scale` - because a rung the writer cannot produce prices nothing:
+    // `note_time_scale_write(1.0, 5.0)` is a pair `apply_time_scale` never hands the setter, it returns a value
+    // at or below 1.0 unchanged, which is what `1 -> 1 (lever x5)` in every run log says.
+    #[test]
+    fn no_config_of_the_three_levers_hands_a_completion_under_one_frame() {
+        let _turn = pass_turn();
+
+        // A game_value above 1.0 is in every rung set: that is the state the ceiling was written for, and the
+        // one a sweep of levers only never reaches.
+        const RUNGS: [(f32, f32); 7] = [
+            (1.0f32, 1.0f32),                 // the shipped default
+            (1.0, MAX_TIME_SCALE),            // every `1 -> 1 (lever x5)` line in the run logs
+            (2.0, 1.0),                       // the game's own fast forward, lever neutral
+            (1.25, 2.0),                      // 2.5 produced, 2.0x of it added
+            (2.0, MAX_TIME_SCALE),            // the C58 state: 5.0 produced, 2.5x of it added
+            (4.0, MAX_TIME_SCALE),            // 5.0 produced, 1.25x of it added
+            (5.0, MAX_TIME_SCALE),            // the game already at the ceiling: 5.0, nothing added
+        ];
+
+        let mut fastest = f32::MAX;
+
+        for group in [Group::Transition, Group::Screens, Group::Story] {
+            for configured in [1.0, 2.0, 5.0, MAX_FACTOR] {
+                for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 4.0, 5.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+                    for (game_value, lever) in RUNGS {
+                        mirror_config(&timing_config(configured, configured, configured, ui));
+
+                        // Recorded the way the write layer records it: the game's own request and the number the
+                        // layer handed the setter.
+                        let produced = apply_time_scale(game_value, lever);
+                        note_time_scale_write(game_value, produced);
+
+                        assert!(ms_is(time_scale_produced(), produced.max(1.0)), "a {game_value} write at lever {lever} handed the setter {produced} and the mirror holds {}", time_scale_produced());
+                        assert!(ms_is(time_scale_raise(), time_scale_raise_of(game_value, lever)), "the rung asked for the raise of a {game_value}/{lever} write and the mirror holds {}", time_scale_raise());
+
+                        // The fork's own share of the channel, and the whole channel, both inside what the
+                        // ceiling claims about them.
+                        assert!(ui_clock_of(ui, produced) * time_scale_raise() <= MAX_TWEEN_SPEED_PRODUCT, "{configured} on a {ui} clock under a {game_value}/{lever} write put {}x of this fork's own levers on one completion", ui_clock_of(ui, produced) * time_scale_raise());
+                        assert!(
+                            completion_speed(group, Pace::Unproven) <= MAX_TWEEN_SPEED_PRODUCT,
+                            "{configured} on a {ui} clock under a {produced} scale reached {}x on one completion",
+                            completion_speed(group, Pace::Unproven),
+                        );
+                        assert!(
+                            duration_factor(group) >= 1.0,
+                            "the bound turned a speed up into a slower animation than the game asked for at {configured}/{ui}/{game_value}x{lever}",
+                        );
+
+                        // The number the ceiling prices and the number the detour runs are one fact: the ui cap
+                        // `tween_clocks` applies, times the `Time.timeScale` the delta argument carries.
+                        assert_clock_is_the_shipped_channel("the rung");
+
+                        let raw = C58_TRAINING_ROWS[2].1;
+                        let completion = completion_ms(raw, group);
+                        assert!(
+                            completion >= FRAME_MS_AT_200_FPS,
+                            "the count up completion closed in {completion} ms under one {FRAME_MS_AT_200_FPS} ms frame at {configured}/{ui}/{game_value}x{lever}",
+                        );
+                        // The shape of the bound: a completion never runs faster than one `MAX_TWEEN_SPEED_PRODUCT`
+                        // of the duration the game handed in, whatever Unity is holding underneath the ui lever.
+                        assert!(
+                            completion + 0.01 >= raw / MAX_TWEEN_SPEED_PRODUCT * 1000.0,
+                            "a completion ran {completion} ms, faster than {raw} s divided by the {MAX_TWEEN_SPEED_PRODUCT}x ceiling, at {configured}/{ui}/{game_value}x{lever}",
+                        );
+                        fastest = fastest.min(completion);
+
+                        // A door the clock layer is measured not to reach is untouched by all three levers.
+                        assert_eq!(
+                            duration_factor_at(group, Pace::OffTweenClock("rung walk")), factor(group),
+                            "a door off the tween clock was trimmed at {configured}/{ui}/{game_value}x{lever}",
+                        );
+
+                        // The training gates have no factor, so the whole of what reaches them is the clock,
+                        // and the clock is bounded: the game's own 1.0 s plate beat stays a beat.
+                        assert_eq!(plate_cascade_handoff(1.0), 1.0, "a training gate moved its own interval at {configured}/{ui}/{game_value}x{lever}");
+                        assert!(
+                            completion_ms(1.0, Group::Training) >= FRAME_MS_AT_200_FPS,
+                            "a 1.0 s training beat closed in {} ms at {configured}/{ui}/{game_value}x{lever}", completion_ms(1.0, Group::Training),
+                        );
+                    }
+                }
+            }
+        }
+
+        assert!(fastest >= C58_TRAINING_ROWS[2].1 / MAX_TWEEN_SPEED_PRODUCT * 1000.0 - 0.01, "the fastest completion any rung handed is {fastest} ms");
+
+        println!(
+            "C58 item 62, the three levers together: the fastest count-up completion any rung hands is {fastest} ms ({}x, ui_animation {MAX_UI_ANIMATION_SCALE} under the {MAX_TIME_SCALE} Unity holds after a 2.0 write at lever {MAX_TIME_SCALE}), against a {FRAME_MS_AT_200_FPS} ms frame",
+            MAX_TWEEN_SPEED_PRODUCT,
+        );
+    }
+
+    // C58 / ledger item 62, on the door a career session actually reached. The bound prices a group lever
+    // against the clock layer, and the price is that a value which is only the length of a coroutine's wait is
+    // trimmed by a clock that never reaches it. Paying that price is the shipped state, because the
+    // alternative is the state the item was written to stop: a `Group::Screens` door handing out its whole
+    // `MAX_FACTOR` beside a clock already at its own ceiling. A door leaves the trim on a measurement a run
+    // reads, not on a classification taken from a signature dump.
+    #[test]
+    fn the_count_up_door_a_career_session_reaches_hands_the_trim_bounded_value() {
+        let _turn = pass_turn();
+
+        // The state run 17's snapshot recorded: `result 20`, `ui_animation 20`.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        // A completion the clock measures is already at the ceiling, so the door hands 1.0 on.
+        assert_eq!(scale_duration(1.0, Group::Screens), 1.0, "a door took a factor the clock had already spent");
+        assert!(ms_is(completion_ms(1.0, Group::Screens), 1000.0 / MAX_TWEEN_SPEED_PRODUCT), "a bounded completion no longer runs at the pair ceiling");
+
+        // The armed door, built by the same macro the installed hook uses, driven with the 0.16 s the game
+        // answers with. A test that only read `scale_duration` would still pass with this door on a scale that
+        // skips the trim; this one reads the door.
+        let door: extern "C" fn(*mut Il2CppObject) -> f32 = CountupDoorOnThePairTrim;
+        let handed = door(std::ptr::null_mut());
+
+        // What the same door hands with the trim taken off it: the row C58's table prints.
+        let unbounded = 0.16 / MAX_FACTOR;
+        let bounded_ms = handed / ui_animation_scale() * 1000.0;
+        let unbounded_ms = unbounded / ui_animation_scale() * 1000.0;
+
+        println!(
+            "C58 item 62, count-up door at result 20 / ui_animation 20: the door hands {handed} s, {bounded_ms} ms on a {}x clock. An untrimmed lever hands {unbounded} s, {unbounded_ms} ms, a fortieth of a {FRAME_MS_AT_200_FPS} ms frame.",
+            ui_animation_scale(),
+        );
+
+        assert_eq!(handed, 0.16, "the count-up door stopped handing the game its own 0.16 s at the pair ceiling");
+        assert!(ms_is(bounded_ms, 160.0 / MAX_TWEEN_SPEED_PRODUCT), "the bounded count-up no longer completes at the pair ceiling");
+        assert!(bounded_ms >= FRAME_MS_AT_200_FPS, "the bounded count-up lands under one {FRAME_MS_AT_200_FPS} ms frame");
+
+        // The state the item exists to stop, kept as arithmetic so the door cannot drift back into it without
+        // a test saying so.
+        assert!(ms_is(unbounded * 1000.0, 8.0), "the untrimmed reading no longer matches what run 17 printed");
+        assert!(unbounded_ms < FRAME_MS_AT_200_FPS, "the untrimmed pair no longer lands the count-up under a frame");
+    }
+
+    #[test]
+    fn the_count_up_completion_the_pair_bound_prices_never_lands_inside_a_frame_at_any_rung() {
+        let _turn = pass_turn();
+
+        for group in [Group::Transition, Group::Screens, Group::Story] {
+            for configured in [1.0, 2.0, 5.0, MAX_FACTOR] {
+                for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 4.0, 5.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+                    mirror_config(&timing_config(configured, configured, configured, ui));
+
+                    assert!(
+                        tween_speed(group) <= MAX_TWEEN_SPEED_PRODUCT,
+                        "{configured} against a {ui} clock reached {}x on one completion", tween_speed(group)
+                    );
+                    assert!(
+                        duration_factor(group) >= 1.0,
+                        "the bound turned a speed up into a slower animation than the game asked for at {configured}/{ui}"
+                    );
+
+                    // The invariant an unproven exception broke: the count-up length the runs read is never
+                    // handed to a completion that lands inside a frame, whatever either slider says.
+                    let completion = completion_ms(0.16, group);
+                    assert!(
+                        completion >= FRAME_MS_AT_200_FPS,
+                        "the count up completion is {completion} ms at {configured}/{ui}, under one {FRAME_MS_AT_200_FPS} ms frame"
+                    );
+
+                    if group == Group::Screens {
+                        // Read through the door. The ladder that priced only `scale_duration` kept passing
+                        // while this door handed the game its whole group factor, which is the half of item
+                        // 62 that went unread: an armed door and the bound it is supposed to sit under have
+                        // to agree at every rung.
+                        let door: extern "C" fn(*mut Il2CppObject) -> f32 = CountupDoorOnThePairTrim;
+                        let through_door = door(std::ptr::null_mut()) / ui_animation_scale() * 1000.0;
+                        assert!(
+                            ms_is(through_door, completion),
+                            "the count-up door hands a {through_door} ms completion at {configured}/{ui} while the pair bound prices {completion} ms"
+                        );
+                        assert!(
+                            through_door >= FRAME_MS_AT_200_FPS,
+                            "the count-up door hands a {through_door} ms completion at {configured}/{ui}, under one {FRAME_MS_AT_200_FPS} ms frame"
+                        );
+                    }
+
+                    // Training gates hold: a group with no lever hands the game its own value at every rung
+                    // (C58, item 59).
+                    assert_eq!(scale_duration(1.0, Group::Training), 1.0, "a training gate took a factor at {configured}/{ui}");
+                }
+            }
+        }
+
+        // At the shipped options the door is inert: the same value a build without this item handed out, and
+        // the values `scale_duration` already declines to touch stay declined.
+        mirror_config(&Config::default());
+        assert_eq!(scale_duration(0.16, Group::Screens), 0.16, "the shipped default changed a duration door");
+        assert_eq!(scale_duration(0.0, Group::Screens), 0.0, "a zero the game handed in became an invented duration");
+        assert!(scale_duration(f32::NAN, Group::Screens).is_nan(), "NAN reached a duration door");
+    }
+
+    // C58 / ledger item 62, the half the first fix of this item got backwards. A ceiling on the product of two
+    // layers is only a ceiling on a completion both layers reach. `duration_factor` priced a `Group`, and a
+    // group names which option wrote a lever: it never said what the value paces, so the trim reached a door
+    // whose completion the clock layer never advances, and there it is not a ceiling at all but a slowdown -
+    // the door hands on, the completion takes the game's own duration, and the wall clock is `MAX_FACTOR` times
+    // what the same door handed every run in this ledger. This is the door built by the shipped macro on the
+    // lane a measurement moves a door to, driven with the same 0.16 s the count-up door is reached with.
+    #[test]
+    fn a_door_the_tween_clock_never_reaches_keeps_its_groups_whole_factor() {
+        let _turn = pass_turn();
+
+        // The state run 17's snapshot recorded: `result 20`, `ui_animation 20`.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        let off_clock_door: extern "C" fn(*mut Il2CppObject) -> f32 = CountupDoorOffTheTweenClock;
+        let bounded_door: extern "C" fn(*mut Il2CppObject) -> f32 = CountupDoorOnThePairTrim;
+
+        let off_clock_handed = off_clock_door(std::ptr::null_mut());
+        let bounded_handed = bounded_door(std::ptr::null_mut());
+
+        // Wall clock of each completion. The off clock completion is not divided by the tween clock, because
+        // the tween clock is not on it: that is the whole content of the pace.
+        let off_clock_ms = off_clock_handed * 1000.0;
+        let bounded_ms = bounded_handed / ui_animation_scale() * 1000.0;
+
+        // What the trim would have cost this door: it hands 1.0 on, and with no clock under the duration the
+        // completion takes the game's own 160 ms instead of the 8 ms its option asked for.
+        let trimmed_off_clock_ms = scale_duration(0.16, Group::Screens) * 1000.0;
+
+        println!(
+            "C58 item 62, the 0.16 s at result 20 / ui_animation 20: off the tween clock the door hands {off_clock_handed} s and completes in {off_clock_ms} ms; on it the door hands {bounded_handed} s and completes in {bounded_ms} ms on a {}x clock. Trimmed as if the pair composed where it does not, the same door waits {trimmed_off_clock_ms} ms, {}x slower than the speed its own option asked for.",
+            ui_animation_scale(), trimmed_off_clock_ms / off_clock_ms,
+        );
+
+        // The lane hands the group's whole ask, and the ceiling is held by that factor alone.
+        assert!(ms_is(off_clock_handed, 0.16 / MAX_FACTOR), "a door off the tween clock did not hand its group's whole factor");
+        assert!(ms_is(off_clock_ms, 160.0 / MAX_FACTOR), "the off clock completion is not the {}x its own layer allows", MAX_FACTOR);
+
+        // And the bound it replaces is not the same door run slower: the trimmed reading is the state this
+        // half of the item exists to stop, kept as arithmetic so the door cannot drift back into it.
+        assert!(ms_is(trimmed_off_clock_ms, 160.0), "a trimmed off clock door no longer waits the game's own duration");
+        assert!(ms_is(trimmed_off_clock_ms / off_clock_ms, MAX_FACTOR), "the trim is no longer a twenty fold slowdown on a completion the clock never reaches");
+
+        // The bounded lane is unchanged by this: the pair is real on it, so the door still hands on and the
+        // completion still runs at the ceiling.
+        assert_eq!(bounded_handed, 0.16, "the bounded lane stopped holding the count-up door at the pair ceiling");
+        assert!(ms_is(bounded_ms, 160.0 / MAX_TWEEN_SPEED_PRODUCT), "the bounded completion no longer runs at the pair ceiling");
+
+        // At every rung of both sliders: a door off the clock is never trimmed by it, never slower than its
+        // own option asked, and never faster than the ceiling either lane is written to hold.
+        for group in [Group::Transition, Group::Screens, Group::Story] {
+            for configured in [1.0, 2.0, 5.0, MAX_FACTOR] {
+                for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 4.0, 5.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+                    mirror_config(&timing_config(configured, configured, configured, ui));
+
+                    let pace = Pace::OffTweenClock("rung walk");
+
+                    assert_eq!(
+                        duration_factor_at(group, pace), factor(group),
+                        "a door off the tween clock was trimmed to {}/{ui}'s headroom at {configured}/{ui}", duration_factor_at(group, pace)
+                    );
+                    assert!(
+                        completion_speed(group, pace) <= MAX_TWEEN_SPEED_PRODUCT,
+                        "the off clock lane reached {}x on a completion its own layer already bounds", completion_speed(group, pace)
+                    );
+                    assert!(
+                        completion_speed(group, pace) >= factor(group),
+                        "the bound slowed a completion the clock layer never reaches below what its option asked at {configured}/{ui}"
+                    );
+                    assert!(
+                        completion_speed(group, pace) >= 1.0,
+                        "a door off the tween clock ran slower than the game's own duration at {configured}/{ui}"
+                    );
+                    assert!(
+                        completion_speed(group, Pace::Unproven) <= MAX_TWEEN_SPEED_PRODUCT,
+                        "the bounded lane reached {}x on one completion at {configured}/{ui}", completion_speed(group, Pace::Unproven)
+                    );
+                }
+            }
+        }
+
+        // Inert at the shipped options, on both lanes.
+        mirror_config(&Config::default());
+        assert_eq!(scale_paced(0.16, Group::Screens, Pace::Unproven), 0.16, "the shipped default changed a bounded door");
+        assert_eq!(scale_paced(0.16, Group::Screens, Pace::OffTweenClock("inert")), 0.16, "the shipped default changed an off clock door");
+    }
+
+    // The bound reaches a door through the pace written at that door. The table is what `note_pair_ceiling`
+    // prints door by door in `hachimi.log`, so the lanes a career run reads and the lanes the shipped code
+    // trims on are one fact, and a door that is armed but not written down is a door no bound reaches.
+    #[test]
+    fn every_armed_duration_door_states_the_pace_its_bound_reaches_it_on() {
+        let _turn = pass_turn();
+
+        let countup = ARMED_DOOR_PACES
+            .iter()
+            .find(|(door, _, _)| *door == COUNTUP_DOOR)
+            .expect("CountupModifier.get_Duration is not in ARMED_DOOR_PACES");
+
+        // The one `Group::Screens` duration door a career session has been measured reaching starts bounded, and
+        // it starts bounded because nothing has measured it otherwise - not because a signature was read as a
+        // classification.
+        assert_eq!(countup.1, Group::Screens, "the count up door is no longer in the group result_screen_speed writes");
+        assert!(countup.2.bounds_the_pair(), "the count up door left the pair bound");
+        assert!(countup.2.evidence().is_none(), "an unproven pace carries evidence it does not have");
+
+        let lanes = armed_door_lanes();
+
+        println!("C58 item 62, the lanes hachimi.log prints at a binding clock: {lanes}");
+
+        // A door off the bound is not a forbidden place, it is an earned one, and `note_countup_completion` is
+        // the only writer of a measured lane. So the two facts a run could otherwise see drift apart - the lane
+        // the log prints and the lane the door scales on - are asserted to be one fact, in either state. A gate
+        // that asserted the off clock lane stays empty forever is what made this bound unprovable: no door could
+        // leave it without editing the gate. A gate that asserts only a measurement can fill it keeps the bound
+        // and leaves the door movable.
+        assert_eq!(
+            lanes.contains(PACE_LANE_OFF_CLOCK),
+            matches!(armed_door_pace(COUNTUP_DOOR, countup.2), Pace::OffTweenClock(_)),
+            "the lane hachimi.log prints and the lane the door scales on are different facts: {lanes}"
+        );
+
+        if matches!(countup_pace(), Pace::Unproven) {
+            assert!(
+                lanes.contains(PACE_LANE_UNPROVEN) && lanes.contains(COUNTUP_DOOR),
+                "the log does not say the count up door is bounded: {lanes}"
+            );
+            assert!(!lanes.contains(PACE_LANE_OFF_CLOCK), "a door is off the bound with no run having measured it: {lanes}");
+        }
+        else {
+            let measured_lane = pace_lane(countup_pace());
+            let unproven: Vec<&str> = ARMED_DOOR_PACES
+                .iter()
+                .filter(|(door, _, listed)| pace_lane(armed_door_pace(door, *listed)) == PACE_LANE_UNPROVEN)
+                .map(|(door, _, _)| *door)
+                .collect();
+
+            assert!(lanes.contains(measured_lane) && lanes.contains(COUNTUP_DOOR), "a door a run measured is missing from the lane line: {lanes}");
+            assert!(!unproven.contains(&COUNTUP_DOOR), "a door a run measured is still printed as unproven: {lanes}");
+        }
+
+        for (door, group, listed) in ARMED_DOOR_PACES {
+            // The door as it actually stands, not as the table was written.
+            let pace = armed_door_pace(door, *listed);
+
+            // A door only leaves the bound with the reading that puts it there, carried in the pace itself.
+            if !pace.bounds_the_pair() {
+                assert!(
+                    matches!(pace.evidence(), Some(line) if !line.is_empty()),
+                    "{door} stands off the pair bound with nothing saying why"
+                );
+            }
+
+            for configured in [1.0, MAX_FACTOR] {
+                for ui in [1.0, 2.0, MAX_UI_ANIMATION_SCALE] {
+                    mirror_config(&timing_config(configured, configured, configured, ui));
+
+                    let speed = completion_speed(*group, pace);
+
+                    assert!(
+                        speed <= MAX_TWEEN_SPEED_PRODUCT,
+                        "{door} reached {speed}x on one completion at {configured}/{ui}",
+                    );
+                    assert!(speed >= 1.0, "{door} ran slower than the game's own value at {configured}/{ui}");
+
+                    if !pace.bounds_the_pair() {
+                        assert!(ms_is(speed, factor(*group)), "{door} was trimmed by a clock that is not on its completion at {configured}/{ui}");
+                    }
+                }
+            }
+        }
+
+        // Every door the training census counts by name is in the table, so a run reading
+        // `TrainingParamChangeUI.InitializePlateList=36` can find the lane its bound reaches it on.
+        for (_, name) in TRAINING_HIT_SLOTS {
+            assert!(
+                ARMED_DOOR_PACES.iter().any(|(door, _, _)| *door == name),
+                "{name} is armed and names no pace",
+            );
+        }
+    }
+
+    // C58 / item 62, the armed `Group::Screens` doors that were once written on the measured lane. The dump
+    // citation that put them there named `introspect.log:16004`, and 16004 is `field <TimeScale>k__BackingField`,
+    // the backing field of the component's own scale; `_tweener [class<DG.Tweening.Tweener>]` is 16000. The block
+    // that was cited names both clocks, `field _tweener` (16000) built by `GetTweener/0` (15972) and the
+    // component's own step `LateUpdate/0` + `UpdateTime/0` (15979-15980) over `_totalTime`/`_internalTime`/
+    // `_lastInternalTime`/`_frameCount` (15991-15995) under its own `TimeScale` (15961-15962, 16004), and a field
+    // being present says what a class holds, not which half measures a completion. So these doors are `Unproven`:
+    // bounded, and carrying no lane claim.
+    #[test]
+    fn a_door_whose_class_block_names_both_clocks_is_bounded_without_claiming_a_lane() {
+        let _turn = pass_turn();
+
+        const TEXT_MODIFIER_DOORS: [&str; 2] = ["TextModifier.get_Duration", "TextModifier.get_Delay"];
+
+        for door in TEXT_MODIFIER_DOORS {
+            let row = ARMED_DOOR_PACES
+                .iter()
+                .find(|(name, _, _)| *name == door)
+                .expect("a TextModifier duration door is not in ARMED_DOOR_PACES");
+
+            assert_eq!(row.1, Group::Screens, "{door} is no longer in the group result_screen_speed writes");
+            assert!(row.2.bounds_the_pair(), "{door} left the pair bound on a reading nobody measured");
+            assert!(row.2.evidence().is_none(), "{door} states a lane the dump does not show");
+        }
+
+        // The bound still reaches both doors, and it reaches them with the number the claimed lane produced: no
+        // door moved out of the trim, so the 400x state item 62 exists to bound stays closed and nothing a run
+        // measured at these doors got slower.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+        assert_clock_is_the_shipped_channel("the text modifier doors at result 20 / ui_animation 20");
+
+        let claimed = Pace::TweenMeasured("the lane these doors were written on until this finding");
+
+        assert_eq!(
+            duration_factor_at(Group::Screens, PACE_TEXT_MODIFIER_TIMELINE),
+            duration_factor_at(Group::Screens, claimed),
+            "naming the lane unproven changed what the doors hand the game",
+        );
+
+        let handed = scale_paced(1.0, Group::Screens, PACE_TEXT_MODIFIER_TIMELINE);
+        let completion = completion_speed(Group::Screens, PACE_TEXT_MODIFIER_TIMELINE);
+        let ms = completion_ms(1.0, Group::Screens);
+
+        println!(
+            "C58 item 62, the text modifier doors: at result 20 / ui_animation 20 a 1 s timeline length is handed {handed} s and closes in {ms} ms, {completion}x, against the 400x the two ceilings multiply to unbounded.",
+        );
+
+        assert_eq!(handed, 1.0, "the pair stopped being held at these doors");
+        assert!(ms_is(completion, MAX_TWEEN_SPEED_PRODUCT), "these completions run {completion}x, not the {}x the ceiling they sit under states", MAX_TWEEN_SPEED_PRODUCT);
+        assert!(ms >= FRAME_MS_AT_200_FPS, "a bounded completion lands under one {FRAME_MS_AT_200_FPS} ms frame: {ms} ms");
+
+        // The line a career run reads names both doors as bounded and names no channel for them.
+        let lanes = armed_door_lanes();
+
+        let bounded: Vec<&str> = ARMED_DOOR_PACES
+            .iter()
+            .filter(|(name, _, listed)| pace_lane(armed_door_pace(name, *listed)) == PACE_LANE_UNPROVEN)
+            .map(|(name, _, _)| *name)
+            .collect();
+
+        for door in TEXT_MODIFIER_DOORS {
+            assert!(bounded.contains(&door), "hachimi.log does not say {door} is bounded: {lanes}");
+        }
+    }
+
+    // What a door needs before it leaves the bound: a completion wall time, read in a run. `CountupModifier`'s
+    // `OnPlay/0` and `OnComplete/0` bracket one count-up on the same instance its `get_Duration` is called on,
+    // and this is the arithmetic that turns that pair, the number the door's hit line printed, and the clock in
+    // the same config snapshot into a verdict.
+    #[test]
+    fn a_measured_completion_wall_time_is_what_moves_a_door_off_the_bound() {
+        // A 1 s fade handed 1 s and done in 50 ms ran through a 20x clock: composed, and the pair bound is the
+        // right instrument on it.
+        assert!(matches!(measured_pace(1.0, 0.05, 20.0), Some(Pace::TweenMeasured(_))));
+
+        // The count-up door's own numbers: handed 0.16 s, closed 160 ms later. The 20x clock made no
+        // difference to that completion, so it is on a channel the clock layer does not reach, and only a
+        // reading like this puts the door there.
+        let verdict = measured_pace(0.16, 0.16, 20.0);
+
+        println!(
+            "C58 item 62, the measurement the count up door owes: handed 0.16 s, closed in 160 ms at ui_animation 20 -> {verdict:?}. Handed 0.16 s, closed in 8 ms -> {:?}, which is a completion inside one 5 ms frame at target_fps 200 and says nothing.",
+            measured_pace(0.16, 0.008, 20.0),
+        );
+
+        assert!(matches!(verdict, Some(Pace::OffTweenClock(_))));
+
+        // A completion under the frame budget this fork measures at, a clock too near neutral to separate the
+        // two candidates, a completion in between them, and inputs that are not numbers all say nothing, and
+        // nothing is the door staying bounded.
+        assert!(measured_pace(0.16, 0.008, 20.0).is_none(), "a completion inside a frame was read as a channel");
+        assert!(measured_pace(1.0, 0.5, 2.0).is_none(), "a clock near neutral was read as a separation");
+        assert!(measured_pace(1.0, 0.2, 20.0).is_none(), "a completion part of the way was read as a clean channel");
+        assert!(measured_pace(0.0, 0.1, 20.0).is_none(), "a zero the game handed in became a classification");
+        assert!(measured_pace(f32::NAN, 0.1, 20.0).is_none());
+        assert!(measured_pace(0.16, 0.16, f32::NAN).is_none());
+
+        // A wall time the handed duration does not account for is not a clean off clock reading either. A
+        // 6 s `countUpDelay` (introspect.log:24189-24192) ahead of a 0.16 s count-up at `ui_animation 20` closes
+        // 308 ms later, and calling that "off the tween clock" would hand a 20x speed-up to a completion the
+        // run has not shown the clock is absent from.
+        assert!(measured_pace(0.16, 0.48, 20.0).is_none(), "a completion three times the handed duration was read as a channel");
+        assert!(measured_pace(0.16, 30.0, 20.0).is_none(), "a completion the door's duration does not account for was read as a channel");
+        assert!(measured_pace(0.16, 0.20, 20.0).is_some(), "a 0.16 s yield polled one frame late was not read as off the clock");
+
+        // The verdict a run reads is not a licence on its own: it names the lane, and the door moves by being
+        // written on it with that line, which is what `Pace::OffTweenClock` carries.
+        if let Some(Pace::OffTweenClock(line)) = verdict {
+            assert!(!line.is_empty(), "a door moved off the bound carrying no evidence");
+        }
+    }
+
+    // C58 / ledger item 62, the half the check log says the tree shipped no way to take: the bracket whose
+    // reading the door's pace depends on is armed in the shipped tree (`CountupModifier_OnPlay`,
+    // `CountupModifier_OnComplete`, on `introspect.log:15918-15919`), the armed door feeds it
+    // (`countup_screen_duration` calls `note_countup_handed`), `measured_pace` decides, and the decision is
+    // what the door scales with. Driven through the same three functions the two wrappers call, with the door
+    // built by the shipped macro, at the pair state run 17 ran on.
+    #[test]
+    fn the_shipped_countup_bracket_moves_the_door_off_the_bound_it_starts_on() {
+        let _turn = pass_turn();
+
+        // `result 20`, `ui_animation 20`, the snapshot run 17 printed `0.16 -> 0.008` beside.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        let door: extern "C" fn(*mut Il2CppObject) -> f32 = CountupDoorOnThePairTrim;
+
+        assert_eq!(door(std::ptr::null_mut()), 0.16, "the count-up door was not bounded before any measurement");
+        assert_eq!(countup_pace(), PACE_COUNTUP, "the door's pace did not start at the dump-backed default");
+
+        // Instances the bracket only compares. Nothing here dereferences them: the bracket is a pairing of
+        // addresses, not a read of an object.
+        static INSTANCE_ONE: u8 = 1;
+        static INSTANCE_TWO: u8 = 2;
+        let one = &INSTANCE_ONE as *const u8 as *mut Il2CppObject;
+        let two = &INSTANCE_TWO as *const u8 as *mut Il2CppObject;
+
+        // One count-up on the instance the door handed: 0.16 s handed, closed 160 ms later. The 20x clock made
+        // no difference to that completion, so it ran on a channel the clock layer does not reach.
+        note_countup_handed(0.16, 0.16);
+        assert!(countup_play(one, 1_000));
+
+        let first = countup_complete(one, 1_000 + 160_000_000);
+
+        assert!(matches!(first, Some(Pace::OffTweenClock(_))), "a completion that ran at the duration it was handed did not read as off the clock");
+        assert_eq!(countup_pace(), PACE_COUNTUP, "one completion moved a door the dump puts consumers of on both channels");
+        assert_eq!(door(std::ptr::null_mut()), 0.16, "the door left the pair bound on a single sample");
+
+        // A second completion, on another instance, saying the same thing.
+        note_countup_handed(0.16, 0.16);
+        assert!(countup_play(two, 5_000));
+        assert!(matches!(countup_complete(two, 5_000 + 160_000_000), Some(Pace::OffTweenClock(_))));
+
+        let pace = countup_pace();
+
+        assert!(matches!(pace, Pace::OffTweenClock(line) if !line.is_empty()), "a repeated reading never reached the door's pace");
+
+        // The same door, nothing else about it changed, hands its group's whole ask: the 0.008 s run 17 read out
+        // of the client, and off the multiplied clock that completion is 8 ms - the speed the option asked for,
+        // not the 160 ms the trim had it waiting.
+        let handed = door(std::ptr::null_mut());
+
+        println!(
+            "C58 item 62, the count-up door after two off clock completions: it hands {handed} s and that completion runs {} ms. Bounded, the same door handed 0.16 s and the same completion waited 160 ms, {}x slower than its own option asked.",
+            handed * MS_PER_SECOND, 160.0 / (handed * MS_PER_SECOND),
+        );
+
+        assert!(ms_is(handed, 0.16 / MAX_FACTOR), "the measured door did not hand its group's whole factor");
+        assert!(ms_is(handed * MS_PER_SECOND, 160.0 / MAX_FACTOR), "the measured completion is not the {}x the door's own layer allows", MAX_FACTOR);
+        assert!(handed * MS_PER_SECOND >= FRAME_MS_AT_200_FPS, "the measured completion lands inside one {FRAME_MS_AT_200_FPS} ms frame");
+
+        // The lane a career run reads moves with the door: one fact, read from `countup_pace`.
+        let lanes = armed_door_lanes();
+
+        println!("C58 item 62, the lanes before and after the measurement: {lanes}");
+
+        assert!(lanes.contains(PACE_LANE_OFF_CLOCK) && lanes.contains(COUNTUP_DOOR), "the lane line does not say the door moved: {lanes}");
+
+        // And with the door moved, the bound it left is still the ceiling on the completion it now runs at: the
+        // group factor alone, never more.
+        assert!(completion_speed(Group::Screens, pace) <= MAX_TWEEN_SPEED_PRODUCT, "the off clock door left the ceiling it was bounded to hold");
+        assert!(completion_speed(Group::Screens, pace) >= factor(Group::Screens), "the bound slowed the measured door below what its own option asked");
+    }
+
+    // The other side of the same instrument: what the bracket refuses to call a channel, because a door that is
+    // not cleanly on one channel is a door that keeps its bound. Every one of these is a reading the shipped
+    // bracket produces and `measured_pace` declines.
+    #[test]
+    fn a_countup_bracket_that_is_not_cleanly_on_one_channel_keeps_the_door_bounded() {
+        let _turn = pass_turn();
+
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        static INSTANCE_ONE: u8 = 1;
+        static INSTANCE_TWO: u8 = 2;
+        let one = &INSTANCE_ONE as *const u8 as *mut Il2CppObject;
+        let two = &INSTANCE_TWO as *const u8 as *mut Il2CppObject;
+
+        // No door call yet, so no duration to price a completion with, and no bracket opens. Same for a bracket
+        // with no clock behind it, which is what a build that never armed the bracket holds.
+        assert!(!countup_play(one, 1_000), "a bracket opened with no duration handed behind it");
+        assert!(countup_complete(one, 2_000).is_none());
+        note_countup_handed(0.16, 0.16);
+        assert!(!countup_play(two, 0), "a bracket timed against no clock opened");
+
+        let door: extern "C" fn(*mut Il2CppObject) -> f32 = CountupDoorOnThePairTrim;
+
+        // A completion inside one 5 ms frame at `target_fps 200`: 0.16 s handed, 8 ms of wall clock. That is the
+        // pair ceiling doing its job, and it says nothing about which channel it ran on.
+        assert!(countup_play(one, 3_000));
+        assert!(countup_complete(one, 3_000 + 8_000_000).is_none(), "a completion inside a frame was read as a channel");
+
+        // A completion three times the duration it was handed: a start delay ahead of the animation is inside
+        // that wall time and not inside the door's duration.
+        assert!(countup_play(two, 4_000));
+        assert!(countup_complete(two, 4_000 + 480_000_000).is_none(), "a completion three times the handed duration was read as a channel");
+
+        // A closure that found no open bracket on its instance: two count-ups finished out of the order the
+        // single bracket could pair, and neither became a reading.
+        assert!(countup_complete(two, 5_000).is_none(), "a closure with no open bracket behind it became a reading");
+
+        let (completions, unmatched) = countup_bracket_counts();
+
+        println!("C58 item 62, a bracket that says nothing: {completions} completions closed, {unmatched} closures with no open bracket on that instance");
+
+        assert_eq!(countup_pace(), PACE_COUNTUP, "a reading that said nothing moved the door");
+        assert_eq!(door(std::ptr::null_mut()), 0.16, "the door left the pair bound on a reading that said nothing");
+
+        // A clean off clock reading, then two clean clock readings: a run that answers both ways has named a
+        // count-up consumer, not this door, and the door stays on the side that cannot re-open 400x. The clock
+        // readings are a 1.0 s count-up length handed at `ui_animation 20` closing 50 ms later, which is that
+        // duration over the clock the fork handed the tween library.
+        note_countup_handed(0.16, 0.16);
+        assert!(countup_play(one, 10_000));
+        assert!(matches!(countup_complete(one, 10_000 + 160_000_000), Some(Pace::OffTweenClock(_))));
+
+        for at in [20_000, 30_000] {
+            note_countup_handed(1.0, 1.0);
+            assert!(countup_play(two, at));
+            assert!(
+                matches!(countup_complete(two, at + 50_000_000), Some(Pace::TweenMeasured(_))),
+                "a completion at the speed the clock was set to did not read as clock measured",
+            );
+        }
+
+        assert_eq!(countup_pace(), PACE_COUNTUP, "a door moved off the bound on readings that contradict each other");
+        assert_eq!(door(std::ptr::null_mut()), 0.16, "the door handed its whole group factor on a contradicted reading");
+
+        // Two clean clock readings with nothing contradicting them hold the door at the ceiling, on a
+        // measurement: the bound stays, and the log says it is now held on a reading rather than on an absence.
+        COUNTUP_OFF_SAMPLES.store(0, Ordering::Release);
+        COUNTUP_TWEEN_SAMPLES.store(0, Ordering::Release);
+
+        for at in [40_000, 50_000] {
+            note_countup_handed(1.0, 1.0);
+            assert!(countup_play(one, at));
+            assert!(matches!(countup_complete(one, at + 50_000_000), Some(Pace::TweenMeasured(_))));
+        }
+
+        let pace = countup_pace();
+
+        println!(
+            "C58 item 62, a clock measured verdict: the door stands on {pace:?} and hands {} s for the game's own 0.16 s",
+            door(std::ptr::null_mut()),
+        );
+
+        assert!(matches!(pace, Pace::TweenMeasured(_)), "a clock measured reading did not name the lane it names");
+        assert!(pace.bounds_the_pair(), "a clock measured verdict left the door unbounded");
+        assert_eq!(door(std::ptr::null_mut()), 0.16, "the door stopped holding the pair ceiling it was measured onto");
+    }
+
+    // The install line a run reads when one end of the bracket is not there. One door of a bracket measures
+    // nothing, and that has to be a fact the log states rather than one a reader infers from the absence of a
+    // completion line (A4).
+    #[test]
+    fn a_bracket_with_one_end_unresolved_says_so_on_its_own_line() {
+        assert_eq!(bracket_door_state(0x1_0000), "armed");
+        assert_eq!(bracket_door_state(0), "is there with no method this wrapper can stand on");
+
+        // Two doors, two hook ids: the two ends of one bracket are not armed through one shared helper, which
+        // would give them one `disabled_hooks` key and put both ends down on a key meant for one (C27).
+        assert_ne!(
+            CountupModifier_OnPlay as *const (),
+            CountupModifier_OnComplete as *const (),
+            "the two ends of the count-up bracket are one wrapper",
+        );
+    }
+
     // C58 / ledger item 59, spelled on the doors. The three rows are the ones the runs read beside
     // `result 20`: `PlayIn 2.4 -> 0.120000005` (run 17, run 26), `InitializePlateList 1 -> 0.05` (run 20,
     // run 31) and `CountupModifier_getDuration 0.16 -> 0.008` (run 17). Two of them are training gates and
@@ -2595,8 +4555,10 @@ mod tests {
         let _turn = pass_turn();
 
         // Every state that puts the result screen group at its ceiling, over the clock ladder the sliders
-        // and the preset arms cover: the `All levers` pair (`result 20 / ui_animation 20`), the state run 31
-        // stalled in (`result 20` with the clock layer free to reach 20x on its own), and the shipped clock.
+        // and the preset arms cover: the `All levers` pair (`result 20 / ui_animation 20`), which is the arm
+        // run 31 clicked at 09:43:30, five seconds before its plate door printed `1 -> 0.05`
+        // (`run log/hachimi-run31.log` lines 1068 and 1184), the pair with the clock back at neutral, and the
+        // shipped clock.
         for screens in [1.0, 2.0, 5.0, MAX_FACTOR] {
             for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 10.0, MAX_UI_ANIMATION_SCALE] {
                 mirror_config(&timing_config(MAX_FACTOR, screens, 10.0, ui));
@@ -2605,9 +4567,9 @@ mod tests {
                 assert_eq!(duration_factor(Group::Training), 1.0, "the training group took a share of the clock");
 
                 // The two armed doors, on the numbers the runs handed them: the gauge blend time (the
-                // screen run 11 spent 63,731 frames on) and the plate interval (36 calls of 1.0 in run 31,
-                // a raw peak of 1.5 in run 18). These are the calls the armed detours make, so a door put
-                // back on a lever fails here rather than somewhere in a test's own arithmetic.
+                // screen run 11 spent 63,731 frames on) and the plate interval (the 1.0 s run 31's door took
+                // to 0.05 s, a raw peak of 1.5 in run 18). These are the calls the armed detours make, so a
+                // door put back on a lever fails here rather than somewhere in a test's own arithmetic.
                 assert_eq!(training_gate_duration(1.0), 1.0, "result_screen_speed {screens} scaled the gauge blend time");
                 assert_eq!(training_gate_duration(1.5), 1.5, "the plate interval peak was shortened");
                 assert_eq!(
@@ -2664,14 +4626,15 @@ mod tests {
     }
 
     // The defect this item closes, kept as an executable statement of what the door used to hand. The
-    // numbers are the ones `hachimi.log` printed: run 31's `InitializePlateList 1 -> 0.05` over 36 calls,
-    // and run 20's `1 -> 0.05` beside `ui_animation 20`.
+    // numbers are the ones the run logs printed: run 31's `InitializePlateList 1 -> 0.05`
+    // (`run log/hachimi-run31.log` line 1184) and run 20's `1 -> 0.05` beside `ui_animation 20`.
     #[test]
     fn a_result_screen_lever_on_the_plate_door_hands_the_number_run_31_stalled_with() {
         let _turn = pass_turn();
 
-        // `result 20` on a neutral tween clock - the hand-built config this fork's own rules exist to
-        // clamp, and the shape the run 31 build was in when it reached 0.05 s per plate.
+        // `result 20` on a neutral tween clock - the hand-built config this fork's own rules exist to clamp,
+        // and the hand that put 0.05 s on this door in run 31 after the arm at its line 1068. That run's own
+        // tween clock was the arm's 20x on top of the duration, which is the completion the pair tests price.
         mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, 1.0));
 
         let on_the_result_group = scale_duration(1.0, Group::Screens);
@@ -2738,8 +4701,116 @@ mod tests {
         assert!(note_pair_ceiling(5.0, [MAX_FACTOR, MAX_FACTOR, MAX_FACTOR]));
         assert!(!note_pair_ceiling(MIN_UI_ANIMATION_SCALE, [MAX_FACTOR, MAX_FACTOR, MAX_FACTOR]));
 
+        // C58 / ledger item 62: the same composed clock under a different `Time.timeScale` is a different
+        // sentence. `ui_animation 20` over a Unity holding 1.0 and over the 5.0 a lever of 5 wrote from a 2.0
+        // request are both a 20x channel, at a 20x ui clock and a 4x one, and the 4x is a clamp a run has to see.
+        UI_ANIMATION_SCALE.store(MAX_UI_ANIMATION_SCALE.to_bits(), Ordering::Release);
+        assert!(note_time_scale_write(2.0, apply_time_scale(2.0, MAX_TIME_SCALE)), "the write that moved the ui cap owed no line");
+        assert!(!note_pair_ceiling(MAX_UI_ANIMATION_SCALE, [1.0, MAX_FACTOR, 1.0]), "the config pass repeated a line the scale already said");
+        TIME_SCALE_PRODUCED.store(1.0f32.to_bits(), Ordering::Release);
+
         // A mirror this module never stores still owes no line.
         assert!(!note_pair_ceiling(f32::NAN, [1.0, 1.0, 1.0]));
+    }
+
+    // The other half of the clock the ceiling prices: a scale this fork's write layer left in `Time.timeScale`
+    // trims every bounded door even with `ui_animation` neutral, and a trim a run cannot see is a trim that did
+    // not happen (AGENTS section 2). The line is owed for it, and the line names the scale and the share of it
+    // the lever added.
+    #[test]
+    fn the_pair_ceiling_line_is_owed_for_a_time_scale_raise_at_a_neutral_ui_clock() {
+        let _turn = pass_turn();
+
+        UI_ANIMATION_SCALE.store(1.0f32.to_bits(), Ordering::Release);
+
+        // Unity holding 1.0 and the ui slider neutral: no clamp is in force, so nothing is owed.
+        assert!(!note_pair_ceiling(1.0, [MAX_FACTOR, MAX_FACTOR, MAX_FACTOR]), "a neutral pair was announced as bound");
+        assert_eq!(delta_clock(), 1.0, "a neutral pair is not the neutral clock");
+
+        // A scale the write layer left in the game trims every bounded door even with `ui_animation` neutral:
+        // the headroom drops to 8x of 20. The rung is one the shipped writer produces - a 1.25 request under a
+        // 2.0 lever - not a pair `apply_time_scale` refuses to hand the setter.
+        let rung = apply_time_scale(1.25, 2.0);
+        assert!(ms_is(rung, 2.5), "the rung this case is built on is no longer a produced 2.5: {rung}");
+        assert!(note_time_scale_write(1.25, rung), "a scale that trimmed every group factor owed no line");
+        assert_eq!(delta_clock(), 2.5, "a 2.5x scale under a neutral ui clock is not the clock the ceiling prices");
+        assert!(ms_is(MAX_TWEEN_SPEED_PRODUCT / delta_clock(), 8.0), "a bounded door keeps {}x of headroom at that scale", MAX_TWEEN_SPEED_PRODUCT / delta_clock());
+        assert!(!note_pair_ceiling(1.0, [MAX_FACTOR, MAX_FACTOR, MAX_FACTOR]), "the same clock printed on every config pass");
+
+        // The scale does not have to arrive on a config pass to be said: the write that produced it is the moment
+        // the clock changes, and the same latch answers for both callers.
+        assert!(!note_time_scale_write(1.0, 1.0), "a write back to the neutral scale owed a line");
+        assert!(!note_pair_ceiling(1.0, [1.0, 1.0, 1.0]), "a clock back at neutral still owed a line");
+        assert!(note_time_scale_write(4.0, apply_time_scale(4.0, MAX_TIME_SCALE)), "a scale that changed the clock owed no line at the write that produced it");
+        assert!(!note_time_scale_write(4.0, apply_time_scale(4.0, MAX_TIME_SCALE)), "the same clock printed on every game write");
+        assert!(!note_pair_ceiling(1.0, [MAX_FACTOR, MAX_FACTOR, MAX_FACTOR]), "the config pass repeated a line the produced write already said");
+
+        // A scale that comes back after going away is a new fact, and a run has to be able to see it.
+        assert!(!note_time_scale_write(1.0, 1.0), "a produced write that raised nothing owed a line");
+        assert!(note_time_scale_write(2.0, apply_time_scale(2.0, MAX_TIME_SCALE)), "a scale that came back is invisible in the log");
+    }
+
+    // The line is the closure evidence item 62 owes (AGENTS section 2), so the sentence a run reads is checked,
+    // not just whether one was owed. Both states the `Time.timeScale` write layer has are read out of the log:
+    // the rung the review caught, this fork's writer putting 2.5x into the game (a 1.25 request under a 2.0
+    // lever) under the ui slider at its ceiling, and the state where the game holds a scale past `MAX_TIME_SCALE`
+    // and this layer added nothing to it, which is run 19's 8.0000 cut clock read through the neutral lever fast
+    // exit. The parenthetical is computed off the raise, so it is one sentence in the first state and the other
+    // in the second, and putting the second's sentence on the first is the contradiction this case exists to
+    // catch.
+    #[test]
+    fn the_pair_ceiling_line_names_the_raise_it_prices() {
+        let _turn = pass_turn();
+
+        // The turn starts at the neutral clock and a neutral clock clears the latch, so this case states its own
+        // two sentences whatever an earlier case left in the marker.
+        UI_ANIMATION_SCALE.store(1.0f32.to_bits(), Ordering::Release);
+        assert!(!note_pair_ceiling(1.0, [1.0, 1.0, 1.0]), "the neutral clock owed a line");
+
+        capture_log();
+
+        // The note is computed from the raise the clock carries, because no printed sentence can hold a fixed
+        // claim about it.
+        assert_eq!(time_scale_raise_note(2.0), "2x of it the time_scale lever added");
+        assert_eq!(time_scale_raise_note(1.0), "the time_scale lever raised nothing");
+
+        // The rung: 1.25 the game asked for, 2.5 what the write layer handed the setter, so 2x of the scale in
+        // Unity is this fork's. Over a 20x ui slider that is a 20x channel at an 8x ui clock with 1x left for a
+        // group factor.
+        UI_ANIMATION_SCALE.store(MAX_UI_ANIMATION_SCALE.to_bits(), Ordering::Release);
+
+        let rung = apply_time_scale(1.25, 2.0);
+        assert!(ms_is(rung, 2.5), "the rung this case is built on is no longer a produced 2.5: {rung}");
+        assert!(note_time_scale_write(1.25, rung), "the write that produced a raise owed no line");
+
+        let lines = captured_lines("AnimationSpeed: pair ceiling");
+        assert_eq!(lines.len(), 1, "the clock the produced write left printed {} lines", lines.len());
+
+        let produced_line = &lines[0];
+        assert!(
+            produced_line.contains("AnimationSpeed: pair ceiling 20x on one completion both layers reach: ui_animation 20x over the 2.5x Unity is holding in Time.timeScale from this fork's write layer (2x of it the time_scale lever added)"),
+            "the line does not name the share the time_scale lever added: {produced_line}"
+        );
+        assert!(
+            produced_line.contains("is a 20x delta clock, so the ui clock runs 8x and 1x is left for a group factor"),
+            "the line does not price the channel the raise sits in: {produced_line}"
+        );
+        assert!(!produced_line.contains("raised nothing"), "the line calls a raise it produced a nothing: {produced_line}");
+
+        // The pass-through: the game holding 8.0, the lever neutral, so the whole 8.0 is the game's and this
+        // layer added none of it. The neutral sentence belongs here and nowhere else.
+        UI_ANIMATION_SCALE.store(1.0f32.to_bits(), Ordering::Release);
+        assert!(note_time_scale_write(8.0, 8.0), "a scale the game reached past the ceiling owed no line");
+
+        let lines = captured_lines("AnimationSpeed: pair ceiling");
+        assert_eq!(lines.len(), 2, "the clock the pass-through left printed {} lines", lines.len());
+
+        let passed_line = &lines[1];
+        assert!(
+            passed_line.contains("ui_animation 1x over the 8x Unity is holding in Time.timeScale from this fork's write layer (the time_scale lever raised nothing) is a 8x delta clock, so the ui clock runs 1x and 2.5x is left for a group factor"),
+            "the line does not say the lever raised nothing: {passed_line}"
+        );
+        assert!(!passed_line.contains("of it the time_scale lever added"), "the line named a share the lever did not add: {passed_line}");
     }
 
     // C58 / ledger item 59. The training doors keep their hooks after losing their lever, and a door that

@@ -116,6 +116,11 @@ def_detour! {
 
 const SCREENS: AnimationSpeed::Group = AnimationSpeed::Group::Screens;
 
+// The pace these fade doors stand on, taken from `AnimationSpeed` so the door and the table that
+// `note_pair_ceiling` prints name the same lane: the fades these three hand are tweeners the class holds in
+// `_fadeInSequenceList`, on the clock layer `ui_animation_scale` multiplies (C58, ledger item 62).
+const CONTENT_FADE_PACE: AnimationSpeed::Pace = AnimationSpeed::PACE_RESULT_CONTENT_FADE;
+
 // The result parts hand their hardcoded FADE_DURATION / FADE_OFFSET / COUNTUP_DURATION
 // to these three as float arguments. Same reason as NowLoading above: the constants
 // themselves are `const`, so the argument is where they can still be reached.
@@ -125,12 +130,12 @@ def_detour! {
             log_duration("FadeInContent", duration);
 
         get_orig_fn!(FadeInContent, FadeInContentFn)(
-            this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+            this, content, AnimationSpeed::scale_paced(duration, SCREENS, CONTENT_FADE_PACE), offset, onComplete
         );
     }
     bail {
                 get_orig_fn!(FadeInContent, FadeInContentFn)(
-                this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+                this, content, AnimationSpeed::scale_paced(duration, SCREENS, CONTENT_FADE_PACE), offset, onComplete
             )
     }
 }
@@ -141,12 +146,12 @@ def_detour! {
             log_duration("FadeInContentFromRight", duration);
 
         get_orig_fn!(FadeInContentFromRight, FadeInContentFromRightFn)(
-            this, content, AnimationSpeed::scale_duration(duration, SCREENS), onComplete
+            this, content, AnimationSpeed::scale_paced(duration, SCREENS, CONTENT_FADE_PACE), onComplete
         );
     }
     bail {
                 get_orig_fn!(FadeInContentFromRight, FadeInContentFromRightFn)(
-                this, content, AnimationSpeed::scale_duration(duration, SCREENS), onComplete
+                this, content, AnimationSpeed::scale_paced(duration, SCREENS, CONTENT_FADE_PACE), onComplete
             )
     }
 }
@@ -157,12 +162,12 @@ def_detour! {
             log_duration("FadeInContentFromBottom", duration);
 
         get_orig_fn!(FadeInContentFromBottom, FadeInContentFromBottomFn)(
-            this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+            this, content, AnimationSpeed::scale_paced(duration, SCREENS, CONTENT_FADE_PACE), offset, onComplete
         );
     }
     bail {
                 get_orig_fn!(FadeInContentFromBottom, FadeInContentFromBottomFn)(
-                this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+                this, content, AnimationSpeed::scale_paced(duration, SCREENS, CONTENT_FADE_PACE), offset, onComplete
             )
     }
 }

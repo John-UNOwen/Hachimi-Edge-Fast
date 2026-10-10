@@ -71,7 +71,12 @@ def_detour! {
 // PlayFadeNowLoading takes the alpha endpoints first: the calls logged by this client are
 // always (0, 1, dur) for the wipe in and (1, 0, dur) for the wipe out, so only the third
 // argument is a duration. Scaling the endpoints made the fade target 0.05 at factor 20.
+//
+// The pace is the one `AnimationSpeed::PACE_NOW_LOADING_WIPE` states and `ARMED_DOOR_PACES` prints in
+// `hachimi.log`: these fades are tween work the clock layer multiplies, so the pair bound reaches them (C58,
+// ledger item 62). A door names its pace rather than taking whatever the group default happens to be.
 const TRANSITION: AnimationSpeed::Group = AnimationSpeed::Group::Transition;
+const WIPE_PACE: AnimationSpeed::Pace = AnimationSpeed::PACE_NOW_LOADING_WIPE;
 
 type PlayFadeNowLoadingFn = extern "C" fn(this: *mut Il2CppObject, first: f32, second: f32, third: f32, onComplete: *mut Il2CppObject);
 def_detour! {
@@ -84,7 +89,7 @@ def_detour! {
             this,
             first,
             second,
-            AnimationSpeed::scale_duration(third, TRANSITION),
+            AnimationSpeed::scale_paced(third, TRANSITION, WIPE_PACE),
             onComplete
         );
     }
@@ -97,7 +102,7 @@ def_detour! {
             debug!("NowLoading::PlayInNowLoading({})", duration);
         }
 
-        get_orig_fn!(PlayInNowLoading, PlayInNowLoadingFn)(this, AnimationSpeed::scale_duration(duration, TRANSITION), onComplete);
+        get_orig_fn!(PlayInNowLoading, PlayInNowLoadingFn)(this, AnimationSpeed::scale_paced(duration, TRANSITION, WIPE_PACE), onComplete);
     }
 }
 
@@ -108,7 +113,7 @@ def_detour! {
             debug!("NowLoading::PlayOutNowLoading({})", duration);
         }
 
-        get_orig_fn!(PlayOutNowLoading, PlayOutNowLoadingFn)(this, AnimationSpeed::scale_duration(duration, TRANSITION), onComplete);
+        get_orig_fn!(PlayOutNowLoading, PlayOutNowLoadingFn)(this, AnimationSpeed::scale_paced(duration, TRANSITION, WIPE_PACE), onComplete);
     }
 }
 

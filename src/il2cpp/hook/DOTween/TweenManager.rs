@@ -16,10 +16,14 @@ def_detour! {
         // channel DOTween keeps outside every time lever so UI keeps animating while the game is
         // paused. Scaling it - this line's other half, C5 - took wall clock out of a tween the game
         // deliberately took out of the game's own clock: 1 s of real time UI animation in 50 ms at
-        // `MAX_UI_ANIMATION_SCALE`, pause included. The arithmetic the hook performs lives in
-        // `AnimationSpeed::tween_clocks`, which the `cargo test --lib` case
-        // `the_tween_clock_layer_scales_the_delta_channel_and_not_the_independent_one` drives; the
-        // wrapper itself cannot run in a test, because `get_orig_fn!` is 0 outside `init` (C1).
+        // `MAX_UI_ANIMATION_SCALE`, pause included. The first argument is the game's `Time.deltaTime`, so it
+        // already carries `Time.timeScale`, which this fork's write layer fills: `AnimationSpeed::ui_clock_of`
+        // caps this multiply by what `MAX_TWEEN_SPEED_PRODUCT` leaves once the whole scale that write left in
+        // the game is counted, so a 20x lever under a Unity holding 5.0 multiplies this argument by 4 here and
+        // the completion the two add up to is 20x, not 100x (C58, ledger item 62). The arithmetic the hook
+        // performs lives in `AnimationSpeed::tween_clocks`, which the `cargo test --lib` case
+        // `the_tween_clock_layer_scales_the_delta_channel_and_not_the_independent_one` drives; the wrapper
+        // itself cannot run in a test, because `get_orig_fn!` is 0 outside `init` (C1).
         let (delta_time, independent_time) = AnimationSpeed::tween_clocks(delta_time, independent_time);
 
         get_orig_fn!(Update, UpdateFn)(update_type, delta_time, independent_time);
