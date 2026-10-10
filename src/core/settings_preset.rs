@@ -20,15 +20,112 @@
 //! `normalize_time_scale` and `normalize_ui_animation_scale` on the way into the game, which is the
 //! same road a slider value takes, and is what keeps C5 from coming back through a hand edited
 //! `config.json`.
+//!
+//! A switch also opens a measurement window. Run 29 settled that a game session cannot be held
+//! constant, because which cut the game plays and how long the server takes are random, so the fork
+//! stops trying to compare whole sessions and instead records which arm every sample ran under: the
+//! launch names window 1, every switch opens the next one, and a hook reads nothing but an atomic
+//! number. A report can then say what one arm did to the cuts it actually saw, split by what kind of
+//! cut each one was.
 
+use std::sync::atomic::{self, AtomicUsize};
+use std::sync::Mutex;
+
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::il2cpp::hook::umamusume::AnimationSpeed;
-use super::hachimi::Config;
+use super::hachimi::{recover_lock, Config};
 
 pub const PRESET_NEUTRAL: &str = "Neutral";
 pub const PRESET_ALL_LEVERS: &str = "All levers";
 pub const PRESET_HACHIMI_FAST: &str = "Hachimi fast";
+
+/// How many arm windows one session may name. A player clicking the picker back and forth cannot
+/// grow a table without bound: past the last named window every later switch folds into one window
+/// reserved for it.
+pub const WINDOW_NAME_LIMIT: usize = 24;
+
+/// The window every switch past `WINDOW_NAME_LIMIT - 2` lands in. It is reserved from the first
+/// switch so a window that already has a name is never relabelled by a later click.
+pub const WINDOW_FOLDED_NAME: &str = "arms past the named limit";
+
+/// The name a sample gets when it was taken before the run had named the arm it started on.
+pub const WINDOW_ANON_NAME: &str = "arm unnamed";
+
+/// The window book as plain data, so the folding rule is testable without a game, a config or a
+/// shared static. The live copy below keeps the window number in an atomic, which is the only thing
+/// a hook is allowed to read.
+#[derive(Default)]
+pub struct ArmWindows {
+    epoch: usize,
+    names: Vec<String>,
+}
+
+impl ArmWindows {
+    /// Opens the window for the arm the game is now on and returns its number.
+    pub fn open(&mut self, name: &str) -> usize {
+        let last_named = WINDOW_NAME_LIMIT - 2;
+
+        if self.epoch < last_named {
+            self.epoch += 1;
+
+            while self.names.len() <= self.epoch {
+                self.names.push(String::new());
+            }
+
+            self.names[self.epoch] = name.to_string();
+        }
+        else {
+            self.epoch = WINDOW_NAME_LIMIT - 1;
+        }
+
+        self.epoch
+    }
+
+    pub fn epoch(&self) -> usize {
+        self.epoch
+    }
+
+    pub fn name(&self, epoch: usize) -> &str {
+        if epoch == 0 {
+            return WINDOW_ANON_NAME;
+        }
+
+        if epoch == WINDOW_NAME_LIMIT - 1 {
+            return WINDOW_FOLDED_NAME;
+        }
+
+        match self.names.get(epoch) {
+            Some(name) if !name.is_empty() => name.as_str(),
+            _ => WINDOW_ANON_NAME,
+        }
+    }
+}
+
+static ARM_WINDOWS: Lazy<Mutex<ArmWindows>> = Lazy::new(|| Mutex::new(ArmWindows::default()));
+static ARM_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+/// Opens a window for the arm the game is now running on: once when a run names the arm it launched
+/// with, and once every time the picker changes it.
+pub fn open_arm_window(name: &str) {
+    let mut book = recover_lock(&ARM_WINDOWS);
+    let epoch = book.open(name);
+
+    drop(book);
+    ARM_WINDOW.store(epoch, atomic::Ordering::Relaxed);
+}
+
+/// The window a measurement belongs to. This is the only arm call a hook may make: a relaxed load,
+/// no lock and no allocation.
+pub fn arm_window() -> usize {
+    ARM_WINDOW.load(atomic::Ordering::Relaxed)
+}
+
+/// Resolves a window number to its name. Cold path only: a report line, never a door.
+pub fn arm_window_name(epoch: usize) -> String {
+    recover_lock(&ARM_WINDOWS).name(epoch).to_string()
+}
 
 /// The whole `Config` under a name. `settings_presets` is cleared in the snapshot this struct holds,
 /// so saving a preset cannot nest a copy of the preset list inside itself.
@@ -184,12 +281,14 @@ impl SettingsPreset {
     }
 
     /// Replace the live config with the stored one, keeping the preset list the player has saved so
-    /// switching arms never costs them their own presets.
+    /// switching arms never costs them their own presets. The switch also opens a measurement window,
+    /// because a sample the probes take after this point belongs to the arm this switch put in force.
     pub fn apply_to(&self, target: &mut Config) {
         let saved = std::mem::take(&mut target.settings_presets);
         *target = self.config.clone();
         target.settings_presets = saved;
         target.settings_preset_name = self.name.clone();
+        open_arm_window(&self.name);
     }
 
     /// The built-in arms, then the player's own presets. A saved name wins a clash with a built-in.
@@ -374,5 +473,45 @@ mod tests {
         let presets = SettingsPreset::all_presets(&live);
         assert_eq!(presets.len(), 3, "the built-in arm is derived from the live config, so no arm was lost");
         assert_eq!(presets[0].config.transition_speed, 1.0);
+    }
+
+    #[test]
+    fn an_arm_switch_opens_the_measurement_window_a_probe_reads() {
+        let mut book = ArmWindows::default();
+
+        assert_eq!(book.epoch(), 0);
+        assert_eq!(book.name(0), WINDOW_ANON_NAME, "a sample before the launch naming has no arm to blame");
+
+        assert_eq!(book.open(PRESET_NEUTRAL), 1);
+        assert_eq!(book.name(1), PRESET_NEUTRAL);
+        assert_eq!(book.open(PRESET_ALL_LEVERS), 2);
+        assert_eq!(book.name(2), PRESET_ALL_LEVERS);
+        assert_eq!(book.epoch(), 2, "the number a door reads is the window the last switch opened");
+    }
+
+    #[test]
+    fn arm_switches_past_the_named_limit_fold_into_one_reserved_window() {
+        let mut book = ArmWindows::default();
+
+        for index in 0..(WINDOW_NAME_LIMIT + 30) {
+            book.open(&format!("arm {index}"));
+        }
+
+        assert_eq!(book.epoch(), WINDOW_NAME_LIMIT - 1);
+        assert_eq!(book.name(WINDOW_NAME_LIMIT - 1), WINDOW_FOLDED_NAME);
+        assert_eq!(book.name(1), "arm 0", "a window that already has samples must not be relabelled");
+        assert_eq!(book.names.len(), WINDOW_NAME_LIMIT - 1, "the table stops growing at the last named window");
+    }
+
+    #[test]
+    fn applying_an_arm_moves_the_window_a_probe_can_read() {
+        // The window number is one process wide static and cargo runs tests on several threads, so
+        // this can only assert that it moved forward, never by how much.
+        let before = arm_window();
+        let arm = SettingsPreset::all_presets(&Config::default()).into_iter().find(|preset| preset.name == PRESET_ALL_LEVERS).unwrap();
+
+        arm.apply_to(&mut Config::default());
+
+        assert!(arm_window() > before, "a switch that left the window number where it was would file its samples under the arm before it");
     }
 }

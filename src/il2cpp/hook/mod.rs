@@ -1863,6 +1863,11 @@ pub fn init() {
         // and that is printed as its own fact so a paired measurement can tell the arms apart.
         let preset = if config.settings_preset_name.is_empty() { "none" } else { config.settings_preset_name.as_str() };
 
+        // The arm the run launched on opens the first measurement window. Every sample a probe files
+        // after this point carries the window number, so a report can say what one arm did to the cuts
+        // that ran under it instead of comparing whole sessions.
+        crate::core::settings_preset::open_arm_window(preset);
+
         info!(
             "Config snapshot: preset {} transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
             preset,
