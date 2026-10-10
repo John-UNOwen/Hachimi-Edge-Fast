@@ -964,11 +964,16 @@ pub fn hit_calls(slot: usize) -> usize {
 
 // The training scaling points as run 11 found them. The five these replaced installed in run 8 and
 // printed no call line in four career runs (C51), so they were hooks on doors this client never opens.
-// These two are doors the run 11 log shows the game reaching, with the duration each was handed:
-// `PlayIn/4` 106 times at 2.4 s, and the gauge's progress bar blend time on a class run 11 measured
-// frames on but no animation door of.
-pub const TRAINING_HIT_SLOTS: [(usize, &str); 3] = [
-    (7, "SingleModeMainViewTrainingCutStatus.PlayIn"),
+//
+// `SingleModeMainViewTrainingCutStatus.PlayIn` was a third point here until run 26. That session read it
+// scaling 2.4 s to 0.12 s while three of its seven training cuts held the status panel off for 7866, 8182 and
+// 7866 ms, and the human turned this group off mid session and the next two cuts closed with no hole at all at
+// 1792 and 2042 ms. The door that actually plays the panel in is `CoroutinePlayIn/2 -> IEnumerator(float, int)`
+// next to it, so shortening only the `PlayIn` float leaves the cut's coroutine gated on a play in the panel no
+// longer performs, which is the shape item 72 measured: the cut-in clock sitting finished at 2.4 of 2.4 while
+// branch 6 polls 283 times. A scaling point that costs eight seconds a turn is not a speed option, so the
+// door is left to the game and this list is what a run can still check.
+pub const TRAINING_HIT_SLOTS: [(usize, &str); 2] = [
     (11, "SingleModeMainViewHpGauge.SetProgressbarBlendTime"),
     (12, "TrainingParamChangeUI.InitializePlateList"),
 ];
@@ -1457,21 +1462,15 @@ def_getter_hook!(
     after_call {}
 );
 
-// The training cut status in animation, scaled on the duration the game hands it (run 11: 106 calls at
-// 2.4 s). `frames`, the flag and the action are the game's own and go through untouched: multiplying a
-// frame count is the shape that stalled a story path in run 5.
-type TrainingCutStatusPlayInFn = extern "C" fn(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject);
-def_detour! {
-    TrainingCutStatus_PlayInSpeed(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject) {
-            let scaled = scale_duration(duration, Group::Screens);
-        hit(7, "SingleModeMainViewTrainingCutStatus.PlayIn", duration, scaled);
-
-        get_orig_fn!(TrainingCutStatus_PlayInSpeed, TrainingCutStatusPlayInFn)(this, scaled, frames, flag, action);
-    }
-}
-
-// The HP gauge progress bar blend time, the only float the gauge class takes. Run 11 measured 63,731
-// frames on the screen this class draws and never measured one animation door of it.
+// `SingleModeMainViewTrainingCutStatus.PlayIn/4` is not hooked any more, and this is the note that says why
+// (run 26, quoted at `TRAINING_HIT_SLOTS`): the float in position 0 is the play in *duration* the caller sets
+// up, while the animation itself runs on `CoroutinePlayIn/2 -> IEnumerator(float, int)` next door, and run 26
+// measured 7866, 8182 and 7866 ms of status panel held off in the same session that read `PlayIn 2.4 -> 0.12`.
+// The HP gauge blend time and the plate list interval are the training doors this fork does scale, and both
+// are doors whose value the game uses directly for the thing it draws.
+//
+// The HP gauge progress bar blend time, the only float the gauge class takes. Run 11 measured 63,731 frames on
+// the screen this class draws and never measured one animation door of it.
 type HpGaugeSetBlendTimeFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
 def_detour! {
     HpGauge_SetBlendTimeSpeed(this: *mut Il2CppObject, time: f32) {
@@ -1556,23 +1555,10 @@ fn install_getters(umamusume: *const Il2CppImage) {
         if addr != 0 { new_hook!(addr, TeamStadiumGrandResult_FadeInContentFromRight); }
     }
 
-    // The two training doors run 11 showed the game opening. `PlayIn/4 -> void(float, int, bool,
-    // class<System.Action>)` is resolved by its full dumped signature so the float in position 0 cannot
-    // land on the `CoroutinePlayIn/2 -> IEnumerator(float, int)` next to it, and only that float is
-    // scaled.
-    if let Some(class) = classes.get("SingleModeMainViewTrainingCutStatus").copied() {
-        let addr = unsafe { resolve_method(
-            class, "PlayIn",
-            &[
-                Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_I4,
-                Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN, Il2CppTypeEnum_IL2CPP_TYPE_CLASS,
-            ],
-            Il2CppTypeEnum_IL2CPP_TYPE_VOID,
-        ) };
-
-        if addr != 0 { new_hook!(addr, TrainingCutStatus_PlayInSpeed); }
-    }
-
+    // `SingleModeMainViewTrainingCutStatus.PlayIn/4` is not hooked any more. Run 26 is the reason, written out
+    // at `TRAINING_HIT_SLOTS`: cutting that float from 2.4 s to 0.12 s was measured in the same session that
+    // held the status panel off for 7866, 8182 and 7866 ms, and the two cuts after the human turned this group
+    // off closed hole free. Nothing else in this pass needed the class, so the lookup went with the hook.
     if let Some(class) = classes.get("SingleModeMainViewHpGauge").copied() {
         let addr = unsafe { resolve_method(
             class, "SetProgressbarBlendTime",
@@ -2512,5 +2498,16 @@ mod tests {
         assert_eq!(guard::last_fault_code(), 0xC0000005);
         assert_eq!(guard::null_target_fault_trip_count(), before_jumps_to_zero, "a read fault is not a call through 0");
         assert_eq!(guard::invented_trip_count(), before_invented + 1, "the refusal the barrier had to make was not counted");
+    }
+
+    // Run 26 measured 7866, 8182 and 7866 ms of status panel held off in the session whose first hit line read
+    // `SingleModeMainViewTrainingCutStatus.PlayIn 2.4 -> 0.12`, and the two cuts after the group was turned off
+    // closed hole free at 1792 and 2042 ms. The play in animation runs on `CoroutinePlayIn`, not on the float
+    // `PlayIn` is handed, so this door must not return to the scaling list without a run that shows the hole
+    // does not return with it.
+    #[test]
+    fn the_training_cut_status_play_in_is_not_a_scaling_point() {
+        assert_eq!(TRAINING_HIT_SLOTS.len(), 2, "the training scaling points are the gauge blend time and the plate list interval");
+        assert!(!TRAINING_HIT_SLOTS.iter().any(|(_, name)| name.contains("PlayIn")), "PlayIn went out of the list on run 26's numbers and stays out");
     }
 }
