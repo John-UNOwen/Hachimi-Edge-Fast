@@ -2,7 +2,7 @@ use std::{cell::OnceCell, os::raw::c_long};
 
 use jni::{objects::JString, JNIEnv};
 
-use crate::{android::{game_impl, hook, plugin_loader, zygisk::{internal::{api_table, module_abi}, AppSpecializeArgs, ServerSpecializeArgs}}, core::{game::Region, Hachimi}};
+use crate::{android::{game_impl, hook, plugin_loader, zygisk::{internal::{api_table, module_abi}, AppSpecializeArgs, ServerSpecializeArgs}}, core::{game::Region, hachimi::recover_lock, Hachimi}};
 
 const ZYGISK_API_VERSION: c_long = 4;
 
@@ -41,7 +41,7 @@ unsafe extern "C" fn post_app_specialize(this: *mut Module, _args: *const AppSpe
             return;
         }
         let hachimi = Hachimi::instance();
-        *hachimi.plugins.lock().unwrap() = plugin_loader::load_libraries();
+        *recover_lock(&hachimi.plugins) = plugin_loader::load_libraries();
         hook::init((*this).env);
     }
 }

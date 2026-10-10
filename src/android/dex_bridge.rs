@@ -10,6 +10,7 @@ use jni::{
 };
 use once_cell::sync::Lazy;
 
+use crate::core::hachimi::recover_lock;
 use crate::android::main::java_vm;
 
 fn log_exception(env: &mut JNIEnv, context: &str) {
@@ -28,6 +29,8 @@ struct DexEntry {
 }
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+// C2: every entry below is a plugin API `extern "C"` frame on Android, so the registry lock is
+// taken across FFI and must not answer a poison with a panic.
 static DEX_REGISTRY: Lazy<Mutex<HashMap<u64, DexEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn get_activity<'a>(env: &mut JNIEnv<'a>) -> Option<JObject<'a>> {
@@ -131,7 +134,7 @@ pub fn dex_load(dex_ptr: *const u8, dex_len: usize, class_name: *const std::os::
             return false;
         };
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        DEX_REGISTRY.lock().unwrap().insert(
+        recover_lock(&DEX_REGISTRY).insert(
             handle,
             DexEntry { class_loader: loader_ref, class_obj: class_ref },
         );
@@ -143,13 +146,13 @@ pub fn dex_load(dex_ptr: *const u8, dex_len: usize, class_name: *const std::os::
 }
 
 pub fn dex_unload(handle: u64) -> bool {
-    DEX_REGISTRY.lock().unwrap().remove(&handle).is_some()
+    recover_lock(&DEX_REGISTRY).remove(&handle).is_some()
 }
 
 pub fn call_static_noargs(handle: u64, method: &CStr, sig: &CStr) -> bool {
     let Ok(method) = method.to_str() else { return false; };
     let Ok(sig) = sig.to_str() else { return false; };
-    let entry = DEX_REGISTRY.lock().unwrap().get(&handle).cloned();
+    let entry = recover_lock(&DEX_REGISTRY).get(&handle).cloned();
     let Some(entry) = entry else { return false; };
 
     with_env(|env| {
@@ -170,7 +173,7 @@ pub fn call_static_string(handle: u64, method: &CStr, sig: &CStr, arg: &CStr) ->
     let Ok(method) = method.to_str() else { return false; };
     let Ok(sig) = sig.to_str() else { return false; };
     let Ok(arg_str) = arg.to_str() else { return false; };
-    let entry = DEX_REGISTRY.lock().unwrap().get(&handle).cloned();
+    let entry = recover_lock(&DEX_REGISTRY).get(&handle).cloned();
     let Some(entry) = entry else { return false; };
 
     with_env(|env| {

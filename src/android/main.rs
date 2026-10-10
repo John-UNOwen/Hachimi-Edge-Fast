@@ -37,7 +37,7 @@ pub extern "C" fn JNI_OnLoad(vm: JavaVM, reserved: *mut c_void) -> jint {
     }
     let _ = JAVA_VM.set(vm);
     let hachimi = Hachimi::instance();
-    *hachimi.plugins.lock().unwrap() = plugin_loader::load_libraries();
+    *crate::core::hachimi::recover_lock(&hachimi.plugins) = plugin_loader::load_libraries();
     hook::init(env.get_raw());
 
     info!("JNI_OnLoad");

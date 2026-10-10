@@ -9,7 +9,7 @@ use jni::{
 
 use crate::{
     android::utils::{BACK_BUTTON_PRESSED, IS_IME_VISIBLE, get_activity, get_screen_dimensions},
-    core::{gui, Error, Gui, Hachimi},
+    core::{gui, hachimi::recover_lock, Error, Gui, Hachimi},
     il2cpp::{
         hook::umamusume::RaceManagerReplayBase,
         symbols::Thread
@@ -120,7 +120,7 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
             keymap::KEYCODE_VOLUME_UP => {
                 VOLUME_UP_PRESSED.store(pressed, Ordering::Relaxed);                
                 if pressed && VOLUME_DOWN_PRESSED.load(Ordering::Relaxed) {
-                    if let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) {
+                    if let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) {
                         gui.toggle_menu();
                     }
                 }
@@ -130,13 +130,13 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
                 VOLUME_DOWN_PRESSED.store(pressed, Ordering::Relaxed);
 
                 if pressed && VOLUME_UP_PRESSED.load(Ordering::Relaxed) && repeat_count == 0 {
-                    if let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) {
+                    if let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) {
                         gui.toggle_menu();
                     }
                 }
                 
                 if pressed && RESET_GUI_CONSUMING_STATE.register_tap(RESET_GUI_CONSUMING_TAP_LIMIT, TAP_WINDOW_MS) {
-                    if let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) {
+                    if let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) {
                         gui.set_consuming_input(false);
                     }
                     return JNI_TRUE;
@@ -154,7 +154,7 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
 
                 if !Gui::is_egui_typing_atomic() {
                     if pressed && key_code == Hachimi::instance().config.load().android.menu_open_key {
-                        let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+                        let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) else {
                             return get_orig_fn!(nativeInjectEvent, NativeInjectEventFn)(env, obj, input_event, extra_param);
                         };
                         gui.toggle_menu();
@@ -192,7 +192,7 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
 
                 if Gui::is_consuming_input_atomic() {
                     {
-                        let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+                        let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) else {
                             return get_orig_fn!(nativeInjectEvent, NativeInjectEventFn)(env, obj, input_event, extra_param);
                         };
 
@@ -274,7 +274,7 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
             if !Hachimi::instance().config.load().disable_gui {
                 if real_x < corner_zone_size && real_y < corner_zone_size {
                     if CORNER_TAP_STATE.register_tap(CORNER_TAP_LIMIT, TAP_WINDOW_MS) {
-                        let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+                        let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) else {
                             return get_orig_fn!(nativeInjectEvent, NativeInjectEventFn)(env, obj, input_event, extra_param);
                         };
                         gui.toggle_menu();
@@ -305,7 +305,7 @@ extern "C" fn nativeInjectEvent(mut env: JNIEnv, obj: JObject, input_event: JObj
         let capture;
 
         {
-            let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+            let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) else {
                 return get_orig_fn!(nativeInjectEvent, NativeInjectEventFn)(env, obj, input_event, extra_param);
             };
 
