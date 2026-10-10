@@ -862,6 +862,7 @@ fn open_cut_run() {
     }
 
     close_cut_run();
+    note_cut_open_after_command(now);
 
     let view = current_view_id();
     let bucket = bucket_for(view, SceneManager::is_race_scene_family());
@@ -920,6 +921,54 @@ fn record_gap_legs(close_ms: i64, open_ms: i64) {
         None => {
             GAP_WITHOUT_PLATE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         }
+    }
+}
+
+// The two ends of a training turn no animation lever reaches, read off doors this probe already stands
+// on so it costs no new hook. A run 29 gap averages 19,820.7 ms against a 1,905.7 ms cut, and these are
+// the marks that say how much of that gap is the game waiting on its own request and how much is the
+// player deciding, which is the difference between a wall to route round and a wall to leave alone.
+static COMMAND_SEND_RUNS: AtomicUsize = AtomicUsize::new(0);
+static COMMAND_SENT_MS: AtomicI64 = AtomicI64::new(-1);
+static SEND_TO_OPEN_RUNS: AtomicUsize = AtomicUsize::new(0);
+static SEND_TO_OPEN_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static SEND_TO_OPEN_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static CLOSE_TO_SEND_RUNS: AtomicUsize = AtomicUsize::new(0);
+static CLOSE_TO_SEND_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static CLOSE_TO_SEND_WORST_MS: AtomicI64 = AtomicI64::new(0);
+
+/// The legs as plain marks. A negative mark is a door this session never crossed, and a pair that runs
+/// backwards is dropped rather than counted, because a leg made from out of order marks charges the
+/// wrong half of a turn.
+fn command_legs(sent_ms: i64, closed_ms: i64, open_ms: i64) -> (Option<i64>, Option<i64>) {
+    (span_from(sent_ms, open_ms), span_from(closed_ms, sent_ms))
+}
+
+fn note_command_sent() {
+    let now = elapsed_ms();
+
+    if now < 0 {
+        return;
+    }
+
+    COMMAND_SEND_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+    COMMAND_SENT_MS.store(now, atomic::Ordering::Relaxed);
+
+    // The idle between the previous cut closing and this command going out.
+    if let Some(span_ms) = command_legs(now, RUN_CLOSED_MS.load(atomic::Ordering::Relaxed), -1).1 {
+        CLOSE_TO_SEND_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        CLOSE_TO_SEND_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
+        CLOSE_TO_SEND_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
+    }
+}
+
+fn note_cut_open_after_command(open_ms: i64) {
+    // Swapped rather than read: one command answers at most one cut open, so a send the game never
+    // answered is not charged to a later turn.
+    if let Some(span_ms) = command_legs(COMMAND_SENT_MS.swap(-1, atomic::Ordering::Relaxed), -1, open_ms).0 {
+        SEND_TO_OPEN_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+        SEND_TO_OPEN_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
+        SEND_TO_OPEN_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
     }
 }
 
@@ -1753,6 +1802,7 @@ type CommonSendCommandFn = extern "C" fn(this: *mut Il2CppObject, command: i32, 
 def_detour! {
     SingleModeMain_CommonSendCommandAsync(this: *mut Il2CppObject, command: i32, id: i32) -> *mut Il2CppObject {
             MAIN_COMMON_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64]);
+        note_command_sent();
 
         get_orig_fn!(SingleModeMain_CommonSendCommandAsync, CommonSendCommandFn)(this, command, id)
     }
@@ -1768,6 +1818,7 @@ type SendCommandFn = extern "C" fn(command: i32, id: i32, first: i32, second: i3
 def_detour! {
     SingleModeMain_SendCommandAsync(command: i32, id: i32, first: i32, second: i32, on_result: *mut Il2CppObject, on_error: *mut Il2CppObject) -> *mut Il2CppObject {
             MAIN_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64, first as f64, second as f64]);
+        note_command_sent();
 
         get_orig_fn!(SingleModeMain_SendCommandAsync, SendCommandFn)(command, id, first, second, on_result, on_error)
     }
@@ -2566,6 +2617,21 @@ pub fn report_if_due() {
         GAP_WITHOUT_PLATE_RUNS.load(atomic::Ordering::Relaxed)
     );
 
+    // The same gap read at its command doors: what the game spent waiting on the request it sent, and
+    // what it spent before it sent one at all. Neither is a wall a duration lever reaches, and the run
+    // cannot say how much of the turn is left for the levers until both are counted.
+    let send_runs = COMMAND_SEND_RUNS.load(atomic::Ordering::Relaxed);
+    let send_to_open_runs = SEND_TO_OPEN_RUNS.load(atomic::Ordering::Relaxed);
+    let close_to_send_runs = CLOSE_TO_SEND_RUNS.load(atomic::Ordering::Relaxed);
+
+    info!(
+        "Cutt probe command legs: {send_runs} sends, {send_to_open_runs} cut opens after a send mean {:.1} ms worst {} ms, {close_to_send_runs} sends after a cut close mean {:.1} ms worst {} ms",
+        mean_ms(SEND_TO_OPEN_MS_TOTAL.load(atomic::Ordering::Relaxed), send_to_open_runs),
+        SEND_TO_OPEN_WORST_MS.load(atomic::Ordering::Relaxed),
+        mean_ms(CLOSE_TO_SEND_MS_TOTAL.load(atomic::Ordering::Relaxed), close_to_send_runs),
+        CLOSE_TO_SEND_WORST_MS.load(atomic::Ordering::Relaxed)
+    );
+
     let played_runs = WALL_OPEN_TO_TAP_RUNS.load(atomic::Ordering::Relaxed);
 
     info!(
@@ -2975,5 +3041,15 @@ mod tests {
         let (namespace, name) = "Gallop.SingleModeUtils".rsplit_once('.').unwrap();
         assert_eq!(namespace, "Gallop");
         assert_eq!(name, "SingleModeUtils");
+    }
+
+    // The command legs are the half of a training turn no lever reaches, and each of their marks can be
+    // missing on its own, so the pairing is checked as plain marks rather than as a door call.
+    #[test]
+    fn a_command_leg_needs_both_of_its_marks_and_never_runs_backwards() {
+        assert_eq!(command_legs(1_000, 500, 4_000), (Some(3_000), Some(500)));
+        assert_eq!(command_legs(-1, 500, 4_000), (None, None), "a cut open with no command before it has no turnaround to report");
+        assert_eq!(command_legs(1_000, -1, 4_000), (Some(3_000), None), "the first command of a run has no earlier cut to be late for");
+        assert_eq!(command_legs(4_000, 5_000, 4_500), (Some(500), None), "a send reading before the cut it follows is out of order and is dropped");
     }
 }
