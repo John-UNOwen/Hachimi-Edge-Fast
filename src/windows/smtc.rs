@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::os::windows::ffi::OsStrExt;
 use once_cell::sync::Lazy;
 use windows::{
@@ -49,6 +49,55 @@ static mut TASKBAR_HWND: HWND = HWND(std::ptr::null_mut());
 
 static mut LAST_STATUS: MediaPlaybackStatus = MediaPlaybackStatus::Closed;
 static mut LAST_HOME_MUSIC_ID: i32 = 0;
+
+// Run 23 measured a 1664 ms gap between two `GameSystem_Update` ticks at the 10 s mark, and the only
+// records in that window were this path's own `[smtc] update_metadata_home` lines. `on_update` is called
+// from the EventSystem door, so it runs on the game thread, and its scene-change half walks the game's UI
+// and reads its savedata jukebox row. Until this path times itself the fork cannot tell its own hitch from
+// the game loading the Home scene, and that difference decides whether anything here is fixable at all.
+static SMTC_UPDATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static SMTC_UPDATE_WORST_US: AtomicU64 = AtomicU64::new(0);
+static SMTC_SLOW_REPORTED: AtomicUsize = AtomicUsize::new(0);
+
+// A game thread hitch worth saying out loud, bounded the way the hook take-down lines are bounded: a path
+// that is slow every frame must not fill the log with it.
+const SMTC_SLOW_MS: u64 = 50;
+const SMTC_SLOW_REPORT_LIMIT: usize = 8;
+
+pub fn on_update() {
+    let started = std::time::Instant::now();
+    on_update_inner();
+    report_update_cost(started.elapsed().as_micros().min(u64::MAX as u128) as u64);
+}
+
+fn report_update_cost(spent_us: u64) {
+    let calls = SMTC_UPDATE_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let worst_us = SMTC_UPDATE_WORST_US.fetch_max(spent_us, Ordering::Relaxed).max(spent_us);
+
+    // The first three costs are what this path costs when nothing is wrong, which is the number every
+    // later slow line is read against.
+    if calls <= 3 {
+        debug!("[smtc] on_update cost {:.1} ms, worst {:.1} ms over {} calls", spent_us as f64 / 1000.0, worst_us as f64 / 1000.0, calls);
+        return;
+    }
+
+    let reported = SMTC_SLOW_REPORTED.load(Ordering::Relaxed);
+
+    if let Some(line) = update_cost_line(spent_us, calls, worst_us, reported) {
+        SMTC_SLOW_REPORTED.fetch_add(1, Ordering::Relaxed);
+        info!("{line}");
+    }
+}
+
+// The decision, kept apart from the logging so a test can read it. `reported` is how many slow lines this
+// session has already said.
+fn update_cost_line(spent_us: u64, calls: usize, worst_us: u64, reported: usize) -> Option<String> {
+    if spent_us < SMTC_SLOW_MS * 1000 || reported >= SMTC_SLOW_REPORT_LIMIT {
+        return None;
+    }
+
+    Some(format!("[smtc] on_update cost {:.1} ms on the game thread, worst {:.1} ms over {} calls", spent_us as f64 / 1000.0, worst_us as f64 / 1000.0, calls))
+}
 
 fn set_playback_status(smtc: &SystemMediaTransportControls, status: MediaPlaybackStatus) {
     unsafe {
@@ -130,7 +179,7 @@ unsafe fn create_shortcut(name: &str) {
     }
 }
 
-pub fn on_update() {
+fn on_update_inner() {
     if !Hachimi::instance().config.load().windows.enable_smtc {
         return;
     }
@@ -578,5 +627,25 @@ pub fn unregister() {
             LAST_STATUS = MediaPlaybackStatus::Closed;
         }
         info!("SMTC unregistered");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slow_game_thread_update_is_named_and_a_fast_one_is_not() {
+        assert!(update_cost_line(120_000, 40, 120_000, 0).is_some(), "120 ms on the game thread is the hitch this exists to name");
+        assert!(update_cost_line(4_000, 40, 120_000, 0).is_none(), "4 ms is this path doing its job");
+
+        let line = update_cost_line(1664_000, 41, 1664_000, 1).expect("a 1664 ms hitch gets a line");
+        assert!(line.contains("1664.0 ms on the game thread"), "the line says what the one call cost: {line}");
+    }
+
+    #[test]
+    fn the_slow_update_line_stops_after_eight_of_them() {
+        assert!(update_cost_line(120_000, 9, 120_000, SMTC_SLOW_REPORT_LIMIT - 1).is_some());
+        assert!(update_cost_line(120_000, 10, 120_000, SMTC_SLOW_REPORT_LIMIT).is_none(), "a path that is slow every frame does not fill the log");
     }
 }
