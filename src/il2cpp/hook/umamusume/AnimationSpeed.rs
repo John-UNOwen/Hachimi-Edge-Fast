@@ -435,11 +435,20 @@ pub const MIN_TIME_SCALE: f32 = 1.0;
 // 17, 8.280, 8.000, 6.080 and 6.080 in runs 30, 31, 33 and 34. A lever capped at 5.0 would hand the
 // game its own value back at every setting on this client, because a scale past the ceiling is a
 // pass-through (AGENTS section 5, time scales only go up), and the option would be a slider that
-// does nothing. 12.0 is therefore a ceiling on the value the door may hand, sitting just past the
-// highest reading a run has seen on it: every state the game reaches on its own stays reachable, a
-// value the game already asked for is never pulled down, and the read-modify-write loop C22 and C24
-// are about cannot run past 12.0 however many times the timeline re-prices itself.
-pub const MAX_TRAINING_CUT_TIME_SCALE: f32 = 12.0;
+// does nothing.
+//
+// 12.0 was that ceiling first, sitting just past the highest reading a run had seen on the door. Runs
+// 36 and 37 paired the lever against the same build with the lever off and found the ceiling doing the
+// multiplying rather than the lever: the game handed 5.680 and 4.800, the lever offered 28.4 and 24.0,
+// and the door handed 12.0 both times, a 2.11x and a 2.50x raise. Tag answer cuts came out 18% shorter
+// with that (1443 ms to 1180 ms, tap wait taken out) and the plate cascade 19% (1211 ms to 986 ms), so
+// the open question is whether the gain scales with the raise, and a ceiling that binds cannot answer
+// it. 30.0 is the lever's full reach on the largest scale that pair measured the game handing, 5.680 x
+// 5.0 = 28.4, rounded up: the cap now sits past what the measured cuts ask for, so the next run reads
+// the lever. What the bound still does is hold the door at max(the game's value, 30.0): a value the
+// game put on the door is never pulled down, run 11's 11.280 is raised to 30.0 rather than 56.4, and a
+// read-modify-write loop C22 and C24 are about cannot run past 30.0 however many times it re-prices.
+pub const MAX_TRAINING_CUT_TIME_SCALE: f32 = 30.0;
 
 // The ceiling `ui_animation_scale` may reach in code, independent of what any slider offers.
 // The DOTween `Update` detour multiplies the delta time it hands the tween library once per
@@ -2757,9 +2766,9 @@ pub fn training_cut_time_scale(value: f32) -> f32 {
     }
 
     // A scale only goes up (AGENTS section 5), and `value.max(...)` is what keeps the ceiling from turning into
-    // a slow down: run 11 read the game putting 11.280 on this door by itself, so a cap of 12.0 applied without
-    // it would trim a value the game asked for. Below `MIN_TIME_SCALE` the game chose a pause or a slow motion
-    // and it arrives as it arrived.
+    // a slow down: runs 9 and 11 read the game putting 8.334 and 11.280 on this door by itself, and a value the
+    // game asked for above the cap arrives as it arrived rather than being trimmed to it. Below
+    // `MIN_TIME_SCALE` the game chose a pause or a slow motion and it arrives as it arrived too.
     value.max((value * factor).min(MAX_TRAINING_CUT_TIME_SCALE))
 }
 
@@ -4865,8 +4874,9 @@ mod tests {
         assert_eq!(training_cut_factor(), 1.0, "a launch armed the cut-in lever");
         assert_eq!(training_cut_time_scale(6.080), 6.080, "the shipped lever moved the cut clock");
 
-        // The `All levers` arm: the lever at `MAX_TIME_SCALE` on the number the game computed. The ceiling lands
-        // before the product does, because 6.080 x 5 is past anything a run has seen on this door.
+        // The `All levers` arm: the lever at `MAX_TIME_SCALE` on the number the game computed. Runs 36 and 37
+        // measured the pair under the old 12.0 ceiling, where the cap was doing the multiplying (5.680 offered
+        // 28.4 and the door handed 12.0). At 30.0 both scales that pair saw go through at the full lever.
         let mut arm = Config::default();
         arm.training_cut_speed = MAX_TIME_SCALE;
         mirror_config(&arm);
@@ -4874,13 +4884,20 @@ mod tests {
         println!("item 77, the cut clock on the all levers arm: 6.080 handed, {} offered", training_cut_time_scale(6.080));
 
         assert_eq!(training_cut_factor(), MAX_TIME_SCALE, "the arm's cut lever did not mirror");
-        assert_eq!(training_cut_time_scale(6.080), MAX_TRAINING_CUT_TIME_SCALE, "the cut lever ran past the ceiling the runs read");
+        assert_eq!(training_cut_time_scale(6.080), MAX_TRAINING_CUT_TIME_SCALE, "the cut lever ran past the ceiling the pair bounded");
         assert_eq!(training_cut_time_scale(1.0), MAX_TIME_SCALE, "the lever left the game's own baseline unraised");
 
+        // The two scales the pair actually measured on this door, now inside the ceiling rather than clipped by
+        // it: the next run is meant to read a 5x door and not a 12.0 one.
+        assert!((training_cut_time_scale(4.800) - 24.0).abs() < 0.05, "the cut door clipped a scale the pair saw handed");
+        assert!((training_cut_time_scale(5.680) - 28.4).abs() < 0.05, "the cut door clipped the largest scale the pair saw handed");
+
         // A scale only goes up (AGENTS section 5), and the ceiling is a cap on what the door may hand, not a
-        // trim on what the game asked for: run 11 read 11.280 arrive on this door by itself.
+        // trim on what the game asked for: run 11 read 11.280 arrive on this door by itself, and a value the
+        // game already put past the cap stays where the game put it.
         assert_eq!(training_cut_time_scale(11.280), MAX_TRAINING_CUT_TIME_SCALE, "the cap replaced the game's own 11.280 with a smaller number");
-        assert_eq!(training_cut_time_scale(20.0), 20.0, "the cap pulled a value the game asked for back down");
+        assert_eq!(training_cut_time_scale(20.0), MAX_TRAINING_CUT_TIME_SCALE, "the cut door handed more than its ceiling on a value the game put above it");
+        assert_eq!(training_cut_time_scale(40.0), 40.0, "the cap pulled a value the game asked for back down");
 
         // Below `MIN_TIME_SCALE` the game chose a pause or a slow motion, and a mirror that is not a number
         // does nothing at all.

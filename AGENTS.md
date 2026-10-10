@@ -58,7 +58,10 @@ or a decision is taken, not as a scratch pad. The split and the evidence rule ar
   there is no completion for the pair to price. The lever takes the time-scale clamp (`MIN_TIME_SCALE` to `MAX_TIME_SCALE`), a
   scale never goes down, and the value the door may hand stops at `MAX_TRAINING_CUT_TIME_SCALE` - above the lever's own reach,
   because every recorded run read the game putting 6.080 to 11.280 on this door by itself and a cap at `MAX_TIME_SCALE` would
-  hand those numbers back at every setting (A17 asks for that ceiling decision to be stated, ledger item 77).
+  hand those numbers back at every setting (A17 asks for that ceiling decision to be stated, ledger item 77). Runs 36 and
+  37 paired that lever against the same build with it off and found the ceiling doing the multiplying rather than the lever
+  (5.680 offered 28.4, the door handed 12.0), so `MAX_TRAINING_CUT_TIME_SCALE` stands at 30.0: past what the measured cuts
+  ask for, and still a bound a re-pricing loop cannot pass.
 - **Client side presentation only.** Do not speed things up by skipping server calls, faking
   success callbacks, changing simulation results, or touching purchase, legality, SQLite key or
   network paths (see C3, C6, C12, C20, C21, C31). `Time.timeScale` is a simulation lever, not an
