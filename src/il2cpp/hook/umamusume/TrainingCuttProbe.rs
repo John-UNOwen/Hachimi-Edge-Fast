@@ -508,7 +508,15 @@ const VIEW_TRAINING: [i32; 5] = [
     ViewId::SingleModeConfirmComplete as i32, ViewId::SingleModeResult as i32,
 ];
 const VIEW_STORY: i32 = ViewId::Story as i32;
-const VIEW_STORY_EVENT: i32 = ViewId::StoryEventMission as i32;
+// The story event mission screen, and the two career end screens. `SingleModeSuccessionCut` and
+// `SingleModeSuccessionEvent` play their inspiration cut-ins through the same timeline controller this
+// probe hooks, and run 31 ended stuck on 1501 with every line about it reading `other`, which is how a
+// career end stall stayed invisible in the census until the view id table named it after the fact (C62).
+const VIEW_STORY_EVENT: [i32; 3] = [
+    ViewId::StoryEventMission as i32,
+    ViewId::SingleModeSuccessionCut as i32,
+    ViewId::SingleModeSuccessionEvent as i32,
+];
 const VIEW_GACHA: i32 = ViewId::GachaMain as i32;
 
 pub(crate) fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
@@ -526,8 +534,8 @@ pub(crate) fn bucket_for(view_id: i32, in_race_scene: bool) -> ViewBucket {
         ViewBucket::Story
     }
     // The story event mission screen is its own view, and a cut-in played there is the thing the story
-    // event probe is measuring.
-    else if view_id == VIEW_STORY_EVENT {
+    // event probe is measuring. The career end screens are filed here for the same reason.
+    else if VIEW_STORY_EVENT.contains(&view_id) {
         ViewBucket::StoryEvent
     }
     else if view_id == VIEW_GACHA {
@@ -3063,6 +3071,12 @@ mod tests {
         assert_eq!(bucket_for(ViewId::Story as i32, false), ViewBucket::Story);
         // The story event mission screen is its own view, and the story event probe reports against it.
         assert_eq!(bucket_for(ViewId::StoryEventMission as i32, false), ViewBucket::StoryEvent);
+        // Run 31 ended stuck on 1501 and every census line about it read `other`. The career end screens
+        // play their inspiration cut-ins through the same timeline controller this probe hooks, so they
+        // belong in the bucket that measures cut-ins (C62).
+        assert_eq!(bucket_for(ViewId::SingleModeSuccessionEvent as i32, false), ViewBucket::StoryEvent);
+        assert_eq!(bucket_for(ViewId::SingleModeSuccessionCut as i32, false), ViewBucket::StoryEvent);
+        assert_eq!(bucket_for(ViewId::SingleModeSuccessionEvent as i32, true), ViewBucket::Race);
         assert_eq!(bucket_for(ViewId::GachaMain as i32, false), ViewBucket::Gacha);
         assert_eq!(bucket_for(ViewId::Title as i32, false), ViewBucket::Other);
 
