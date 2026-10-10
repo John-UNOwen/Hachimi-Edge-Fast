@@ -221,6 +221,14 @@ Hot paths run every frame or every tween tick. In them:
    - `AnimationSpeed apply pass N: a config reads, b entry locks, c table passes, d field reads,
      e field writes`: what the speed pass cost the run, counted by the pass itself (C36, C41).
      Field reads stay 0 while `init` resolves no duration field (C13).
+   - `Text translation apply pass N: a translations, b keys looked up, c written, d components gone
+      at the lookup, e keys holding other text, f live entries with no callable original behind the
+      hook, g live entries with no translated string in hand` (the same line for `TextMesh`, totals
+      cumulative over both): what the translation pass reached and what it refused, counted by the
+      pass itself (C11). Only `c written` is a translation that landed. `f` is this build's hook -
+      never armed, arming refused, or switched off by `disabled_hooks` - and `g` is a translated
+      string the game did not take; the two are counted apart because they have different causes and
+      different fixes, and a refusal is never in `c`.
    - `Frame probe totals at N s:` for the story stepping search (item D13).
 4. Record the run in LEDGER.md in the existing format: build hash, duration, numbers, what
    moved, what didn't.

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use fnv::FnvHashMap;
 use once_cell::sync::Lazy;
-use crate::core::sugoi_client::{SugoiClient, StringInfo};
+use crate::core::sugoi_client::{SugoiClient, StringInfo, WriteAnswer};
 use crate::il2cpp::symbols::GCHandle;
 use crate::il2cpp::{ext::{Il2CppStringExt, StringExt}, hook::UnityEngine_TextRenderingModule::TextAnchor, symbols::get_method_addr, types::*};
 
@@ -103,17 +103,37 @@ pub fn apply_translations(completed: &[(String, String)]) {
     //
     // Nothing it calls with is something it collected before the walk (C11). The component is
     // derived from the entry's own weak handle for that one write; the translated string travels in
-    // a strong handle, so the GC cannot take it away across a write that runs game code and
-    // allocates; and the trampoline is taken from this wrapper's copy per write, which is a cache
-    // hit against a cross-FFI call. With the hook not installed the pass has nothing to write (C1).
+    // a strong handle, so a write that allocates game-side cannot have the argument collected
+    // mid-walk; and the trampoline is taken from this wrapper's copy per write, which is a cache hit
+    // against a cross-FFI call.
+    //
+    // Each write answers for itself, and its answer names its own reason (C11).
+    // `get_orig_fn_guarded!` answers None when this wrapper has no trampoline in the registry, nothing
+    // waiting in the take-down queue and no opened target behind it, and that decline is reported as
+    // `NoCallableOriginal`. The other decline this caller can make is the translated string's own
+    // handle answering null, and that one is reported as `NoValueInHand`. They are counted apart
+    // because a run reading the apply line has to know which of them it is chasing: a string the game
+    // did not take is not a `set_text_hook` the backend refused to restore. A live component the pass
+    // cannot reach is not a landing either way, and counting it with the writes is what used to let a
+    // non-zero count describe a game that received nothing.
     crate::core::sugoi_client::apply_translation_pass(
+        "Text",
         &ACTIVE_TEXT_COMPONENTS,
         completed,
         |translated| GCHandle::new(translated.to_il2cpp_string() as *mut Il2CppObject, false),
-        |component: *mut Il2CppObject, text: &GCHandle| {
-            let Some(set_text) = get_orig_fn_guarded!(set_text_hook, SetTextFn) else { return };
+        |component: *mut Il2CppObject, text: &GCHandle| -> WriteAnswer {
+            let Some(set_text) = get_orig_fn_guarded!(set_text_hook, SetTextFn) else {
+                return WriteAnswer::NoCallableOriginal;
+            };
 
-            set_text(component, text.target() as *mut Il2CppString);
+            // A counted write is a string the game took. With no string there is nothing to hand it,
+            // and a call that would blank the component is not a translation landing either. This
+            // decline belongs to the string, not to this hook's arming.
+            let value = text.target();
+            if value.is_null() { return WriteAnswer::NoValueInHand; }
+
+            set_text(component, value as *mut Il2CppString);
+            WriteAnswer::Written
         }
     );
 }
