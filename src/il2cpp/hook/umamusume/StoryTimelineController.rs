@@ -79,11 +79,13 @@ fn log_scale(calls: &AtomicUsize, name: &'static str, flag: bool, value: f32) {
 }
 
 // The wrapper is class-prefixed, the way `CascadeShadow_GetShadowResolution` is separated from
-// `CascadeShadowForRace_GetShadowResolution`. `disabled_hooks` keys on the bare wrapper name
-// (C27), and `StoryViewController.rs` already detours a `GetTimeScaleByHighSpeedType`, so the bare
-// name is one kill switch for two unrelated hooks: disabling this measurement hook would also
-// disable the upstream story speed hook, and both `[DISABLED]` log lines read the same. The game's
-// own method name is unchanged in the resolution string and in the log label.
+// `CascadeShadowForRace_GetShadowResolution`. `StoryViewController.rs:34` already arms a
+// `GetTimeScaleByHighSpeedType`, which is the collision C27 records: while `disabled_hooks` matched
+// the bare wrapper name, one key was a kill switch for both hooks - disabling this measurement hook
+// also disabled the upstream story speed hook, and both `[DISABLED]` lines read the same. The key is
+// a hook id now, so the two come down independently
+// (`umamusume::StoryTimelineController::…` against `umamusume::StoryViewController::…`). The prefix
+// stays because the log label and the resolution string name the game's own method either way.
 type StoryTimelineController_GetTimeScaleByHighSpeedTypeFn = extern "C" fn(is_high_speed: bool) -> f32;
 def_detour! {
     StoryTimelineController_GetTimeScaleByHighSpeedType(is_high_speed: bool) answer -> f32 {

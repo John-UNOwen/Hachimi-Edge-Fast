@@ -164,8 +164,22 @@ Rules learned the hard way (each has a ledger entry):
 - **`get_orig_fn!` returns 0 for an uninstalled hook** (C1). Only call it from inside the detour
   it belongs to; a wrapper reachable from mod code should use `def_method_wrapper_fn!`, which
   guards against 0.
-- **`disabled_hooks` keys on the bare wrapper name**, which is not unique (C27). Prefer unique
-  wrapper names for new hooks.
+- **`disabled_hooks` keys on the hook id**: the module path of the `new_hook!` site plus the wrapper
+  name, `hachimi::il2cpp::hook::` cut off - `umamusume::NowLoading::Hide`. Both `new_hook!` log lines
+  print it, so the key a player needs is in the log of the build they run. A key equal to the bare
+  wrapper name still does what this option has done since it existed - it puts down every hook sharing
+  that name, and 14 of them are armed in more than one file - so a config written before ids were keys
+  keeps its effect, and after hooking the log names the hooks such a key put down and the ids that
+  would put down one of them instead. A key that is neither an id nor a bare name reaches nothing, and
+  the log says so and names the ids its last segment does reach (C27). `python tools/scan_hook_barriers.py`
+  reads that decision out of `hook/mod.rs` - the id `new_hook!` builds, the prefix `hook_id` cuts, every
+  comparison the decision function makes between a key and a hook id, and the second copy of the rule the
+  report after hooking runs on - and evaluates it over the whole arming population: no two arming sites answer
+  to one id, no bare name reaches a different population than the wrapper-name rule it replaced, and the two
+  copies of the rule agree. It exits 1 on a decision written in a shape it cannot read, so the rule cannot be
+  rewritten past the audit. The audit attests the decision and the population; the behaviour is held by
+  `cargo test --lib`, which calls `hook_is_disabled` over the 14 names / 38 sites of `COLLIDING_KEYS` and over
+  `SINGLE_NAME_KEYS`, whose contents the audit re-checks against the tree.
 - New speed groups are installed **last** in `umamusume::init`.
 - Names come from the live client. Confirm them in `introspect.log` (`debug_mode: true`) before
   writing a hook, and remember the dump is truncated (A8): absence there proves nothing.

@@ -1,11 +1,211 @@
 #![allow(non_upper_case_globals)]
 
+use std::sync::{Mutex, MutexGuard};
+
+use fnv::FnvHashSet;
+
+// C27: what a `disabled_hooks` entry is matched against.
+//
+// The data flow of the option was: the player writes a name into config.json -> `Config` stores it
+// in `disabled_hooks` -> `new_hook!` asks `disabled_hooks.contains(stringify!($hook))` -> the hook
+// is or is not armed. The deviation is at the third step: the value compared is the *bare* wrapper
+// name, and a bare name is not an identifier for a hook. `python tools/scan_hook_barriers.py
+// --summary` prints 14 wrapper names armed in more than one file on this tree (`Setup` in 5 files,
+// `Show` and `Hide` in 4 each, `Awake`, `Initialize` and `Update` in 3), so one key was a kill
+// switch for every hook sharing it: putting `Hide` in `disabled_hooks` to leave the transition fade
+// alone also took down `Connecting` and both download progress UIs, and the `[DISABLED]` lines that
+// came back were identical, so the run could not even tell how many hooks it had lost.
+//
+// The key is now the hook's own id: the module path of the `new_hook!` site plus the wrapper name,
+// cut down to what sits under this module so an id reads like the paths in AGENTS section 3
+// (`umamusume::NowLoading::Hide`). It is unique by construction - one module cannot hold two items
+// of one name - and `module_path!()` is the *call site's* module, so a hook armed through a helper
+// macro (`def_getter_hook!`, `block_input_button!`, the probe arming macros) is named by the file
+// that armed it, which is the same site `scan_hook_barriers.py` counts. Both `new_hook!` lines
+// print the id, so the key a player needs is in the log of the build they are running.
+//
+// A key that is not an id is still honoured the way this option has always worked, and that half is
+// not an oversight. `disabled_hooks` has no GUI and no documentation: it is a list a player
+// hand-edits, so every config written before ids were keys holds bare names, and a build that
+// matched none of them silently gave back hooks a player had deliberately put down. A key equal to
+// the last segment of a hook id, which is what `stringify!($hook)` was, still puts down every hook
+// that shares that name: the `Hide` above still takes down those four. The match is string equality
+// against that segment, not against a suffix, so a key that reached nothing then still reaches
+// nothing now (a typo, or a name carrying a `::` that is not an id armed here). No key an existing
+// config already contains changes what it disables.
+//
+// What the id adds on top of that is precision and a count. Write the id and one hook goes down;
+// write a bare name and the report after hooking prints which hooks it took down, instead of four
+// identical `[DISABLED] new_hook!: Hide` lines that a run cannot tell apart.
+const HOOK_ID_ROOT: &str = concat!(module_path!(), "::");
+
+/// The ids this build offered, collected while hooking. They exist so the report after hooking can
+/// answer a key that put nothing down (a typo, a name the tree no longer writes) with the ids it came
+/// close to, and count what a bare wrapper name took down. Cold: one push per `new_hook!` site, and
+/// only when the player configured a key at all.
+static HOOK_IDS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+/// The id of one `new_hook!` site, out of the full path its expansion carries. A hook armed from
+/// outside this module keeps its full path: `hook_id` only cuts a prefix, it never guesses one.
+#[inline]
+pub(crate) fn hook_id(full: &'static str) -> &'static str {
+    full.strip_prefix(HOOK_ID_ROOT).unwrap_or(full)
+}
+
+/// C2: no `unwrap()` on a lock the module shares. Poisoned or not, the ids it holds are the ids
+/// hooking wrote.
+fn hook_ids() -> MutexGuard<'static, Vec<&'static str>> {
+    HOOK_IDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The half of a hook id this option matched on before ids were keys: the wrapper name, what sits
+/// after the last `::`. In a config written under that rule this is what a bare key is.
+#[inline]
+fn bare_hook_name(id: &str) -> &str {
+    id.rsplit("::").next().unwrap_or(id)
+}
+
+/// How one configured key reaches one hook id, or not at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum HookKeyMatch {
+    /// The key spells this hook's id, so it names this hook and no other hook in the build.
+    Id,
+    /// The key is the bare wrapper name. Every hook sharing it goes down, which is what the option
+    /// has done since it existed and what every config written under it expects.
+    BareName,
+}
+
+/// The comparison the decision answers from, kept separate so a test reads both halves of the rule
+/// against one id. The legacy half is the same string equality `new_hook!` used against the same
+/// value, so a key like `umamusume::Connecting::Hide` reaches no hook whose id merely ends in `Hide`.
+#[inline]
+pub(crate) fn hook_key_match(key: &str, id: &str) -> Option<HookKeyMatch> {
+    if key == id {
+        return Some(HookKeyMatch::Id);
+    }
+
+    if key == bare_hook_name(id) {
+        return Some(HookKeyMatch::BareName);
+    }
+
+    None
+}
+
+/// The decision `new_hook!` makes, kept out of the macro so a test drives the function the shipped
+/// hooking path calls (AGENTS section 4: these tests prove a decision, never a cost). It records
+/// the id on the way, which is what `report_hook_keys` reads. Two hash lookups on a path that runs
+/// once per hook while hooking, never on a call path.
+pub(crate) fn hook_is_disabled(disabled: &FnvHashSet<String>, id: &'static str) -> bool {
+    if !disabled.is_empty() {
+        hook_ids().push(id);
+    }
+
+    disabled.contains(id) || disabled.contains(bare_hook_name(id))
+}
+
+/// How many ids one key may name in one log line; the rest are counted.
+const UNMATCHED_KEY_CANDIDATES: usize = 4;
+
+/// The hook ids one configured key put down in this build.
+fn hooks_a_key_reaches<'b>(key: &str, offered: &[&'b str]) -> Vec<&'b str> {
+    offered.iter().copied().filter(|id| hook_key_match(key, id).is_some()).collect()
+}
+
+/// The configured keys that put no hook down, in a stable order so two runs print the same lines.
+fn unmatched_hook_keys<'a, 'b>(disabled: &'a FnvHashSet<String>, offered: &[&'b str]) -> Vec<&'a String> {
+    let mut unmatched: Vec<&String> = disabled.iter().filter(|key| hooks_a_key_reaches(key, offered).is_empty()).collect();
+
+    unmatched.sort_unstable();
+    unmatched
+}
+
+/// The configured keys that are bare wrapper names reaching more than one hook here. They work, and
+/// they are the keys a run could not count before, so the group they take down is named.
+fn colliding_hook_keys<'a, 'b>(disabled: &'a FnvHashSet<String>, offered: &[&'b str]) -> Vec<&'a String> {
+    let mut colliding: Vec<&String> = disabled.iter().filter(|key| hooks_a_key_reaches(key, offered).len() > 1).collect();
+
+    colliding.sort_unstable();
+    colliding
+}
+
+/// The ids one line may name, the rest counted.
+fn named_hook_ids(candidates: &[&str]) -> String {
+    let (named, rest) = candidates.split_at(candidates.len().min(UNMATCHED_KEY_CANDIDATES));
+
+    if rest.is_empty() {
+        named.join(", ")
+    }
+    else {
+        format!("{} (and {} more sharing that name)", named.join(", "), rest.len())
+    }
+}
+
+/// The line for a bare wrapper name that is honoured: the hooks it put down, counted, and the ids
+/// that would have put down one of them instead. Reached hooks are never empty and never one,
+/// because a key naming a single hook needs no line; its `[DISABLED] new_hook!: <id>` says it.
+fn colliding_hook_key_line(key: &str, hits: &[&str]) -> String {
+    format!(
+        "disabled_hooks key {key:?} is a bare wrapper name, not a hook id (C27): it puts down {} {} that share that name, as this option has always done: {}. Write one of those ids to put down one hook, or keep the name to put down all {}.",
+        hits.len(),
+        if hits.len() == 1 { "hook" } else { "hooks" },
+        named_hook_ids(hits),
+        hits.len()
+    )
+}
+
+/// The line for a key that put nothing down. When the name the key ends with does belong to hooks
+/// armed here the line names them, because that is the shape a half written id leaves in a config.
+fn unmatched_hook_key_line(key: &str, offered: &[&str]) -> String {
+    let wanted = bare_hook_name(key);
+    let candidates: Vec<&str> = hooks_a_key_reaches(wanted, offered);
+
+    if candidates.is_empty() {
+        return format!(
+            "disabled_hooks key {key:?} names no hook in this build (C27). A key is either a hook id, printed verbatim by every new_hook!: line, or a bare wrapper name that puts down every hook sharing that name."
+        );
+    }
+
+    format!(
+        "disabled_hooks key {key:?} names no hook in this build (C27). {} {} armed here end with the name {wanted:?}, which as a bare key would put them all down: {}. Write one of those ids to put down one hook.",
+        candidates.len(),
+        if candidates.len() == 1 { "hook" } else { "hooks" },
+        named_hook_ids(&candidates)
+    )
+}
+
+/// Say what every configured key did, once per launch, after hooking. Free when no key was
+/// configured. A key that names one hook prints nothing here: the `[DISABLED] new_hook!: <id>` line
+/// the macro already printed names it.
+pub(crate) fn report_hook_keys(disabled: &FnvHashSet<String>) {
+    if disabled.is_empty() {
+        return;
+    }
+
+    // The ids are copied out before anything is formatted: the lock is not held across a `warn!`.
+    let offered: Vec<&'static str> = hook_ids().iter().copied().collect();
+
+    for key in colliding_hook_keys(disabled, &offered) {
+        warn!("{}", colliding_hook_key_line(key, &hooks_a_key_reaches(key, &offered)));
+    }
+
+    for key in unmatched_hook_keys(disabled, &offered) {
+        warn!("{}", unmatched_hook_key_line(key, &offered));
+    }
+}
+
 macro_rules! new_hook {
     ($orig:ident, $hook:ident) => (
         let hachimi = crate::core::Hachimi::instance();
-        if !hachimi.config.load().disabled_hooks.contains(stringify!($hook)) {
-            info!("new_hook!: {}", stringify!($hook));
+        // C27: the key is this site's hook id, and `hook_is_disabled` still honours the bare wrapper
+        // name this option matched on before ids were keys. The id is built by `concat!`, so the only
+        // thing it costs is a prefix cut on a path that runs once per hook while hooking.
+        let hook_id = $crate::il2cpp::hook::hook_id(concat!(module_path!(), "::", stringify!($hook)));
+
+        if !$crate::il2cpp::hook::hook_is_disabled(&hachimi.config.load().disabled_hooks, hook_id) {
+            // The install line names the target this hook was actually created on. It used to print
+            // before the null check, so a target that never resolved was counted as installed.
             if ($orig != 0) {
+                info!("new_hook!: {}", hook_id);
                 let res = hachimi.interceptor.hook($orig as usize, $hook as *const () as usize);
                 if let Err(e) = res {
                     error!("{}", e);
@@ -16,12 +216,11 @@ macro_rules! new_hook {
             }
         }
         else {
-            // C1: the arming is skipped on purpose, but a target that resolved is a real game
-            // function nothing patched. Declare it, so a wrapper mod code reaches directly hands the
-            // game its own call instead of being handed 0: `get_orig_fn!` and `get_orig_fn_guarded!`
-            // answer this target from birth (a target that never resolved is 0 and stays inert).
+            // C1: the hook is skipped on purpose, but the target is a real game function nothing
+            // patched. Declare it, so a wrapper mod code reaches directly hands the game its own
+            // call: `get_orig_fn!` answers the target behind this wrapper instead of 0.
             hachimi.interceptor.declare_hook_target($hook as *const () as usize, $orig as usize);
-            info!("[DISABLED] new_hook!: {}", stringify!($hook));
+            info!("[DISABLED] new_hook!: {}", hook_id);
         }
     )
 }
@@ -58,7 +257,10 @@ macro_rules! new_hook {
 // call it would have got with no mod installed. That is `bail`, and it runs behind
 // `detour_fallback`, i.e. behind the same barrier - after a trip it is the only call left in
 // the wrapper, and it must not be the one that leaves the boundary unguarded. A fallback can
-// fault: `get_orig_fn!` answers 0 for a trampoline the detach path has just taken back (C1).
+// still fault in the one window the registry keeps shut: a take-down whose backend half is
+// mid-flight, when neither the trampoline (about to be freed) nor the target (still patched to
+// jump into this very wrapper) may be handed out (C1). A completed take-down answers the
+// restored target, and the bail's call reaches the game.
 //
 // `Faulted` means the body was stopped by the state it was handed - a null or freed `this`, a
 // bad argument, an index past an `Il2CppArray`. A `bail` replays those same arguments into the
@@ -99,8 +301,10 @@ macro_rules! new_hook {
 // method - owes it. A `Faulted` trip may not run it: the fault came from those arguments or the
 // object they point at, the body may already be inside that method, and a replay faults again
 // deterministically. A wrapper whose safe answer is *not* that call - because the call is the thing
-// that faults, as it is for a `get_orig_fn!` that answered 0 for a trampoline the detach path
-// took back (C1) - writes `fallback`, not `bail`.
+// that faults, as it is for a `get_orig_fn!` answering 0 mid-take-down, the one window where the
+// registry has neither its trampoline nor its restored target to hand out (C1; a completed
+// take-down answers the restored target, and then the bail's call reaches the game) - writes
+// `fallback`, not `bail`.
 //
 // The name a body publishes through is written by the *call site* (`answer`, or `_answer` where
 // a body has nothing to publish) and not by this macro, because a name a macro invents is
@@ -1940,6 +2144,15 @@ pub fn init() {
         hooking_started.elapsed().as_secs_f32()
     );
 
+    // C27: every key the player configured says what it did here. A bare wrapper name is honoured
+    // and says how many hooks it put down; a key that put nothing down names the hook ids it missed.
+    // The ids it can name are only complete once hooking is over, which is why this sits after
+    // finish_batch and not inside the macro.
+    {
+        let config = crate::core::Hachimi::instance().config.load();
+        report_hook_keys(&config.disabled_hooks);
+    }
+
     // debug_mode only: writes the game's own method and field names to
     // <data dir>/introspect.log so hooks can be aimed at real names.
     crate::il2cpp::introspect::dump_if_enabled();
@@ -1998,5 +2211,364 @@ mod tests {
         // missing while both stay inert.
         assert!(UnresolvedMarker::new(marker_owner as *const ()).warn_once("fresh"), "a fresh marker arrived spent");
         assert!(UnresolvedMarker::new(other_marker_owner as *const ()).warn_once("fresh"), "a fresh marker arrived spent");
+    }
+
+    // C27: the key rule. `Hide` is a real collision in this tree - `Connecting`, `NowLoading` and the
+    // two download progress UIs each arm a wrapper of that name, and `scan_hook_barriers.py` prints
+    // all four sites - so the pair below is that pair, and the ids are built by the same
+    // `concat!(module_path!(), "::", stringify!(name))` the shipped macro writes.
+    use super::{
+        colliding_hook_key_line, colliding_hook_keys, hook_id, hook_is_disabled, hook_key_match, hooks_a_key_reaches,
+        unmatched_hook_key_line, unmatched_hook_keys, HookKeyMatch,
+    };
+    use fnv::FnvHashSet;
+
+    mod bare_name_collision {
+        pub mod connecting {
+            pub const FULL_ID: &str = concat!(module_path!(), "::", "Hide");
+        }
+
+        pub mod now_loading {
+            pub const FULL_ID: &str = concat!(module_path!(), "::", "Hide");
+        }
+    }
+
+    /// The population `python tools/scan_hook_barriers.py --summary` prints under "wrapper names armed
+    /// more than once in the tree": 14 bare names over 38 arming sites, each site written as the id its
+    /// site keys on, in the order the audit prints them. Reprinted from the tool rather than remembered
+    /// from a run, because the claim these tests make is about that population and nothing else.
+    const COLLIDING_KEYS: &[(&str, &[&str])] = &[
+        ("AlterUpdate", &["umamusume::Director::AlterUpdate", "umamusume::SceneManager::AlterUpdate"]),
+        (
+            "Awake",
+            &["umamusume::Director::Awake", "umamusume::TextCommon::Awake", "umamusume::TextMeshProUguiCommon::Awake"],
+        ),
+        ("Dispose", &["CriMw_CriWare_Runtime::CriAtomExAcb::Dispose", "LibNative_Runtime::Sqlite3::Query::Dispose"]),
+        (
+            "Hide",
+            &[
+                "umamusume::Connecting::Hide",
+                "umamusume::DownloadManager::BackgroundDownloadProgressUI::Hide",
+                "umamusume::DownloadManager::DownloadProgressUIGame::Hide",
+                "umamusume::NowLoading::Hide",
+            ],
+        ),
+        (
+            "Initialize",
+            &["umamusume::LowResolutionCamera::Initialize", "umamusume::PartsNickNameRibbon::Initialize", "umamusume::TextFrame::Initialize"],
+        ),
+        ("Play", &["umamusume::JikkyoDisplay::Play", "umamusume::PartsCommonHeaderTitle::TitlePlayer::Play"]),
+        (
+            "SetFontSize",
+            &["umamusume::StoryViewTextControllerLandscape::SetFontSize", "umamusume::StoryViewTextControllerSingleMode::SetFontSize"],
+        ),
+        (
+            "SetProgress",
+            &[
+                "umamusume::DownloadManager::BackgroundDownloadProgressUI::SetProgress",
+                "umamusume::DownloadManager::DownloadProgressUIGame::SetProgress",
+            ],
+        ),
+        ("SetText", &["Plugins::AnimateToUnity::AnText::SetText", "umamusume::PartsCommonHeaderTitle::TitlePlayer::SetText"]),
+        (
+            "Setup",
+            &[
+                "umamusume::DialogMissionListItem::Setup",
+                "umamusume::PartsNickNameListItem::Setup",
+                "umamusume::PartsRaceAnalyzeRaceEventListItem::Setup",
+                "umamusume::PartsSupportCardImproveDetail::Setup",
+                "umamusume::StoryChoiceButton::Setup",
+            ],
+        ),
+        (
+            "Show",
+            &[
+                "umamusume::Connecting::Show",
+                "umamusume::DownloadManager::BackgroundDownloadProgressUI::Show",
+                "umamusume::DownloadManager::DownloadProgressUIGame::Show",
+                "umamusume::NowLoading::Show",
+            ],
+        ),
+        ("Update", &["DOTween::TweenManager::Update", "UnityEngine_UI::EventSystem::Update", "umamusume::TapEffectController::Update"]),
+        ("UpdateView", &["umamusume::DownloadView::UpdateView", "umamusume::TitleViewController::UpdateView"]),
+        (
+            "set_text_hook",
+            &["UnityEngine_TextRenderingModule::TextMesh::set_text_hook", "UnityEngine_UI::Text::set_text_hook"],
+        ),
+    ];
+
+    /// The other half of the audit's population: a wrapper name the tree arms in exactly one file, so for
+    /// those the bare-name half is the whole of a key's effect - the hook it names goes down and no other
+    /// hook goes down with it. `python tools/scan_hook_barriers.py` re-checks every pair here against what
+    /// the tree arms and builds, and exits 1 on a pair it no longer finds.
+    const SINGLE_NAME_KEYS: &[(&str, &str)] = &[
+        ("PlayFadeNowLoading", "umamusume::NowLoading::PlayFadeNowLoading"),
+        ("FadeInContentFromRight", "umamusume::SingleModeResultContentBase::FadeInContentFromRight"),
+    ];
+
+    fn keys<'a>(iter: impl IntoIterator<Item = &'a str>) -> FnvHashSet<String> {
+        iter.into_iter().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn one_disabled_key_names_one_hook_and_not_the_hook_that_shares_its_bare_name() {
+        let connecting = hook_id(bare_name_collision::connecting::FULL_ID);
+        let now_loading = hook_id(bare_name_collision::now_loading::FULL_ID);
+
+        // The half the two hooks share is the half the old key matched on, and it is what made one
+        // entry a kill switch for both.
+        assert_eq!(connecting.rsplit("::").next(), Some("Hide"));
+        assert_eq!(now_loading.rsplit("::").next(), Some("Hide"));
+        assert_ne!(connecting, now_loading, "two hooks sharing a bare name came out with one id");
+
+        // The unambiguous half of the rule: an id names the hook it spells and nothing else.
+        let disabled = keys([connecting]);
+        assert!(hook_is_disabled(&disabled, connecting), "the key naming this hook did not disable it");
+        assert!(!hook_is_disabled(&disabled, now_loading), "the key for one hook silenced the hook that only shares its bare name");
+    }
+
+    #[test]
+    fn a_bare_wrapper_name_key_still_disables_every_hook_that_shares_it() {
+        // The reproduction of the regression keying on ids alone would have shipped. On the build
+        // where `new_hook!` compared the set against `stringify!($hook)`, the one key `Hide` put down
+        // four hooks; a build that read only ids armed all four back and printed a line about it
+        // instead of putting them down.
+        let legacy = keys(["Hide"]);
+
+        for (_, ids) in COLLIDING_KEYS.iter().filter(|(name, _)| *name == "Hide") {
+            for id in ids.iter().copied() {
+                assert!(hook_is_disabled(&legacy, id), "the bare key `Hide` no longer puts down {id}, which it put down before hook ids existed");
+            }
+        }
+
+        // The bare name is still not a substring match: the id of one hook reaches that hook alone,
+        // and a typo reaches nothing.
+        let one_hook = keys(["umamusume::Connecting::Hide"]);
+        assert!(hook_is_disabled(&one_hook, "umamusume::Connecting::Hide"));
+        assert!(!hook_is_disabled(&one_hook, "umamusume::NowLoading::Hide"), "an id reached a hook that only shares its last segment");
+        assert!(!hook_is_disabled(&one_hook, "umamusume::Connecting::Show"), "an id reached a hook of another name");
+
+        let typo = keys(["umamusume::NowLoading::Hdie"]);
+        assert!(!hook_is_disabled(&typo, "umamusume::NowLoading::Hide"), "a typo disabled a hook it never named");
+    }
+
+    #[test]
+    fn every_bare_key_disables_the_population_the_bare_name_rule_disabled() {
+        // The acceptance half of C27, over the whole colliding population rather than one pair: a key
+        // an existing config already contains reaches the same hooks the build it was written for
+        // reached. The replaced rule is spelled out here instead of called, so the comparison is not
+        // this module's own answer checked against itself.
+        let population: Vec<&str> = COLLIDING_KEYS.iter().flat_map(|(_, ids)| ids.iter().copied()).collect();
+        assert_eq!(population.len(), 38, "the fixture is the 38 sites the audit prints over 14 shared names");
+
+        for (key, expected) in COLLIDING_KEYS.iter() {
+            let configured = keys([*key]);
+
+            let now: Vec<&str> = population.iter().copied().filter(|id| hook_is_disabled(&configured, id)).collect();
+
+            // `disabled_hooks.contains(stringify!($hook))`, which is the set against the wrapper name,
+            // and a fixture id ends with that name.
+            let before: Vec<&str> = population
+                .iter()
+                .copied()
+                .filter(|id| configured.contains(id.rsplit("::").next().unwrap_or(id)))
+                .collect();
+
+            assert_eq!(now, before, "the key {key:?} reaches a different population than the build that keyed on the wrapper name");
+            assert_eq!(now, *expected, "the key {key:?} does not reach the hooks the audit prints under that name");
+        }
+
+        // The one the speed work cares about: `ui_animation_scale` runs through the DOTween tween tick
+        // detour, which shares its name with two other hooks. A config holding `Update` put all three
+        // down before ids existed, and it still does.
+        let update = keys(["Update"]);
+        assert!(hook_is_disabled(&update, "DOTween::TweenManager::Update"), "the bare key `Update` no longer puts down the tween tick detour it used to");
+        assert!(hook_is_disabled(&update, "UnityEngine_UI::EventSystem::Update"));
+        assert!(hook_is_disabled(&update, "umamusume::TapEffectController::Update"));
+    }
+
+    #[test]
+    fn a_bare_key_naming_a_wrapper_nothing_else_shares_still_disables_that_hook_alone() {
+        // The half of the population the colliding fixture above does not name: the wrapper names armed by
+        // one file alone, 314 of the audit's 330 (`python tools/scan_hook_barriers.py --summary`, re-printed
+        // 2026-10-10). A config written before ids were keys is as likely to hold one of those names as a
+        // colliding one, and for those the fallback is the whole of the key's effect - the hook it names goes
+        // down, and no other hook goes down with it.
+        let single: Vec<&str> = SINGLE_NAME_KEYS.iter().map(|(_, id)| *id).collect();
+        let population: Vec<&str> = COLLIDING_KEYS
+            .iter()
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .chain(single.iter().copied())
+            .collect();
+
+        for (name, id) in SINGLE_NAME_KEYS.iter() {
+            // The legacy key: the bare name, and nothing else reaches.
+            let configured = keys([*name]);
+            let reached: Vec<&str> = population
+                .iter()
+                .copied()
+                .filter(|other| hook_is_disabled(&configured, other))
+                .collect();
+            assert_eq!(reached, vec![*id], "the bare key {name:?} reached {reached:?} instead of the one hook it names");
+
+            // The key the id adds: the same hook, spelled out, and still nothing else.
+            let by_id = keys([*id]);
+            let reached: Vec<&str> = population
+                .iter()
+                .copied()
+                .filter(|other| hook_is_disabled(&by_id, other))
+                .collect();
+            assert_eq!(reached, vec![*id], "the id {id:?} reached {reached:?} instead of the hook it spells");
+        }
+    }
+
+    #[test]
+    fn a_config_holding_no_disabled_hooks_disarms_none_of_the_colliding_population() {
+        // The neutral default of the option: `Config::disabled_hooks` is `#[serde(default)]`, so an
+        // absent key list is an empty set, and an empty set is the one input `hook_is_disabled`
+        // answers without touching the id list at all. A default config arms everything it armed
+        // before this rule existed.
+        let nothing: FnvHashSet<String> = FnvHashSet::default();
+
+        for (_, ids) in COLLIDING_KEYS.iter() {
+            for id in ids.iter().copied() {
+                assert!(!hook_is_disabled(&nothing, id), "a config with no keys put {id} down");
+            }
+        }
+
+        assert!(unmatched_hook_keys(&nothing, &[]).is_empty(), "a config with no keys printed a report line");
+        assert!(colliding_hook_keys(&nothing, &[]).is_empty(), "a config with no keys printed a collision line");
+    }
+
+    #[test]
+    fn a_key_is_read_as_a_hook_id_first_and_a_bare_wrapper_name_second() {
+        let id = "umamusume::NowLoading::Hide";
+
+        assert_eq!(hook_key_match(id, id), Some(HookKeyMatch::Id));
+        assert_eq!(hook_key_match("Hide", id), Some(HookKeyMatch::BareName));
+        assert_eq!(hook_key_match("umamusume::Connecting::Hide", id), None, "the id of another hook reached this one");
+        assert_eq!(hook_key_match("umamusume::NowLoading::Hdie", id), None, "a typo reached this hook");
+        assert_eq!(hook_key_match("Loading::Hide", id), None, "a half written module path is neither an id nor a bare name");
+    }
+
+    #[test]
+    fn hook_ids_are_the_call_site_module_plus_the_wrapper_name() {
+        // `module_path!()` is the module of the site the hook was armed from, and `hook_id` cuts
+        // this module's root off rather than guessing at one: an id armed outside the hook tree -
+        // a `new_hook!` a platform file writes - stays a unique key, spelled in full.
+        assert!(bare_name_collision::connecting::FULL_ID.starts_with("hachimi::il2cpp::hook::tests::"));
+        assert_eq!(hook_id("hachimi::il2cpp::hook::umamusume::NowLoading::Hide"), "umamusume::NowLoading::Hide");
+        assert_eq!(hook_id("hachimi::windows::hook::LoadLibraryW"), "hachimi::windows::hook::LoadLibraryW");
+    }
+
+    #[test]
+    fn a_bare_key_that_puts_down_several_hooks_is_reported_with_the_hooks_it_put_down() {
+        // The key still works, so this is not a warning about a broken config. It is the count the old
+        // log could not print: four identical `[DISABLED] new_hook!: Hide` lines said nothing about
+        // how many hooks one key had taken down.
+        let offered: &[&str] = &[
+            "umamusume::Connecting::Hide",
+            "umamusume::DownloadManager::BackgroundDownloadProgressUI::Hide",
+            "umamusume::DownloadManager::DownloadProgressUIGame::Hide",
+            "umamusume::NowLoading::Hide",
+            "umamusume::Connecting::Show",
+        ];
+        let disabled = keys(["Hide"]);
+
+        let colliding: Vec<&str> = colliding_hook_keys(&disabled, offered).iter().map(|key| key.as_str()).collect();
+        assert_eq!(colliding, vec!["Hide"]);
+        assert!(unmatched_hook_keys(&disabled, offered).is_empty(), "a key that put four hooks down was reported as naming nothing");
+
+        let line = colliding_hook_key_line("Hide", &hooks_a_key_reaches("Hide", offered));
+        assert_eq!(
+            line,
+            "disabled_hooks key \"Hide\" is a bare wrapper name, not a hook id (C27): it puts down 4 hooks that share that name, as this option has always done: \
+             umamusume::Connecting::Hide, umamusume::DownloadManager::BackgroundDownloadProgressUI::Hide, \
+             umamusume::DownloadManager::DownloadProgressUIGame::Hide, umamusume::NowLoading::Hide. \
+             Write one of those ids to put down one hook, or keep the name to put down all 4."
+        );
+        assert!(!line.contains("Show"), "{line}");
+
+        // The other two shapes print nothing here, and the `[DISABLED] new_hook!: <id>` line the macro
+        // already printed names the hook: a key that is an id reaches one hook, and a bare name that
+        // only this build's population makes unambiguous reaches one hook too. A bare name that does
+        // reach two hooks is the collision, and it is reported as one.
+        let offered_single: &[&str] = &["umamusume::Director::AlterUpdate", "umamusume::SceneManager::AlterUpdate", "umamusume::NowLoading::Hide"];
+        let single_by_id = keys(["umamusume::NowLoading::Hide"]);
+        let two_by_name = keys(["AlterUpdate"]);
+
+        let single: Vec<&str> = colliding_hook_keys(&single_by_id, offered_single).iter().map(|key| key.as_str()).collect();
+        assert!(single.is_empty(), "a key naming one hook printed a collision line for it");
+        let single: Vec<&str> = unmatched_hook_keys(&single_by_id, offered_single).iter().map(|key| key.as_str()).collect();
+        assert!(single.is_empty(), "a key naming one hook printed a no-hook line for it");
+
+        let two: Vec<&str> = colliding_hook_keys(&two_by_name, offered_single).iter().map(|key| key.as_str()).collect();
+        assert_eq!(two, vec!["AlterUpdate"], "a bare name reaching two hooks was not reported as the collision it is");
+    }
+
+    #[test]
+    fn a_bare_key_that_puts_down_more_than_four_hooks_names_four_and_counts_the_rest() {
+        let offered: Vec<String> = (1..=6).map(|index| format!("umamusume::ListItem{index}::Setup")).collect();
+        let offered: Vec<&str> = offered.iter().map(|key| key.as_str()).collect();
+
+        let line = colliding_hook_key_line("Setup", &hooks_a_key_reaches("Setup", &offered));
+        assert_eq!(
+            line,
+            "disabled_hooks key \"Setup\" is a bare wrapper name, not a hook id (C27): it puts down 6 hooks that share that name, as this option has always done: \
+             umamusume::ListItem1::Setup, umamusume::ListItem2::Setup, umamusume::ListItem3::Setup, umamusume::ListItem4::Setup (and 2 more sharing that name). \
+             Write one of those ids to put down one hook, or keep the name to put down all 6."
+        );
+        assert!(!line.contains("ListItem5"), "{line}");
+    }
+
+    #[test]
+    fn a_configured_key_that_names_no_hook_is_reported_with_the_ids_it_missed() {
+        let offered: &[&str] = &["umamusume::Connecting::Hide", "umamusume::NowLoading::Hide", "umamusume::Connecting::Show"];
+        let disabled = keys(["umamusume::NowLoading::Hdie", "connecting::Hide", "umamusume::Connecting::Show", "OldGate::Fade"]);
+
+        // A key that is a real hook id armed here is not a problem and says nothing. A key that is not
+        // an id and is not a bare name either is the one that put nothing down.
+        let unmatched: Vec<&str> = unmatched_hook_keys(&disabled, offered).iter().map(|key| key.as_str()).collect();
+        assert_eq!(unmatched, vec!["OldGate::Fade", "connecting::Hide", "umamusume::NowLoading::Hdie"]);
+
+        // A key whose last segment does belong to hooks armed here is answered with those ids, because
+        // that is the shape a half written id leaves behind in a player's config.json.
+        assert_eq!(
+            unmatched_hook_key_line("connecting::Hide", offered),
+            "disabled_hooks key \"connecting::Hide\" names no hook in this build (C27). \
+             2 hooks armed here end with the name \"Hide\", which as a bare key would put them all down: \
+             umamusume::Connecting::Hide, umamusume::NowLoading::Hide. Write one of those ids to put down one hook."
+        );
+
+        // A key whose last segment names nothing this build arms is answered with the key form, and
+        // that covers the bare name a config carries for a hook this tree no longer writes: it reached
+        // nothing before ids existed and it reaches nothing now.
+        let bare_and_gone = keys(["Fade"]);
+        assert_eq!(unmatched_hook_keys(&bare_and_gone, offered).iter().map(|key| key.as_str()).collect::<Vec<_>>(), vec!["Fade"]);
+
+        assert_eq!(
+            unmatched_hook_key_line("umamusume::NowLoading::Hdie", offered),
+            "disabled_hooks key \"umamusume::NowLoading::Hdie\" names no hook in this build (C27). \
+             A key is either a hook id, printed verbatim by every new_hook!: line, or a bare wrapper name that puts down every hook sharing that name."
+        );
+        assert_eq!(
+            unmatched_hook_key_line("OldGate::Fade", offered),
+            "disabled_hooks key \"OldGate::Fade\" names no hook in this build (C27). \
+             A key is either a hook id, printed verbatim by every new_hook!: line, or a bare wrapper name that puts down every hook sharing that name."
+        );
+    }
+
+    #[test]
+    fn unmatched_keys_are_reported_in_a_stable_order() {
+        // `disabled_hooks` is a hash set: without sorting, two runs of the same config print the
+        // same problems in a different order, and a run log is read by comparing it against another.
+        let offered: &[&str] = &["umamusume::NowLoading::Hide", "umamusume::Connecting::Hide"];
+        let disabled = keys(["zeta", "alpha", "middle", "Hide"]);
+
+        let reported: Vec<&str> = unmatched_hook_keys(&disabled, offered).iter().map(|key| key.as_str()).collect();
+        assert_eq!(reported, vec!["alpha", "middle", "zeta"]);
+
+        let reported: Vec<&str> = colliding_hook_keys(&disabled, offered).iter().map(|key| key.as_str()).collect();
+        assert_eq!(reported, vec!["Hide"]);
     }
 }

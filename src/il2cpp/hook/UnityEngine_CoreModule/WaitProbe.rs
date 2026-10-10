@@ -211,8 +211,8 @@ pub fn init(unity: *const Il2CppImage) {
     let _ = START.set(Instant::now());
 
     // The two doors are armed here rather than through one helper, because `new_hook!` keys
-    // `disabled_hooks` on the bare wrapper name and one helper standing on both doors would put both
-    // doors under the same key (C27).
+    // `disabled_hooks` on the wrapper's id and one helper standing on both doors is one id for both
+    // doors (C27): the key would put the scaled wait and the realtime wait down together.
     let scaled = resolve_ctor(unity, c"UnityEngine", c"WaitForSeconds");
     let realtime = resolve_ctor(unity, c"UnityEngine", c"WaitForSecondsRealTime");
 

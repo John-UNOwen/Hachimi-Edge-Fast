@@ -32,11 +32,48 @@ what a commit built that way would drop - and exits non-zero while any file a bu
 cannot fail is not evidence (AGENTS §10), and this one prints the `??` a `git add -u` commit drops
 silently, which is the failure the C2 packaging section records.
 
-Run: python tools/scan_hook_barriers.py [--summary]   (exit 1 = a file the change set needs is not committable)
+It also checks the key `disabled_hooks` matches on (C27), and it checks that rule against the tree rather
+than against itself:
+
+  * The rule is read out of `src/il2cpp/hook/mod.rs`, the file the arming path runs - the id expression
+    `new_hook!` builds, the prefix `hook_id` cuts off it, the function the macro consults for the decision,
+    and every comparison that function makes between a configured key and a hook id. The audit prints what
+    it read with the line each came from, and it exits non-zero on a comparison in that decision it could
+    not read: a rewritten rule this tool has not read fails the audit instead of passing it.
+  * The log a player reads is written by a second copy of the same rule, `hook_key_match`, and a rule written
+    twice by hand is a rule that can drift. The audit reads that copy too - mapping its parameters from the
+    one comparison in it that cuts a last segment out of a hook id - and exits non-zero when the two copies
+    name different halves, cut a bare name at different separators, join with `&&` rather than each naming a
+    hook on its own, or when the report copy is written so the audit cannot tell which parameter a configured
+    key reaches.
+  * `new_hook!` keys each arming site on its own hook id, so the cross-check walks the population once more
+    and prints how many distinct ids it comes to. Two armed sites answering to one id is the defect coming
+    back - one key, more than one hook - so it exits non-zero on that.
+  * The same rule keeps the bare wrapper name it matched on before ids existed. For *every* wrapper name
+    this tree arms, the audit compares the population the *shipped* rule puts down - the comparisons read
+    out of `hook/mod.rs`, evaluated over the arming population - with the population `disabled_hooks
+    .contains(stringify!($hook))`, the rule the fork replaced, put down. A name whose two populations
+    differ is a config key silently losing its effect, and it exits non-zero on that. Cutting the
+    bare-name half out of `hook_is_disabled` moves this row and the one above it together: the shipped
+    rule reaches 0 of the sites a pre-id key names, the replaced rule still reaches all of them, and the
+    audit exits 1. It is the check that was missing when this defect shipped behind a "Legacy keys
+    unchanged" claim, and it is not the check that proves the *behaviour* - `cargo test --lib`'s
+    `every_bare_key_disables_the_population_the_bare_name_rule_disabled` calls the shipped function over
+    the 14 names / 38 sites `COLLIDING_KEYS` holds, and `a_bare_key_naming_a_wrapper_nothing_else_shares
+    _still_disables_that_hook_alone` calls it over `SINGLE_NAME_KEYS`. This audit reads the decision and
+    the population; it does not execute it.
+  * The Rust tests' fixtures are copies of this tool's population, so the audit compares both copies with
+    what the tree arms now and exits non-zero when one no longer matches it.
+
+Run: python tools/scan_hook_barriers.py [--summary]   (exit 1 = a file the change set needs is not
+committable, or two armed sites answer to one `disabled_hooks` key, or the shipped key rule reaches a
+different population than the wrapper-name rule it replaced, or the decision in `hook/mod.rs` is written in
+a shape this audit cannot read, or a test's fixture no longer matches the tree)
 """
 
 from __future__ import annotations
 
+from collections import Counter
 import pathlib
 import re
 import subprocess
@@ -511,6 +548,636 @@ def carrying(path: str) -> bool:
     return path.startswith(CARRYING)
 
 
+def crate_name() -> str:
+    """The name `module_path!()` starts every hook id with, read out of Cargo.toml.
+
+    Typed here it would go stale on a rename and the audit would keep printing a key the build no
+    longer produces. The `[lib] name` is what the crate compiles as; `[package] name` is the fallback.
+    """
+    section = ""
+    try:
+        for line in pathlib.Path("Cargo.toml").read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                section = stripped[1:-1]
+            elif section in ("lib", "package") and stripped.startswith("name"):
+                return stripped.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "hachimi"
+
+
+CRATE = crate_name()
+# ------------------------------------------------- the key rule, read out of its own source
+#
+# C27's tree half used to rest on two rows that could not report anything. The audit built each site's
+# key itself - `<module read off the file path>::<the wrapper that site armed>` - and then asked whether
+# that key's last segment was that wrapper, and whether the rule the audit modelled reached a different
+# population than the wrapper-name rule it replaced. Both questions were asked of the audit's own copy of
+# the rule, so each printed 0 on any tree, including a tree whose shipped `hook_is_disabled` compares
+# hook ids alone - which is the build this defect arrived in. AGENTS section 10: a check that cannot match
+# what it looks for returns a clean number on any tree.
+#
+# So the rule is read out of the file the arming path runs. Out of `src/il2cpp/hook/mod.rs` the audit
+# takes the id expression `new_hook!` builds, the prefix `hook_id` cuts off it, the function the arming
+# macro consults for the decision, and every comparison that function makes between a configured key and
+# the hook id of the site being armed - with the separator each cut uses and the line each was read at, so
+# the claim the audit prints names its source. The one thing here not read from the shipped source is what
+# `module_path!()` is for a file, and the Rust side pins that too
+# (`hook_ids_are_the_call_site_module_plus_the_wrapper_name`). A shape in that file this audit cannot model
+# is reported as one and gates the exit, so a rewrite of the rule the tool has not read fails the audit
+# instead of passing it.
+
+KEY_RULE_FILE = pathlib.Path("src/il2cpp/hook/mod.rs")
+
+# The function the key report after hooking matches on. It and the arming decision are two copies of the
+# same rule written by hand, and the log a player reads comes from this one.
+REPORT_FN = "hook_key_match"
+
+ID_CONCAT = re.compile(r"concat!\s*\(\s*module_path!\s*\(\s*\)\s*,\s*")
+ID_TAIL = re.compile(r"\"[^\n]*\"\s*,\s*stringify!\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\)")
+ROOT_CONST = re.compile(r"\bconst\s+HOOK_ID_ROOT\s*:\s*[^=;\n]+=")
+LAST_CUT = re.compile(r"\.(rsplit|rsplitn|split|splitn)\s*\(")
+MEMBERSHIP = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*contains\s*\(")
+SIDE = r"(?:[A-Za-z_][A-Za-z0-9_]*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)|[A-Za-z_][A-Za-z0-9_]*)"
+EQUALITY = re.compile("(" + SIDE + r")\s*==\s*(" + SIDE + ")")
+CALL_HEAD = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+# Every way this file could compare a configured key with a hook id that the audit does not model as a
+# comparison. Counted in the decision's answer only to notice one appearing, never to model it.
+COMPAREISH = re.compile(r"\.(?:contains|starts_with|ends_with|eq|ne|matches|strip_prefix|binary_search)\s*\(")
+
+
+def flat(text: str) -> str:
+    """Whitespace removed, so a comparison read out of a formatted file compares as one string."""
+    return re.sub(r"\s+", "", text)
+
+
+def fn_span(blank: str, name: str) -> tuple[int, int, int] | None:
+    """Offsets in blanked text of `fn name(..)`: its head, the brace opening its body, the closing brace."""
+    head = re.search(r"\bfn\s+" + re.escape(name) + r"\s*\(", blank)
+    if not head:
+        return None
+    paren = match_close(blank, head.end() - 1, "(", ")")
+    if paren < 0:
+        return None
+    brace = blank.find("{", paren)
+    if brace < 0:
+        return None
+    close = match_close(blank, brace, "{", "}")
+    return (head.start(), brace, close) if close > brace else None
+
+
+def statement_breaks(body: str) -> list[int]:
+    """Offsets of the `;` that end a statement of this body, at the body's own brace depth.
+
+    The coverage check needs the one expression a function answers with. A `;` inside a block or a call is
+    not the end of a statement of the body, and treating one as such would cut the region the comparisons
+    were read from down to part of what the function actually returns.
+    """
+    depth = 0
+    out: list[int] = []
+    for idx, ch in enumerate(body):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ";" and depth <= 0:
+            out.append(idx)
+    return out
+
+
+def literal_in(raw: str, blank: str, start: int, end: int) -> str | None:
+    """The first string literal written in raw[start:end].
+
+    `blank_non_code` blanks what sits between the quotes and leaves the quotes where they were, so the
+    blanked text locates a literal at the same offsets and the raw text supplies its content.
+    """
+    quote = blank.find('"', start, end)
+    if quote < 0:
+        return None
+    close = blank.find('"', quote + 1, end)
+    return raw[quote + 1:close] if close > quote else None
+
+
+def module_path_of(site_path: str, sep: str) -> str:
+    """`module_path!()` for a file: `src/` dropped, `mod.rs` dropped, `.rs` dropped, joined by `sep`.
+
+    A hook armed through a helper macro is named by the file that macro was *called* from - the arm path
+    this audit recorded - not the file the helper macro is written in, which is what `module_path!()`
+    expands to at the call site.
+    """
+    parts = pathlib.PurePosixPath(site_path).parts[1:]
+    if parts and parts[-1] == "mod.rs":
+        parts = parts[:-1]
+    return sep.join(p[:-3] if p.endswith(".rs") else p for p in parts)
+
+
+def parameter_names(blank: str, head_at: int, brace: int) -> list[str]:
+    """The parameter names of a Rust function, in order, out of its signature."""
+    open_paren = blank.find("(", head_at)
+    close = match_close(blank, open_paren, "(", ")")
+    if open_paren < 0 or close < 0 or close > brace:
+        return []
+
+    parts: list[str] = []
+    depth = 0
+    start = open_paren + 1
+    for idx in range(open_paren + 1, close):
+        ch = blank[idx]
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(blank[start:idx])
+            start = idx + 1
+    if blank[start:close].strip():
+        parts.append(blank[start:close])
+
+    names: list[str] = []
+    for part in parts:
+        head = re.match(r"\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", part)
+        if head:
+            names.append(head.group(1))
+    return names
+
+
+class KeyRule:
+    """The `disabled_hooks` decision as the shipped source writes it (C27)."""
+
+    def __init__(self) -> None:
+        self.read_from = KEY_RULE_FILE.as_posix()
+        self.id_at = 0
+        self.id_shape = ""
+        self.id_found = False
+        self.id_sep = "::"
+        self.id_cut_by = ""
+        self.root = ""
+        self.root_at = 0
+        self.decision = ""
+        self.decision_at = 0
+        self.decision_call = ""
+        self.bare_helper = ""
+        self.bare_sep = ""
+        self.bare_at = 0
+        self.bare_keeps_one = False
+        self.connective = ""
+        self.comparisons: list[tuple[str, int, str]] = []  # (source text, line, "id" or "bare")
+        self.cannot: list[str] = []
+
+    def site_id(self, boundary) -> str:
+        """The key one armed site answers to, built the way the id read out of the macro is built.
+
+        `module_path!()` for the site joined to the wrapper its `new_hook!` names, with the separator read
+        out of the macro, then the prefix `hook_id` cuts - including for a site armed in the hook module
+        itself, where the id that leaves is the bare wrapper name.
+        """
+        full = (CRATE + self.id_sep + module_path_of(boundary.arm_path, self.id_sep)
+                + self.id_sep + boundary.wrapper)
+        return full[len(self.root):] if self.root and full.startswith(self.root) else full
+
+    def reaches(self, key: str, site_id: str) -> bool:
+        """Whether one configured key puts one site down, under the comparisons read from the source."""
+        answers: list[bool] = []
+        for _text, _line, kind in self.comparisons:
+            if kind == "id":
+                answers.append(key == site_id)
+            elif kind == "bare":
+                answers.append(key == site_id.rsplit(self.bare_sep, 1)[-1])
+        if not answers:
+            return False
+        return all(answers) if self.connective == "&&" else any(answers)
+
+
+def last_cut_of(blank: str, raw: str, name: str) -> tuple[str, bool] | None:
+    """(`separator`, keeps a single segment) when `fn name(x)` answers the last segment of `x`."""
+    span = fn_span(blank, name)
+    if span is None:
+        return None
+
+    _head, brace, close = span
+    body = blank[brace + 1:close]
+    cut = LAST_CUT.search(body)
+    if not cut:
+        return None
+
+    sep = literal_in(raw, blank, cut.end(), close)
+    if sep is None:
+        return None
+    return sep, bool(re.search(r"\.unwrap_or\b", body[cut.end():]))
+
+
+def classify_side(rule: KeyRule, blank: str, raw: str, side: str, id_param: str) -> str:
+    """`id` when a side is a hook id itself, `bare` when it is that id's last segment, else empty."""
+    side = flat(side)
+    if side == id_param:
+        return "id"
+
+    helper = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\(" + re.escape(id_param) + r"\)", side)
+    if not helper:
+        return ""
+
+    name = helper.group(1)
+    cut = last_cut_of(blank, raw, name)
+    if cut is None:
+        rule.cannot.append(
+            f"{rule.read_from}: the key is compared with {side}, and fn {name} is not a cut at a fixed "
+            "separator this audit can model")
+        return ""
+
+    if rule.bare_helper and rule.bare_helper != name:
+        rule.cannot.append(
+            f"{rule.read_from}: the bare half of the rule reaches through both {rule.bare_helper} and {name}")
+        return ""
+
+    rule.bare_helper = name
+    rule.bare_sep, rule.bare_keeps_one = cut
+    return "bare"
+
+
+def read_decision_fn(rule: KeyRule, blank: str, raw: str, starts: list[int], name: str,
+                     slots: dict[int, str], seen: tuple[str, ...] = ()) -> None:
+    """Add to `rule` every comparison `fn name` makes between a configured key and a hook id.
+
+    `slots` maps the function's positional parameters to the two things a key rule can be about: the key
+    the player configured, and the id of the site being armed. They come from the call the arming macro
+    writes, so the audit follows the data - who hands the decision the set and who hands it the id -
+    instead of assuming which side of a comparison is which. A comparison this mapping does not explain is
+    reported as unread rather than guessed at, because guessing is what made the old rows print 0 whatever
+    the shipped rule said.
+    """
+    if name in seen:
+        return
+
+    span = fn_span(blank, name)
+    if span is None:
+        rule.cannot.append(f"{rule.read_from}: fn {name} is not in this file, so that half of the rule is unread")
+        return
+
+    head_at, brace, close = span
+    params = parameter_names(blank, head_at, brace)
+    if len(params) != len(slots) or any(index not in slots for index in range(len(params))):
+        rule.cannot.append(
+            f"{rule.read_from}: fn {name} takes {len(params)} parameters and the arming macro hands it "
+            f"{len(slots)}, so which parameter a configured key reaches cannot be read")
+        return
+
+    slot_of = {param: slots[index] for index, param in enumerate(params)}
+    id_param = next((param for param, slot in slot_of.items() if slot == "id"), "")
+    body = blank[brace + 1:close]
+
+    found = list(MEMBERSHIP.finditer(body))
+    shape = "membership"
+    if not found:
+        found = list(EQUALITY.finditer(body))
+        shape = "equality"
+
+    if not found:
+        delegated: tuple[str, dict[int, str]] | None = None
+        for call in CALL_HEAD.finditer(body):
+            closed = match_close(body, call.end() - 1, "(", ")")
+            if closed < 0:
+                continue
+            args = [flat(arg) for arg in split_args(body, call.end() - 1)]
+            if not args or any(arg not in slot_of for arg in args):
+                continue
+            delegated = (call.group(1), {index: slot_of[arg] for index, arg in enumerate(args)})
+            break
+
+        if delegated is None:
+            rule.cannot.append(
+                f"{rule.read_from}: fn {name} answers whether a key disables a hook in a form this audit "
+                "does not model, so the tree-wide key claim has nothing behind it")
+            return
+
+        read_decision_fn(rule, blank, raw, starts, delegated[0], delegated[1], seen + (name,))
+        return
+
+    connective = ""
+    previous_close = -1
+    modelled = 0
+    boundaries = 0
+    first_at = -1
+    last_end = -1
+
+    for match in found:
+        open_paren = match.end() - 1
+        closed = match_close(body, open_paren, "(", ")") if shape == "membership" else -1
+        if shape == "membership" and closed < 0:
+            rule.cannot.append(f"{rule.read_from}: fn {name} writes a `.contains(` this audit cannot read")
+            continue
+
+        if shape == "membership":
+            sides = [match.group(1), body[open_paren + 1:closed]]
+            end_of_comparison = closed
+        else:
+            sides = [match.group(1), match.group(2)]
+            end_of_comparison = match.end() - 1
+
+        key_side = next((side for side in sides if slot_of.get(flat(side)) == "key"), "")
+        others = [side for side in sides if side != key_side]
+
+        if not key_side or len(others) != 1:
+            rule.cannot.append(
+                f"{rule.read_from}:{line_of(starts, brace + 1 + match.start())} writes "
+                f"{flat(match.group(0))}, which does not compare the configured key with the hook id of the "
+                "site being armed")
+            continue
+
+        kind = classify_side(rule, blank, raw, others[0], id_param)
+        if not kind:
+            if not rule.cannot or not rule.cannot[-1].startswith(rule.read_from):
+                rule.cannot.append(
+                    f"{rule.read_from}:{line_of(starts, brace + 1 + match.start())} compares the configured "
+                    f"key with {flat(others[0])}, a shape this audit does not model")
+            continue
+
+        written = flat(match.group(0) + others[0] + ")") if shape == "membership" else flat(match.group(0))
+        rule.comparisons.append((written, line_of(starts, brace + 1 + match.start()), kind))
+        modelled += 1
+        first_at = match.start() if first_at < 0 else min(first_at, match.start())
+        last_end = max(last_end, end_of_comparison)
+
+        gap = flat(body[previous_close + 1:match.start()]) if previous_close >= 0 else ""
+        previous_close = end_of_comparison
+        if not gap:
+            continue
+        if gap in ("||", "&&"):
+            if connective and connective != gap:
+                rule.cannot.append(
+                    f"{rule.read_from}: fn {name} joins its comparisons with both {connective} and {gap}")
+            connective = gap
+        elif re.search(r"(?:\}|\))\s*if$|;\s*if$", gap):
+            # Comparisons written as separate guard arms: each one that matches decides on its own, which
+            # is a disjunction of the same kind the `||` form is.
+            boundaries += 1
+            if connective not in ("", "arm"):
+                rule.cannot.append(
+                    f"{rule.read_from}: fn {name} joins its comparisons with both {connective} and separate "
+                    "guard arms")
+            connective = "arm"
+        else:
+            rule.cannot.append(
+                f"{rule.read_from}: fn {name} joins its comparisons with {gap}, which this audit does not "
+                "model")
+
+    if rule.bare_helper:
+        helper = fn_span(blank, rule.bare_helper)
+        rule.bare_at = 0 if helper is None else line_of(starts, helper[0])
+
+    if modelled:
+        # The model is only a reading of the decision if it accounts for the whole expression the decision
+        # returns. An adapter the audit did not model - an `any(..)` wrapped around the comparisons, a third
+        # comparison it could not place - would otherwise vanish from the model instead of being said, and a
+        # rule that vanishes from the model is exactly how the last version of this check passed a tree whose
+        # shipped rule had already lost its bare half.
+        region_start = 0
+        region_end = len(body)
+        breaks = statement_breaks(body)
+        earlier = [at for at in breaks if at < first_at]
+        if earlier:
+            region_start = earlier[-1] + 1
+        later = [at for at in breaks if at >= last_end]
+        if later:
+            region_end = later[0]
+
+        region = body[region_start:region_end]
+        # Counted from the operators written there, not from this tool's own patterns: a comparison whose
+        # sides are more than a name or one call - a chained `id.rsplit(..).unwrap_or(..)`, an index, a
+        # method on a field - is invisible to those patterns, and an invisible comparison is an uncounted
+        # population.
+        written = len(re.findall(r"==|!=", region)) + len(COMPAREISH.findall(region))
+        adapters = re.findall(r"\.(?:any|all|iter|iter_mut|filter|find|position|chain|take|skip|map"
+                              r"|flat_map|copied|cloned|drain|retain)\s*\(", region)
+        operators = len(re.findall(r"\|\||&&", region))
+
+        arms = len(re.findall(r"=>", region))
+        reasons = []
+        if arms:
+            reasons.append(f"it answers through {arms} match arm(s), which this audit does not read as a "
+                           "comparison between a key and a hook id")
+        if written != modelled:
+            reasons.append(f"the expression it returns writes {written} comparison, so "
+                           f"{written - modelled} of them is in a shape this audit does not match")
+        if adapters:
+            reasons.append(f"it wraps comparisons in {len(adapters)} adapter call(s): "
+                           + ", ".join(sorted({flat(a) for a in adapters})))
+        if operators + boundaries != max(modelled - 1, 0):
+            reasons.append(f"its {modelled} comparison(s) are joined by {operators + boundaries}, which is "
+                           "not the one connective per pair the model assumes")
+        if reasons:
+            rule.cannot.append(f"{rule.read_from}: fn {name} answers with {modelled} comparison this audit "
+                               "modelled, and " + "; ".join(reasons))
+
+
+def read_key_rule(blank: str, raw: str, starts: list[int], new_hook) -> KeyRule:
+    """Read the `disabled_hooks` rule out of `hook/mod.rs`, the file the arming path runs (C27)."""
+    rule = KeyRule()
+
+    if new_hook is None:
+        rule.cannot.append(f"{rule.read_from}: no macro_rules! new_hook to read the key rule from")
+        return rule
+
+    root = ROOT_CONST.search(blank)
+    if root is None:
+        rule.cannot.append(f"{rule.read_from}: no const HOOK_ID_ROOT, so no id prefix is cut off")
+    else:
+        end = blank.find(";", root.start())
+        end = len(blank) if end < 0 else end
+        join = ID_CONCAT.search(blank, root.start(), end)
+        sep = literal_in(raw, blank, join.end(), end) if join else None
+        if sep is None:
+            rule.cannot.append(
+                f"{rule.read_from}: HOOK_ID_ROOT is not concat!(module_path!(), <separator>), so the prefix "
+                "cut off a hook id cannot be read")
+        else:
+            rule.root_at = line_of(starts, root.start())
+            rule.root = CRATE + sep + module_path_of(KEY_RULE_FILE.as_posix(), sep) + sep
+
+    cut_id = fn_span(blank, "hook_id")
+    if cut_id is None:
+        rule.cannot.append(f"{rule.read_from}: no fn hook_id, so nothing cuts the hook module off an id")
+    elif "strip_prefix(HOOK_ID_ROOT)" not in flat(blank[cut_id[1]:cut_id[2]]):
+        rule.cannot.append(
+            f"{rule.read_from}: fn hook_id no longer cuts HOOK_ID_ROOT off the id new_hook! builds")
+
+    for arm_index, (_pattern_at, _pattern, body_at, arm_body) in enumerate(new_hook.arms):
+        start = new_hook.body_at + body_at
+        end = start + len(arm_body)
+        join = ID_CONCAT.search(blank, start, end)
+        if not join:
+            continue
+
+        tail = ID_TAIL.match(blank, join.end())
+        sep = literal_in(raw, blank, join.end(), end)
+        if not tail or sep is None:
+            rule.cannot.append(
+                f"{rule.read_from}:{line_of(starts, join.start())} builds an id from module_path!() "
+                "in a shape this audit cannot read")
+            continue
+
+        wrapper = tail.group(1)
+        position = new_hook.placeholders[arm_index].get(wrapper)
+        if position != 1:
+            rule.cannot.append(
+                f"{rule.read_from}:{line_of(starts, join.start())} puts stringify!(${wrapper}) - "
+                f"argument {position} of new_hook! - into the id, and the audit reads the wrapper from "
+                "argument 1")
+            continue
+
+        rule.id_at = line_of(starts, join.start())
+        rule.id_found = True
+        rule.id_sep = sep
+        rule.id_shape = f"concat!(module_path!(), {sep!r}, stringify!(${wrapper}))"
+
+        before = flat(blank[max(start, join.start() - 60):join.start()]).rstrip()
+        rule.id_cut_by = "hook_id" if before.endswith("hook_id(") else ""
+        if not rule.id_cut_by:
+            rule.cannot.append(
+                f"{rule.read_from}:{rule.id_at} hands the id to nothing that cuts the hook module root off it")
+
+        decision: dict[int, str] | None = None
+        for call in CALL_HEAD.finditer(blank, start, end):
+            closed = match_close(blank, call.end() - 1, "(", ")")
+            if closed < 0 or closed > end:
+                continue
+            args = split_args(blank, call.end() - 1)
+            key_slot = next((i for i, arg in enumerate(args) if "disabled_hooks" in arg), None)
+            if key_slot is None or len(args) != 2:
+                continue
+
+            id_slot = 1 - key_slot
+            bound = re.search(r"\blet\s+" + re.escape(flat(args[id_slot])) + r"\s*=\s*([^;]*)", arm_body)
+            if bound is None or "module_path!" not in bound.group(1):
+                rule.cannot.append(
+                    f"{rule.read_from}:{line_of(starts, call.start())} decides with "
+                    f"{flat(args[id_slot])}, which this arm does not bind to an id built from module_path!()")
+                continue
+
+            rule.decision = call.group(1)
+            rule.decision_at = line_of(starts, call.start())
+            rule.decision_call = flat(call.group(1) + "(" + ",".join(args) + ")")
+            decision = {key_slot: "key", id_slot: "id"}
+            break
+
+        if decision is None and not rule.cannot:
+            rule.cannot.append(
+                f"{rule.read_from}:{line_of(starts, start)} new_hook! does not hand one function both the "
+                "configured disabled_hooks and this site's hook id, so the arming decision is not one rule")
+            continue
+
+        if decision is not None and "disabled_hooks.contains(" in flat(arm_body):
+            rule.cannot.append(
+                f"{rule.read_from}:{rule.decision_at} new_hook! compares the configured set itself, which is "
+                "the rule C27 was written against, instead of consulting one decision function")
+
+        if decision is not None:
+            read_decision_fn(rule, blank, raw, starts, rule.decision, decision)
+
+    if not rule.id_found:
+        rule.cannot.append(
+            f"{rule.read_from}: no new_hook! arm builds its key out of module_path!(), so the ids this "
+            "audit keys the arming sites on are its own guess and not the build's")
+
+    return rule
+
+
+def infer_key_id_slots(blank: str, raw: str, name: str) -> dict[int, str] | None:
+    """Which parameter of `fn name` a configured key sits on and which a hook id sits on.
+
+    The arming macro states this outright: it hands the decision `config.load().disabled_hooks` and the id it
+    just built. The function the key report uses has no such call to read - it is called from a closure over
+    the configured set and from a loop over the ids hooking collected - so the audit takes the mapping from
+    the only thing in that function that can tell the two apart: the half that cuts a last segment out of a
+    hook id. A function with nothing like that in it is reported as unread.
+    """
+    span = fn_span(blank, name)
+    if span is None:
+        return None
+
+    head_at, brace, close = span
+    params = parameter_names(blank, head_at, brace)
+    if len(params) != 2:
+        return None
+
+    for match in EQUALITY.finditer(blank[brace + 1:close]):
+        helper = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\(([A-Za-z_][A-Za-z0-9_]*)\)", flat(match.group(2)))
+        if helper is None or last_cut_of(blank, raw, helper.group(1)) is None:
+            continue
+
+        id_param, key_param = helper.group(2), flat(match.group(1))
+        if id_param not in params or key_param not in params or id_param == key_param:
+            continue
+        return {params.index(key_param): "key", params.index(id_param): "id"}
+
+    return None
+
+
+def read_report_rule(blank: str, raw: str, starts: list[int]) -> KeyRule:
+    """The key rule read out of the report half: the function that decides what the log says a key reached."""
+    rule = KeyRule()
+    slots = infer_key_id_slots(blank, raw, REPORT_FN)
+    if slots is None:
+        rule.cannot.append(
+            f"{rule.read_from}: fn {REPORT_FN} writes no comparison that cuts a last segment off a hook id, "
+            "so the audit cannot tell which of its parameters a configured key reaches")
+        return rule
+
+    read_decision_fn(rule, blank, raw, starts, REPORT_FN, slots)
+    return rule
+
+
+def fixture_block(name: str) -> str:
+    """The `&[..]` body of one test fixture written in `hook/mod.rs`, or an empty string."""
+    try:
+        source = KEY_RULE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    head = source.find("const " + name)
+    if head < 0:
+        return ""
+    open_ = source.find("= &[", head)
+    if open_ < 0:
+        return ""
+    open_ += 2
+
+    depth = 0
+    for index in range(open_, len(source)):
+        if source[index] == "[":
+            depth += 1
+        elif source[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return source[open_:index + 1]
+    return ""
+
+
+def fixture_populations() -> dict[str, list[str]]:
+    """The population the Rust test guarding the bare-name half names, read out of `hook/mod.rs`.
+
+    `COLLIDING_KEYS` is the fixture `every_bare_key_disables_the_population_the_bare_name_rule_disabled`
+    compares the shipped rule against the wrapper-name rule it replaced. It was copied out of this
+    tool's own output, and a copy nobody re-checks stops guarding the sites the tree actually arms, so
+    the audit reads it back and compares it with the population it derived a moment ago.
+    """
+    entries = re.finditer(r'\(\s*"([^"]+)"\s*,\s*&\[(.*?)\]', fixture_block("COLLIDING_KEYS"), re.S)
+    return {match.group(1): sorted(set(re.findall(r'"([^"]+)"', match.group(2)))) for match in entries}
+
+
+def fixture_single_names() -> list[tuple[str, str]]:
+    """The (`bare name`, `id`) pairs the key rule's test asserts for a wrapper nothing else shares.
+
+    Those are the names `COLLIDING_KEYS` cannot name - the majority of the arming population - and they
+    are hand-copied from this tool's output too, so the same re-check applies: a name the tree no longer
+    arms, or an id the tree no longer builds, is a test that stopped guarding anything.
+    """
+    return [(match.group(1), match.group(2))
+            for match in re.finditer(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', fixture_block("SINGLE_NAME_KEYS"))]
+
+
+
 STATUS_LETTERS = {
     " M": "tracked, modified, not staged",
     "M ": "tracked, modified, staged",
@@ -616,6 +1283,7 @@ def main() -> int:
         return 2
 
     code: dict[str, str] = {}
+    raw: dict[str, str] = {}
     starts: dict[str, list[int]] = {}
 
     for path in sorted(pathlib.Path("src").rglob("*.rs")):
@@ -625,6 +1293,7 @@ def main() -> int:
         except UnicodeDecodeError:
             text = path.read_text(encoding="utf-8", errors="replace")
         code[rel] = blank_non_code(text)
+        raw[rel] = text
         starts[rel] = line_starts(text)
 
     macros = {rel: collect_macros(rel, body) for rel, body in code.items()}
@@ -949,11 +1618,121 @@ def main() -> int:
     for name in shared:
         sites = ", ".join(f"{b.arm_path}:{b.arm_line}" for b in boundaries if b.wrapper == name)
         print(f"      {name:<45} {sites}")
+
+    # C27, over the whole arming population. Two questions, both asked of the rule read out of
+    # `hook/mod.rs` above rather than of a copy this tool keeps: is the key one site answers to its own,
+    # and does a key a config written before ids were keys may already hold still reach exactly the sites
+    # the wrapper-name rule reached?
+    key_rule = read_key_rule(code.get(KEY_RULE_FILE.as_posix(), ""),
+                             raw.get(KEY_RULE_FILE.as_posix(), ""),
+                             starts.get(KEY_RULE_FILE.as_posix(), [0]),
+                             macros.get(KEY_RULE_FILE.as_posix(), {}).get("new_hook"))
+
+    site_keys = [(b, key_rule.site_id(b)) for b in boundaries]
+    key_counts = Counter(key for _, key in site_keys)
+    shared_keys = sorted(key for key, count in key_counts.items() if count > 1)
+
+    # The replaced rule, spelled out here rather than called, the way the Rust test spells it out:
+    # `disabled_hooks.contains(stringify!($hook))` - the wrapper name the arming call's second argument
+    # names, which is this audit's own measurement of the site and not the rule being audited.
+    reached: dict[str, list[str]] = {}
+    reached_before: dict[str, list[str]] = {}
+    for name in sorted(armed_names):
+        reached[name] = sorted({key for _, key in site_keys if key_rule.reaches(name, key)})
+        reached_before[name] = sorted({key for b, key in site_keys if name == b.wrapper})
+    population_drift = [(name, reached[name], reached_before[name]) for name in reached if reached[name] != reached_before[name]]
+    legacy_sites = sum(len(keys) for keys in reached.values())
+
+    # The two fixtures the Rust tests are built from are copies of this population. A copy that no longer
+    # matches what the tree arms is a test that stopped guarding the sites the tree arms.
+    fixture = fixture_populations()
+    tree_groups = {name: sorted({key for b, key in site_keys if b.wrapper == name}) for name in shared}
+    fixture_drift = sorted(name for name in set(tree_groups) | set(fixture) if fixture.get(name, []) != tree_groups.get(name, []))
+
+    single_drift: list[str] = []
+    singles = fixture_single_names()
+    for name, key in singles:
+        sites = [b for b in boundaries if b.wrapper == name]
+        if not sites:
+            single_drift.append(f"{name}: no arming site writes that wrapper here, the test names {key}")
+        elif len(sites) > 1:
+            single_drift.append(f"{name}: the tree arms it in {len(sites)} files, so it is not a single-name fixture")
+        elif key_rule.site_id(sites[0]) != key:
+            single_drift.append(f"{name}: this tree builds {key_rule.site_id(sites[0])} for that site, the test names {key}")
+
     print(f"  boundaries this audit cannot classify:                {len(unresolved)}")
+    print(f"  the key rule read from {key_rule.read_from}:           {len(key_rule.comparisons)} comparisons against the configured set")
+    if key_rule.id_at:
+        print(f"      new_hook! builds the id at :{key_rule.id_at}         {key_rule.id_shape}, handed to {key_rule.id_cut_by or 'nothing'}")
+    if key_rule.root:
+        print(f"      the prefix cut off an id is {key_rule.root!r} (HOOK_ID_ROOT at :{key_rule.root_at})")
+    if key_rule.decision:
+        print(f"      new_hook! decides through {key_rule.decision} at :{key_rule.decision_at}")
+    for text, line, kind in key_rule.comparisons:
+        half = ("names one hook: the whole id" if kind == "id"
+                else f"names every hook sharing a name: {key_rule.bare_helper} cuts the id at "
+                     f"{key_rule.bare_sep!r} (fn at :{key_rule.bare_at})"
+                     + (", and answers the whole id when there is no separator" if key_rule.bare_keeps_one else ""))
+        print(f"      {text:<38} :{line:<5} {half}")
+    if key_rule.connective:
+        print(f"      joined with {key_rule.connective}")
+    print(f"  ... comparisons in that decision this audit could not read: {len(key_rule.cannot)}")
+    for item in key_rule.cannot[:20]:
+        print(f"      rule unread: {item}")
+
+    # The log a player reads is written by a second copy of the same rule. Two hand-written copies of one
+    # rule is how a rule drifts, so both are read and their shapes are compared.
+    report_rule = read_report_rule(code.get(KEY_RULE_FILE.as_posix(), ""),
+                                   raw.get(KEY_RULE_FILE.as_posix(), ""),
+                                   starts.get(KEY_RULE_FILE.as_posix(), [0]))
+    rule_halves: list[str] = []
+    armed_halves = [kind for _text, _line, kind in key_rule.comparisons]
+    report_halves = [kind for _text, _line, kind in report_rule.comparisons]
+    if armed_halves != report_halves:
+        rule_halves.append(f"the arming decision names {armed_halves or 'nothing'} and {REPORT_FN} names "
+                           f"{report_halves or 'nothing'}")
+    if key_rule.bare_sep and report_rule.bare_sep and key_rule.bare_sep != report_rule.bare_sep:
+        rule_halves.append(f"the arming decision cuts a bare name at {key_rule.bare_sep!r} and {REPORT_FN} "
+                           f"cuts it at {report_rule.bare_sep!r}")
+    if key_rule.connective == "&&" or report_rule.connective == "&&":
+        rule_halves.append(f"one of them joins its comparisons with && rather than naming a hook on its own")
+
+    print(f"  the same rule read out of the report half ({REPORT_FN}): {len(report_rule.comparisons)} "
+          f"comparisons; disagreeing with the arming decision: {len(rule_halves)}")
+    for text, line, kind in report_rule.comparisons:
+        print(f"      {text:<38} :{line:<5} {kind}")
+    for item in report_rule.cannot[:10]:
+        print(f"      report rule unread: {item}")
+    for item in rule_halves[:10]:
+        print(f"      key rule halves disagree: {item}")
+    print(f"  hook ids the arming sites key on (C27):               {len(key_counts)} ids over {len(site_keys)} sites")
+    print(f"  ... ids more than one site answers to:                {len(shared_keys)}")
+    for key in shared_keys[:20]:
+        print(f"      {key:<45} armed at "
+              + ", ".join(f"{b.arm_path}:{b.arm_line}" for b, k in site_keys if k == key))
+    for name in shared:
+        print(f"      keyed apart: {name:<37} {', '.join(tree_groups[name])}")
+
+    print(f"  bare wrapper names a pre-id config may hold (C27):    {len(armed_names)} names over {len(site_keys)} sites, "
+          f"reaching {legacy_sites} sites between them")
+    print(f"  ... names whose population the two rules disagree on: {len(population_drift)}")
+    for name, now, before in population_drift[:20]:
+        print(f"      key effect changed: {name:<31} now {', '.join(now) or 'nothing'} / before {', '.join(before) or 'nothing'}")
+    print(f"  ... the key rule's own test covers (COLLIDING_KEYS):  {len(fixture)} names over "
+          f"{sum(len(ids) for ids in fixture.values())} sites; drift: {len(fixture_drift)}")
+    for name in fixture_drift[:20]:
+        print(f"      fixture stale: {name:<31} tree arms {', '.join(tree_groups.get(name, [])) or 'nothing'} / "
+              f"test names {', '.join(fixture.get(name, [])) or 'nothing'}")
+    print(f"  ... their single-name fixture (SINGLE_NAME_KEYS):     {len(fixture_single_names())} names over "
+          f"{len(boundaries)} sites; drift: {len(single_drift)}")
+    for row in single_drift[:20]:
+        print(f"      single-name fixture stale: {row}")
     print("")
 
+    key_rule_broken = (shared_keys or key_rule.cannot or population_drift or fixture_drift or single_drift
+                       or rule_halves or report_rule.cannot)
     dropped = committability()
-    return 1 if dropped else 0
+    return 1 if (dropped or key_rule_broken) else 0
 
 
 if __name__ == "__main__":
