@@ -1,11 +1,14 @@
 use std::ffi::CString;
 use std::fmt::Write as _;
-use std::sync::atomic::{self, AtomicI32, AtomicI64, AtomicU32, AtomicUsize};
-use std::sync::OnceLock;
+use std::sync::atomic::{self, AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use fnv::FnvHashMap;
+use once_cell::sync::Lazy;
+
 use crate::{
-    core::Hachimi,
+    core::{hachimi::recover_lock, Hachimi},
     il2cpp::{
         hook::umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager},
         symbols::{get_class, get_field_from_name},
@@ -159,6 +162,7 @@ impl CutProbe {
     // cannot fill the log.
     pub(crate) fn observe(&self, values: &[f64]) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+        note_hole_census(self.name);
 
         if calls <= PROBE_DETAIL_LIMIT {
             debug!("Cutt probe {} call {}: {:?}", self.name, calls, values);
@@ -178,6 +182,7 @@ impl CutProbe {
     // interval)=12` was six calls, and its first hit lines numbered them 1, 3, 5 and 7 (C53).
     pub(crate) fn observe_peak(&self, values: &[f64], value: f32) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+        note_hole_census(self.name);
 
         if self.peaked {
             let bits = peak_merge(self.peak.load(atomic::Ordering::Relaxed), value);
@@ -195,6 +200,7 @@ impl CutProbe {
     // The frame hot shape: one increment, one max, no slice and no formatting until a chunk boundary.
     pub(crate) fn sample(&self, value: f32) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+        note_hole_census(self.name);
 
         if self.peaked {
             let bits = peak_merge(self.peak.load(atomic::Ordering::Relaxed), value);
@@ -224,6 +230,62 @@ impl CutProbe {
     pub(crate) fn label(&self) -> &str {
         self.name
     }
+}
+
+// The half items 66 and 67 left open. A training cut's hole is now named down to what it yields
+// (`UnityEngine.WaitForFixedUpdate`, one poll every 33 ms, 198 of them in run 23's 6583 ms) and down to
+// where it sits (one branch of `<PlayTrainingCut>d__70::MoveNext`), but not down to what the poll is
+// testing: sampling the coroutine's fields and its owner's fields at both ends of a hole changed one slot
+// out of nine, its own `<>1__state`, on every run that read it. A wait that holds nothing is a wait that
+// *asks* something, and the only way to see what it asks from outside the method body is to watch which
+// doors this fork already counts get crossed while the hole window is open. A door crossed as often as the
+// polls is the door the poll re-tests. A door crossed once at the end is what released the cut.
+//
+// The cost sits with the hole, not on a door: one relaxed load per counted door call, and a lock with a
+// hash entry only while a hole window stands open, which is a stretch of a few seconds a couple of times
+// a career run, on doors that already do an atomic increment each.
+static HOLE_CENSUS: Lazy<Mutex<Option<FnvHashMap<&'static str, usize>>>> = Lazy::new(|| Mutex::new(None));
+static HOLE_CENSUS_OPEN: AtomicBool = AtomicBool::new(false);
+
+// Printed most crossed first, and capped: the line has to name the poll's own door and whatever the poll
+// asks, and a list of every door a 6 s window touched is not something a person can read off a log.
+const HOLE_CENSUS_DOOR_LIMIT: usize = 12;
+
+fn note_hole_census(name: &'static str) {
+    if !HOLE_CENSUS_OPEN.load(atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    let mut slot = recover_lock(&HOLE_CENSUS);
+
+    if let Some(table) = slot.as_mut() {
+        *table.entry(name).or_insert(0) += 1;
+    }
+}
+
+// Installs the tally before raising the flag, so a door crossed between the two cannot fall between them.
+fn open_hole_census() {
+    *recover_lock(&HOLE_CENSUS) = Some(FnvHashMap::default());
+    HOLE_CENSUS_OPEN.store(true, atomic::Ordering::Relaxed);
+}
+
+// Lowers the flag before taking the tally, so a door crossed after the hole is closed is not charged to it.
+fn close_hole_census() -> Option<FnvHashMap<&'static str, usize>> {
+    HOLE_CENSUS_OPEN.store(false, atomic::Ordering::Relaxed);
+    recover_lock(&HOLE_CENSUS).take()
+}
+
+fn hole_census_line(span_ms: i64, table: &FnvHashMap<&'static str, usize>) -> String {
+    let doors = table.len();
+    let crossings: usize = table.values().sum();
+
+    let mut ranked: Vec<(&str, usize)> = table.iter().map(|(name, count)| (*name, *count)).collect();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    ranked.truncate(HOLE_CENSUS_DOOR_LIMIT);
+
+    let listed = ranked.iter().map(|(name, count)| format!("{name} = {count}")).collect::<Vec<_>>().join(", ");
+
+    format!("Cutt probe cut hole census over {span_ms} ms: {doors} counted door(s) crossed {crossings} times while the status panel was held off: {listed}")
 }
 
 static GET_TRAINING_CUT_TIME_SCALE: CutProbe = CutProbe::peaked("SingleModeUtils::GetTrainingCutTimeScale(scale)");
@@ -734,6 +796,11 @@ fn record_gap_legs(close_ms: i64, open_ms: i64) {
 // Called from `CleanUpCutt`, which run 10 measured 35 times against 19 cut starts. A close with nothing open
 // is the game cleaning a cutt it already cleaned, so it is not counted as a run.
 fn close_cut_run() {
+    // A cut the game cleaned without ever reaching the status play out has no hole to census. Closing the
+    // window here, even when this close counts as nothing, keeps a leftover window from putting this
+    // probe's lock on every door call for the rest of the session.
+    close_hole_census();
+
     let opened = RUN_OPENED_MS.swap(-1, atomic::Ordering::Relaxed);
 
     if opened < 0 {
@@ -1368,7 +1435,11 @@ fn record_typewrite_cadence() {
 // where the cut-in helper doors are, and the hole it opens is measured here because the other end of it,
 // the status panel playing out, is a door this probe owns.
 pub(crate) fn note_cut_in_end() {
+    // A second cut-in ending while an earlier hole is still open means that hole never reached its status
+    // play out. Its tally is dropped rather than carried into the new window.
+    close_hole_census();
     CUT_HOLE_FROM_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+    open_hole_census();
     super::CutStateProbe::note_hole_open();
 }
 
@@ -1381,6 +1452,10 @@ fn record_cut_hole() {
         CUT_HOLE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         CUT_HOLE_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
         CUT_HOLE_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
+        // Which doors the wait crossed, said once, at the moment the wait ends.
+        if let Some(table) = close_hole_census() {
+            info!("{}", hole_census_line(span_ms, &table));
+        }
         // The same stretch read off the cut's own coroutine: whether the engine kept calling it while the
         // status panel was held off decides whether this is a wait the fork can reach at all.
         super::CutStateProbe::note_hole_closed(span_ms);
@@ -2384,6 +2459,71 @@ static LAST_TOTALS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The census window is one process wide static, and cargo runs tests on several threads, so the tests
+    // that open and close a window take this turn instead of racing each other for it.
+    static CENSUS_TEST_TURN: Mutex<()> = Mutex::new(());
+
+    // Item 67 named where a training cut's wait lives and could not name what it waits on. The census is
+    // the measurement that half needs, and these drive the three door entry points the shipped hooks call.
+    #[test]
+    fn a_hole_census_counts_the_doors_crossed_while_its_window_stood_open() {
+        let _turn = CENSUS_TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let outside = CutProbe::counted("census door crossed before the hole");
+        let inside = CutProbe::counted("census door crossed three ways");
+
+        outside.count();
+        open_hole_census();
+        inside.count();
+        inside.observe(&[1.0]);
+        inside.sample(0.5);
+        let table = close_hole_census().expect("opening a hole installs its tally");
+
+        assert_eq!(
+            table.get("census door crossed three ways").copied(),
+            Some(3),
+            "a door crossed through all three counting shapes counts three crossings"
+        );
+        assert!(
+            !table.contains_key("census door crossed before the hole"),
+            "a door crossed before the hole opened is not part of the hole"
+        );
+
+        let line = hole_census_line(6583, &table);
+        assert!(line.contains("census door crossed three ways = 3"), "the census line names the door and its crossings: {line}");
+        assert!(line.contains("over 6583 ms"), "the census line carries the hole it censuses: {line}");
+        assert!(!line.contains("before the hole"), "the census line does not carry a door the hole never crossed: {line}");
+    }
+
+    #[test]
+    fn cleaning_a_cut_closes_a_hole_census_that_never_reached_its_play_out() {
+        let _turn = CENSUS_TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let leftover = CutProbe::counted("census door crossed after a cleaned cut");
+
+        open_hole_census();
+        close_cut_run();
+        leftover.count();
+
+        assert!(close_hole_census().is_none(), "cleaning a cut lowers the window, so nothing crossed after it is charged to a hole");
+    }
+
+    #[test]
+    fn opening_a_second_hole_replaces_a_tally_nobody_closed() {
+        let _turn = CENSUS_TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        let stale = CutProbe::counted("census door of a hole a second cut-in replaced");
+
+        open_hole_census();
+        stale.count();
+        open_hole_census();
+        note_hole_census("census door of a hole a second cut-in replaced");
+        let table = close_hole_census().expect("the second window carries its own tally");
+
+        assert_eq!(
+            table.get("census door of a hole a second cut-in replaced").copied(),
+            Some(1),
+            "the replaced window is dropped rather than added to the new one"
+        );
+    }
 
     #[test]
     fn peak_merge_keeps_the_largest_finite_non_negative_value() {
