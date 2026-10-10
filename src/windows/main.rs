@@ -67,7 +67,10 @@ pub extern "C" fn DllMain(hmodule: HMODULE, call_reason: c_ulong, _reserved: *mu
         }
 
         let hachimi = Hachimi::instance();
-        *hachimi.plugins.lock().unwrap() = load_libraries();
+        // C2: `unwrap()` here is a panic inside `DllMain`, a frame that cannot unwind - one plugin
+        // that died holding its own list would end the process on the next attach. The cell is the
+        // mod's own, and the list being written is the one every later reader of it expects.
+        *crate::core::hachimi::recover_lock(&hachimi.plugins) = load_libraries();
 
         hook::init();
         info!("Attach completed");
@@ -76,6 +79,13 @@ pub extern "C" fn DllMain(hmodule: HMODULE, call_reason: c_ulong, _reserved: *mu
         wnd_hook::uninit();
 
         info!("Unhooking everything");
+        // Cold path, and the place the barrier's counts are said. A trip still never logs on the spot -
+        // a hook that faults every frame would otherwise write a line every frame - with one exception:
+        // a hook take-down names itself at the moment it happens, for the first eight of them
+        // (`core::interceptor::TAKEDOWN_LOG_LIMIT`), because a door that came down for the rest of the
+        // session used to leave no trace at all until this line.
+        crate::il2cpp::hook::guard::report_trips();
+        crate::core::hachimi::report_poisoned_lock_recoveries();
         Hachimi::instance().interceptor.unhook_all();
     }
     TRUE.into()

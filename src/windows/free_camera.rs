@@ -11,7 +11,7 @@ use rust_i18n::t;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    core::{gui, Hachimi}, il2cpp::{
+    core::{gui, hachimi::recover_lock, Hachimi}, il2cpp::{
         ext::Il2CppStringExt,
         hook::{
             UnityEngine_CoreModule::{Component, GameObject, Object, Transform},
@@ -718,6 +718,13 @@ impl FreeCameraState {
     }
 }
 
+/// The free camera's whole state, and every reader of it below is taken through
+/// `core::hachimi::recover_lock`. These readers are not cold: `is_scene_enabled`, `mode`,
+/// `camera_pos`, `fov_for_scene`, `tick` and the rest are what the Live / race camera wrappers
+/// read every frame, and `is_game_input_capture_active`, `on_windows_key`, `on_mouse_*` are what
+/// `wnd_hook::wnd_proc` reads on every window message - a frame with no barrier on it. A poisoned
+/// `STATE` answered each of those with a panic: on the 34 wrappers the barrier caught it and every
+/// later frame got the trip answer, on `wnd_proc` it ended the process (C2).
 static STATE: Lazy<Mutex<FreeCameraState>> = Lazy::new(|| Mutex::new(FreeCameraState::new()));
 static OVERLAY_MESSAGE: Lazy<Mutex<Option<OverlayMessage>>> = Lazy::new(|| Mutex::new(None));
 static RELOAD_CONFIG_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -767,13 +774,13 @@ pub fn set_live_music_id(music_id: i32) {
     }
 
     let config = Hachimi::instance().config.load();
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if state.scene == CameraScene::Live {
         state.scene = CameraScene::None;
         state.reset_with_config(&config.windows.free_camera);
     }
     drop(state);
-    *OVERLAY_MESSAGE.lock().unwrap() = None;
+    *recover_lock(&OVERLAY_MESSAGE) = None;
 
     if !was_unsupported && config.windows.free_camera.enabled {
         gui::request_notification(gui::NotificationRequest::Custom(
@@ -787,7 +794,7 @@ pub fn is_game_input_capture_active() -> bool {
         return false;
     }
 
-    matches!(STATE.lock().unwrap().scene, CameraScene::Live | CameraScene::Race)
+    matches!(recover_lock(&STATE).scene, CameraScene::Live | CameraScene::Race)
 }
 
 pub fn overlay_message() -> Option<(String, f32)> {
@@ -796,7 +803,7 @@ pub fn overlay_message() -> Option<(String, f32)> {
         return None;
     }
 
-    let mut lock = OVERLAY_MESSAGE.lock().unwrap();
+    let mut lock = recover_lock(&OVERLAY_MESSAGE);
     let message = lock.as_ref()?;
     let elapsed = message.created_at.elapsed().as_secs_f32();
     let lifetime = OVERLAY_FADE_IN + OVERLAY_HOLD + OVERLAY_FADE_OUT;
@@ -824,7 +831,7 @@ pub fn has_overlay_message() -> bool {
         return false;
     }
 
-    let lock = OVERLAY_MESSAGE.lock().unwrap();
+    let lock = recover_lock(&OVERLAY_MESSAGE);
     let Some(message) = lock.as_ref() else {
         return false;
     };
@@ -837,7 +844,7 @@ fn set_overlay_message(content: String) {
         return;
     }
 
-    *OVERLAY_MESSAGE.lock().unwrap() = Some(OverlayMessage {
+    *recover_lock(&OVERLAY_MESSAGE) = Some(OverlayMessage {
         content,
         created_at: Instant::now(),
     });
@@ -875,18 +882,18 @@ fn mode_label(mode: FreeCameraMode) -> String {
 }
 
 pub fn scene() -> CameraScene {
-    STATE.lock().unwrap().scene
+    recover_lock(&STATE).scene
 }
 
 pub fn is_scene_enabled(scene: CameraScene) -> bool {
     let config = Hachimi::instance().config.load();
     config.windows.free_camera.enabled &&
         !LIVE_UNSUPPORTED.load(Ordering::Acquire) &&
-        STATE.lock().unwrap().scene == scene
+        recover_lock(&STATE).scene == scene
 }
 
 pub fn mode() -> FreeCameraMode {
-    STATE.lock().unwrap().mode
+    recover_lock(&STATE).mode
 }
 
 pub fn is_live_selfie_stick() -> bool {
@@ -894,7 +901,7 @@ pub fn is_live_selfie_stick() -> bool {
         return false;
     }
 
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     state.scene == CameraScene::Live && state.mode == FreeCameraMode::SelfieStick
 }
 
@@ -903,7 +910,7 @@ pub fn is_live_first_person() -> bool {
         return false;
     }
 
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     state.scene == CameraScene::Live && state.mode == FreeCameraMode::FirstPerson
 }
 
@@ -912,7 +919,7 @@ pub fn is_race_first_person() -> bool {
         return false;
     }
 
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     state.scene == CameraScene::Race && state.mode == FreeCameraMode::FirstPerson
 }
 
@@ -922,7 +929,7 @@ pub fn is_live_head_selfie() -> bool {
         return false;
     }
 
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     state.scene == CameraScene::Live && state.mode == FreeCameraMode::SelfieStick
 }
 
@@ -932,20 +939,20 @@ pub fn is_race_head_selfie() -> bool {
         return false;
     }
 
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     state.scene == CameraScene::Race && state.mode == FreeCameraMode::SelfieStick
 }
 
 pub fn camera_pos() -> Vector3_t {
-    STATE.lock().unwrap().camera_pos.to_vector3()
+    recover_lock(&STATE).camera_pos.to_vector3()
 }
 
 pub fn camera_look_at() -> Vector3_t {
-    STATE.lock().unwrap().camera_look_at.to_vector3()
+    recover_lock(&STATE).camera_look_at.to_vector3()
 }
 
 pub fn camera_rotation() -> Option<Quaternion_t> {
-    STATE.lock().unwrap().camera_rotation.map(|rot| rot.to_quaternion())
+    recover_lock(&STATE).camera_rotation.map(|rot| rot.to_quaternion())
 }
 
 pub fn fov_for_scene(scene: CameraScene) -> Option<f32> {
@@ -954,7 +961,7 @@ pub fn fov_for_scene(scene: CameraScene) -> Option<f32> {
         return None;
     }
 
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     if state.scene != scene {
         return None;
     }
@@ -970,7 +977,7 @@ pub fn should_remove_camera_effects() -> bool {
     let config = Hachimi::instance().config.load();
     config.windows.free_camera.enabled &&
         config.windows.free_camera.remove_camera_effects &&
-        STATE.lock().unwrap().scene == CameraScene::Live
+        recover_lock(&STATE).scene == CameraScene::Live
 }
 
 pub fn should_remove_live_screen_effects() -> bool {
@@ -978,21 +985,21 @@ pub fn should_remove_live_screen_effects() -> bool {
     config.windows.free_camera.enabled &&
         config.windows.free_camera.live_remove_screen_effects &&
         !LIVE_UNSUPPORTED.load(Ordering::Acquire) &&
-        STATE.lock().unwrap().scene == CameraScene::Live
+        recover_lock(&STATE).scene == CameraScene::Live
 }
 
 pub fn should_disable_live_character_teleport() -> bool {
     let config = Hachimi::instance().config.load();
     config.windows.free_camera.enabled &&
         config.windows.free_camera.live_disable_character_teleport &&
-        STATE.lock().unwrap().scene == CameraScene::Live
+        recover_lock(&STATE).scene == CameraScene::Live
 }
 
 pub fn should_force_live_characters_visible() -> bool {
     let config = Hachimi::instance().config.load();
     config.windows.free_camera.enabled &&
         config.windows.free_camera.live_force_all_characters_visible &&
-        STATE.lock().unwrap().scene == CameraScene::Live
+        recover_lock(&STATE).scene == CameraScene::Live
 }
 
 pub fn set_live_active() {
@@ -1001,7 +1008,7 @@ pub fn set_live_active() {
         return;
     }
 
-    STATE.lock().unwrap().set_scene(CameraScene::Live, &config.windows.free_camera);
+    recover_lock(&STATE).set_scene(CameraScene::Live, &config.windows.free_camera);
 }
 
 pub fn begin_live_director_update() {
@@ -1010,7 +1017,7 @@ pub fn begin_live_director_update() {
         return;
     }
 
-    STATE.lock().unwrap().live_follow_timeline_updated = false;
+    recover_lock(&STATE).live_follow_timeline_updated = false;
 }
 
 pub fn set_race_active() {
@@ -1019,7 +1026,7 @@ pub fn set_race_active() {
         return;
     }
 
-    STATE.lock().unwrap().set_scene(CameraScene::Race, &config.windows.free_camera);
+    recover_lock(&STATE).set_scene(CameraScene::Race, &config.windows.free_camera);
 }
 
 pub fn end_scene(scene: CameraScene) {
@@ -1029,7 +1036,7 @@ pub fn end_scene(scene: CameraScene) {
     }
 
     let config = Hachimi::instance().config.load();
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if state.scene == scene {
         state.scene = CameraScene::None;
         state.reset_with_config(&config.windows.free_camera);
@@ -1047,7 +1054,7 @@ fn request_toggle_live_pause_locked(state: &FreeCameraState) {
 }
 
 pub fn live_position_flag() -> i32 {
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     LIVE_POSITION_CHOICES
         .get(state.live_target_position_index as usize)
         .map(|(_, value)| *value)
@@ -1055,7 +1062,7 @@ pub fn live_position_flag() -> i32 {
 }
 
 pub fn live_character_position_index() -> i32 {
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     let index = state.live_target_position_index;
 
     LIVE_POSITION_CHOICES
@@ -1073,7 +1080,7 @@ pub fn live_character_position_index() -> i32 {
 }
 
 pub fn live_part() -> i32 {
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     LIVE_PART_CHOICES
         .get(state.live_target_part_index as usize)
         .map(|(_, value)| *value)
@@ -1081,7 +1088,7 @@ pub fn live_part() -> i32 {
 }
 
 pub fn race_model_index() -> i32 {
-    let index = STATE.lock().unwrap().race_target_index;
+    let index = recover_lock(&STATE).race_target_index;
     if index < 0 { 0 } else { index }
 }
 
@@ -1091,7 +1098,7 @@ pub fn update_live_follow_position_target(target: Vector3_t) {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if state.scene != CameraScene::Live || state.mode != FreeCameraMode::SelfieStick {
         return;
     }
@@ -1143,7 +1150,7 @@ pub fn refresh_paused_live_camera() {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if state.scene != CameraScene::Live || state.mode != FreeCameraMode::SelfieStick {
         return;
     }
@@ -1242,7 +1249,7 @@ pub fn update_live_head_part_target(target: Vector3_t) {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if state.scene == CameraScene::Live && state.mode == FreeCameraMode::SelfieStick {
         state.live_head_part_target = Some(Vec3::from(target));
     }
@@ -1287,7 +1294,7 @@ pub fn update_live_director_follow_target(
         .filter(|value| value.len() > f32::EPSILON)
         .map(|value| value.normalized())
         .unwrap_or_else(|| rot.rotate_vec(Vec3::new(0.0, 0.0, 1.0)).normalized());
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     state.set_scene(CameraScene::Live, &config.windows.free_camera);
     if state.mode != FreeCameraMode::SelfieStick {
         return;
@@ -1335,7 +1342,7 @@ pub fn update_live_head_follow(pos: Vector3_t, rot: Quaternion_t, forward: Optio
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     state.set_scene(CameraScene::Live, &config.windows.free_camera);
     if state.mode != FreeCameraMode::SelfieStick {
         return;
@@ -1375,7 +1382,7 @@ pub fn update_first_person(
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     state.set_scene(scene, &config.windows.free_camera);
     if state.mode != FreeCameraMode::FirstPerson {
         return;
@@ -1414,7 +1421,7 @@ pub fn update_race_head_follow(pos: Vector3_t, rot: Quaternion_t) {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     state.set_scene(CameraScene::Race, &config.windows.free_camera);
     if state.mode != FreeCameraMode::SelfieStick {
         return;
@@ -1447,7 +1454,7 @@ pub fn update_race_target(index: i32, pos: Vector3_t, rot: Quaternion_t) {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if state.race_target_index >= 0 && state.race_target_index != index {
         return;
     }
@@ -1474,7 +1481,7 @@ pub fn update_race_target(index: i32, pos: Vector3_t, rot: Quaternion_t) {
 
 pub fn race_camera_pos(current: Vector3_t) -> Vector3_t {
     let config = Hachimi::instance().config.load();
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if state.mode == FreeCameraMode::SelfieStick && !config.windows.free_camera.selfie_use_head_transform {
         update_race_follow_locked(&mut state);
     }
@@ -1532,7 +1539,7 @@ pub fn on_windows_key(vk: u16, pressed: bool, repeat: bool) {
 
     let config = Hachimi::instance().config.load();
     let kb = &config.windows.free_camera.keybinds;
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     set_key_flag(&mut state.key_state, vk, pressed, kb);
 
     if !pressed || repeat {
@@ -1619,7 +1626,7 @@ pub fn wants_windows_input_capture() -> bool {
         return false;
     }
 
-    let state = STATE.lock().unwrap();
+    let state = recover_lock(&STATE);
     state.right_mouse_down ||
         state.key_state.forward ||
         state.key_state.back ||
@@ -1644,7 +1651,7 @@ pub fn on_mouse_button(right_down: bool) {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     state.right_mouse_down = right_down;
     state.last_mouse_pos = None;
 }
@@ -1655,7 +1662,7 @@ pub fn on_mouse_move(x: i32, y: i32) {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     if !state.right_mouse_down {
         state.last_mouse_pos = Some((x, y));
         return;
@@ -1677,7 +1684,7 @@ pub fn on_mouse_wheel(delta: i16) {
         return;
     }
 
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
     let step = if delta > 0 { 0.5 } else { -0.5 };
     change_fov_locked(&mut state, step);
 }
@@ -1685,7 +1692,7 @@ pub fn on_mouse_wheel(delta: i16) {
 pub fn tick() {
     let config = Hachimi::instance().config.load();
     let config = &config.windows.free_camera;
-    let mut state = STATE.lock().unwrap();
+    let mut state = recover_lock(&STATE);
 
     if RELOAD_CONFIG_REQUESTED.swap(false, Ordering::AcqRel) ||
         (config.enabled && !state.last_enabled) ||
@@ -2176,7 +2183,7 @@ pub fn hide_head_parts(
         }
         let name = unsafe { (*name).as_utf16str().to_string() };
         if name == "M_Hair" || name == "M_Face" {
-            store.lock().unwrap().entry(index).or_default().insert(game_object as usize);
+            recover_lock(store).entry(index).or_default().insert(game_object as usize);
             GameObject::SetActive(game_object, false);
         }
     }
@@ -2187,7 +2194,7 @@ pub fn restore_disabled_heads(
     current_index: i32,
     force_all: bool,
 ) {
-    let mut store = store.lock().unwrap();
+    let mut store = recover_lock(store);
     let mut restored = Vec::new();
 
     for (index, objects) in store.iter() {

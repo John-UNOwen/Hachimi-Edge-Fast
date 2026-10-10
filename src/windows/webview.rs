@@ -2,6 +2,7 @@ use crate::{
     core::{
         game::Region,
         gui::{self, Window},
+        hachimi::recover_lock,
         Gui, Hachimi,
     },
     il2cpp::{ext::Il2CppStringExt, types::*},
@@ -277,7 +278,10 @@ pub fn process_message(umsg: c_uint, lparam: LPARAM) {
 
             let webview_result = InnerWebView::new(get_target_hwnd(), &url.0);
 
-            let mut dialog = DIALOG_WEBVIEW.lock().unwrap();
+            // `process_message` runs inside `wnd_hook::wnd_proc`, a frame with no barrier on it, and
+            // the acquirer above already declines a poisoned cell. Re-acquiring here with
+            // `unwrap()` would answer a poisoning with a panic Windows cannot unwind (C2).
+            let mut dialog = recover_lock(&DIALOG_WEBVIEW);
             match webview_result {
                 Ok(webview) => {
                     dialog.webview = Some(webview);
@@ -325,6 +329,12 @@ const BASE_API_URL: &str = "https://api.games.umamusume.jp/umamusume/contents/v/
 static GACHA_URL_ID_MAP: Lazy<RwLock<HashMap<String, i32>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
 pub fn add_gacha_url(url: *mut Il2CppString, gacha_id: i32) {
+    // C9: `url` is what the game's own `GetGachaUrl` answered for this gacha, and a gacha type it
+    // has no url for is a legitimate null. There is nothing to key the id on.
+    if url.is_null() {
+        return;
+    }
+
     let url_string = unsafe { (*url).as_utf16str().to_string() };
     if let Ok(mut map) = GACHA_URL_ID_MAP.write() {
         map.insert(url_string, gacha_id);
@@ -407,6 +417,11 @@ pub fn open(url: *mut Il2CppString) -> bool {
             .windows
             .ingame_webview
     {
+        return false;
+    }
+
+    // C9: the caller hands over the game's own url string; a call that carries none opens nothing.
+    if url.is_null() {
         return false;
     }
 

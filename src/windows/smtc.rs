@@ -470,6 +470,13 @@ fn get_current_hub_view_child_controller() -> *mut Il2CppObject {
     debug!("[smtc] getting klass");
     let klass = unsafe { (*vc).klass() };
     debug!("[smtc] klass = {:?}", klass);
+
+    // C9: the class comes out of the view controller the game just handed over, and `parent` of that
+    // is a read the game does not guarantee - a controller it no longer keeps can answer null.
+    if klass.is_null() {
+        return std::ptr::null_mut();
+    }
+
     let parent_klass = unsafe { (*klass).parent };
     debug!("[smtc] parent_klass = {:?}", parent_klass);
     if parent_klass.is_null() { return std::ptr::null_mut(); }

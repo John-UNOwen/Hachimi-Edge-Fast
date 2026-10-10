@@ -22,7 +22,7 @@ use windows::{
     }
 };
 
-use crate::{core::{Error, Gui, Hachimi, Interceptor}, il2cpp::{hook::UnityEngine_InputLegacyModule, symbols::Thread, types::Vector2_t}, windows::wnd_hook};
+use crate::{core::{hachimi::recover_lock, Error, Gui, Hachimi, Interceptor}, il2cpp::{hook::UnityEngine_InputLegacyModule, symbols::Thread, types::Vector2_t}, windows::wnd_hook};
 
 use super::d3d11_painter::D3D11Painter;
 
@@ -54,7 +54,12 @@ extern "C" fn IDXGISwapChain_Present(this: *mut c_void, sync_interval: c_uint, f
 
     // Call plugin present callbacks FIRST, before any checks
     let hachimi = Hachimi::instance();
-    let callbacks = hachimi.present_callbacks.lock().unwrap();
+    // C2: read through `recover_lock`, not `unwrap()`. This frame is the swap chain's own
+    // `Present`, called by the game every frame, and a `Mutex` poisoned by some earlier panic
+    // would otherwise turn every later frame into a panic in a `nounwind` frame. The list is the
+    // mod's, and the callbacks it holds are third-party code called under it, which is why an
+    // acquirer that cannot panic is the only one that belongs here.
+    let callbacks = recover_lock(&hachimi.present_callbacks);
     for (callback, userdata) in callbacks.iter() {
         if *callback == 0 {
             continue;
@@ -68,7 +73,7 @@ extern "C" fn IDXGISwapChain_Present(this: *mut c_void, sync_interval: c_uint, f
         return orig_fn(this, sync_interval, flags);
     }
 
-    let mut gui = Gui::instance_or_init("windows.menu_open_key").lock().unwrap();
+    let mut gui = recover_lock(Gui::instance_or_init("windows.menu_open_key"));
     let painter_mutex = match init_painter(this) {
         Ok(v) => v,
         Err(e) => {
@@ -87,7 +92,7 @@ extern "C" fn IDXGISwapChain_Present(this: *mut c_void, sync_interval: c_uint, f
         return orig_fn(this, sync_interval, flags);
     }
     // Check if this is the right swap chain
-    let mut painter = painter_mutex.lock().unwrap();
+    let mut painter = recover_lock(painter_mutex);
     if this != painter.swap_chain().as_raw() {
         return orig_fn(this, sync_interval, flags);
     }
@@ -114,10 +119,10 @@ extern "C" fn IDXGISwapChain_Present(this: *mut c_void, sync_interval: c_uint, f
                 let x = rect.min.x * zoom;
                 let y = rect.max.y * zoom;
                 let y_unity = height as f32 - y;
-                *IME_COMPOSITION_POS.lock().unwrap() = (x, y_unity);
+                *recover_lock(&IME_COMPOSITION_POS) = (x, y_unity);
 
                 Thread::main_thread().schedule(|| {
-                    let (x, y_unity) = *IME_COMPOSITION_POS.lock().unwrap();
+                    let (x, y_unity) = *recover_lock(&IME_COMPOSITION_POS);
 
                     UnityEngine_InputLegacyModule::Input::set_compositionCursorPos(
                         Vector2_t { x, y: y_unity }
@@ -179,7 +184,7 @@ extern "C" fn IDXGISwapChain_ResizeBuffers(
             return orig_fn(this, buffer_count, width, height, new_format, swap_chain_flags);
         }
     };
-    let mut painter = painter_mutex.lock().unwrap();
+    let mut painter = recover_lock(painter_mutex);
     if this != painter.swap_chain().as_raw() {
         return orig_fn(this, buffer_count, width, height, new_format, swap_chain_flags);
     }

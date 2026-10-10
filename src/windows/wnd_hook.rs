@@ -22,7 +22,7 @@ use windows::{core::{w, BOOL, HSTRING}, Win32::{
 }};
 
 use crate::{
-    core::{game::Region, gui, Gui, Hachimi},
+    core::{game::Region, gui, hachimi::recover_lock, Gui, Hachimi},
     il2cpp::{
         hook::{
             umamusume::{GameSystem, Screen as GallopScreen, StandaloneWindowResize, UIManager, RaceManagerReplayBase},
@@ -428,6 +428,11 @@ fn restore_original_wnd_proc(hwnd: HWND) {
     RESTORING_WNDPROC.store(false, atomic::Ordering::Release);
 }
 
+/// The subclassed window procedure: a frame Windows calls, `extern "system"` = `nounwind`, reached on
+/// every message the game window takes. Its GUI reads go through `core::hachimi::recover_lock`, not
+/// `unwrap()`, because one earlier panic inside `GUI` would otherwise answer every later message with
+/// a panic this frame cannot unwind (C2, AGENTS section 6). The `let ... else` branches that hand a
+/// message to `orig_fn` are for a GUI that is **absent**; a poisoned one still gets the mod's branch.
 extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let freeform_window = Hachimi::instance().config.load().windows.freeform_window;
     let inline_hooked = WNDPROC_INLINE_HOOKED.load(atomic::Ordering::Acquire);
@@ -514,7 +519,7 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
                     let hotkey_vk = Hachimi::instance().config.load().windows.hide_ingame_ui_hotkey_bind;
 
                     if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(hotkey_vk as i32) < 0 } {
-                        if let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) {
+                        if let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) {
                             gui.set_consuming_input(false);
                         }
                         return LRESULT(0); 
@@ -522,7 +527,7 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
                 }
 
                 if current_key == Hachimi::instance().config.load().windows.menu_open_key {
-                    let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+                    let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) else {
                         return unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
                     };
                     gui.toggle_menu();
@@ -616,7 +621,7 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
 
             if (wparam.0 & 0xFFFF) != WA_INACTIVE as usize {
                 std::thread::spawn(move || {
-                    if let Some(gui) = Gui::instance().map(|m| m.lock().unwrap()) {
+                    if let Some(gui) = Gui::instance().map(|m| recover_lock(m)) {
                         if gui.context.wants_keyboard_input() {
                             Thread::main_thread().schedule(|| {
                                 crate::il2cpp::hook::UnityEngine_InputLegacyModule::Input::set_imeCompositionMode(1);
@@ -664,7 +669,7 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
     // (when moving the window, etc.)
     // I assume that SwapChain::Present and WndProc are running on the same thread
     std::thread::spawn(move || {
-        let Some(mut gui) = Gui::instance().map(|m| m.lock().unwrap()) else {
+        let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) else {
             return;
         };
 
