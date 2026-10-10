@@ -1484,6 +1484,30 @@ def_detour! {
     }
 }
 
+// The plate cascade interval floor. This door is the only duration write this fork reaches on the
+// training screen that run 31 actually hit: 36 calls took the game's 1.0 s to 0.05 s, the census measured
+// 9 cascades closing in 338.2 ms mean, and that session ended stuck on `SingleModeSuccessionEvent`
+// (view 1501) with `CutInTimelineController::UpdateSpeed()` still called every frame while every door that
+// advances a flow had frozen 3.5 s earlier. The literals that pace the cut-in around the cascade
+// (`INSPIRATION_TYPEWRITE_DELAY`, `INSPIRATION_MINI_MODEL_MOTION_WAIT`, `INSPIRATION_WIPE_TIME_SCALE`) are
+// folded into the game's call sites and this fork cannot reach them, so a cascade 20x faster than the beat
+// the cut-in is built on is a schedule the animation was not made for. 0.25 s is a quarter of the game's own
+// spacing: it keeps 4x of the 20x, and it is the value C62 tests against a career end run rather than a
+// number measured to be safe.
+pub const MIN_PLATE_INTERVAL_SEC: f32 = 0.25;
+
+/// The interval to hand `InitializePlateList`, with the floor applied and the game's own value as the
+/// ceiling. The floor may not raise a number above what the caller passed: making a cascade the game asked
+/// to run in 0.1 s take 0.25 s would be a second bug on the same door. A zero or non finite `scaled` means
+/// `scale_duration` already declined to touch the value, so it stays declined.
+pub fn plate_cascade_interval(interval: f32, scaled: f32) -> f32 {
+    if !interval.is_finite() || !scaled.is_finite() || interval <= 0.0 || scaled <= 0.0 {
+        return interval;
+    }
+
+    scaled.max(MIN_PLATE_INTERVAL_SEC).min(interval)
+}
+
 // The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
 // waited for a tap and 10,034 ms was the cut playing before it asked, while the cut's own timeline
 // reported 2.4 s of total length. The door on that path carrying a duration is `InitializePlateList`,
@@ -1495,7 +1519,7 @@ def_detour! {
 type PlateInitializeListFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32);
 def_detour! {
     TrainingParamChangeUI_InitializePlateListSpeed(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
-            let scaled = scale_duration(interval, Group::Screens);
+            let scaled = plate_cascade_interval(interval, scale_duration(interval, Group::Screens));
 
         hit(12, "TrainingParamChangeUI.InitializePlateList", interval, scaled);
         TrainingCuttProbe::note_plate_call(this, interval);
@@ -1705,6 +1729,38 @@ pub fn apply() {
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    #[test]
+    fn the_plate_cascade_floor_never_runs_slower_than_the_game_handed_in() {
+        // The pair run 31 reached: the game's 1.0 s and this fork's 20x.
+        assert_eq!(plate_cascade_interval(1.0, 1.0 / 20.0), MIN_PLATE_INTERVAL_SEC);
+        assert_eq!(plate_cascade_interval(5.0, 5.0 / 20.0), MIN_PLATE_INTERVAL_SEC);
+
+        // A game interval already under the floor stays where the game put it. A floor that lifts 0.1 s
+        // to 0.25 s would be a lever slowing the game down on the door that was only meant to speed it.
+        for interval in [0.02, 0.05, 0.1, 0.2, 0.249999] {
+            assert_eq!(plate_cascade_interval(interval, interval / 20.0), interval, "the floor slowed the cascade");
+        }
+
+        // At the shipped defaults scale_duration hands the value back, and the door has to stay inert.
+        assert_eq!(plate_cascade_interval(1.0, 1.0), 1.0);
+        assert_eq!(plate_cascade_interval(0.1, 0.1), 0.1);
+
+        // What scale_duration declined to touch stays declined, including a zero the game handed in.
+        assert_eq!(plate_cascade_interval(1.0, 0.0), 1.0);
+        assert_eq!(plate_cascade_interval(1.0, f32::NAN), 1.0);
+        assert_eq!(plate_cascade_interval(0.0, 0.0), 0.0, "a zero interval is not this lever's to invent");
+    }
+
+    #[test]
+    fn the_plate_cascade_floor_sits_between_the_run31_reading_and_the_game_spacing() {
+        // C62: the stall reading is 0.05 s per plate and the design is 1.0 s. The floor has to be above
+        // the number the stalled run handed the game and below the number the game asked for, or it is
+        // either the same condition again or no change at all.
+        assert!(MIN_PLATE_INTERVAL_SEC > 0.05, "the floor sits on top of the reading that stalled");
+        assert!(MIN_PLATE_INTERVAL_SEC < 1.0, "the floor is faster than the game's own plate spacing");
+        assert_eq!(plate_cascade_interval(1.0, 1.0 / 20.0), MIN_PLATE_INTERVAL_SEC, "run 31's pair lands on the floor");
+    }
 
     // The pass reads and writes process wide mirrors, markers and counters, and `cargo test`
     // runs cases on several threads, so the cases that drive it take turns and hand the state
