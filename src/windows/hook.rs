@@ -86,9 +86,18 @@ fn init_internal() -> Result<(), Error> {
             proxy::winhttp::init(&utils::_get_system_directory());
         }
         other => {
-            info!("Unknown module name {:?}, skip init proxy", other);
+            // C1: `exports.def` is linked into every build (`build.rs:56`), so every proxy export is
+            // reachable whatever this file is named, and this fork names it `cri_mana_vpx.dll` (C4).
+            // Skipping the init here used to leave every forwarding cell at 0 for the whole session.
+            // An unknown name is not a reason to leave them unread: it means the targets come from
+            // the modules the process already has instead of from a copy this mod makes.
+            info!("Unknown module name {:?}, no proxy init of its own", other);
         }
     }
+
+    // Runs for every name, after any init above: fills the cells that are still empty out of the
+    // modules already loaded, and prints the census that says which ones could not be filled.
+    proxy::install(module_name.as_deref().unwrap_or(""));
 
     info!("Hooking LoadLibraryW");
     hachimi.interceptor.hook(ffi::LoadLibraryW as *const () as usize, LoadLibraryW as *const () as usize)?;

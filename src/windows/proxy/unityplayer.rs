@@ -7,8 +7,11 @@ use windows::{core::PCWSTR, Win32::System::LibraryLoader::LoadLibraryW};
 
 use crate::{core::{utils::get_file_modified_time, Hachimi}, windows::utils};
 
-proxy_proc!(UnityMain, UnityMain_orig);
-proxy_proc!(UnityMain2, UnityMain2_orig);
+proxy_table! {
+    module = "UnityPlayer.dll" ;
+    UnityMain, UnityMain_orig ;
+    UnityMain2, UnityMain2_orig ;
+}
 
 fn prepare_orig_dll() -> std::io::Result<PathBuf> {
     let src_dll = utils::get_game_dir().join("UnityPlayer.dll");
