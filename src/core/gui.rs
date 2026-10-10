@@ -5969,6 +5969,11 @@ impl ConfigEditor {
                 // clamps the lever to MIN_UI_ANIMATION_SCALE..=MAX_UI_ANIMATION_SCALE before the
                 // DOTween `Update` detour multiplies its delta time, so the top of a 1000.0 slider
                 // offered a value the mod would silently cut to 20.0 (C5).
+                //
+                // This lever multiplies the clock every tween is measured on, so the group sliders under
+                // it are bounded against it rather than against nothing: `AnimationSpeed::duration_factor`
+                // lets a group shorten a duration only by what is left under MAX_TWEEN_SPEED_PRODUCT, and
+                // at the top of this slider the group factors add nothing to the same completion (C58).
                 ui.add(egui::Slider::new(&mut config.ui_animation_scale, AnimationSpeed::MIN_UI_ANIMATION_SCALE..=AnimationSpeed::MAX_UI_ANIMATION_SCALE).step_by(0.1));
                 ui.end_row();
             }
@@ -5983,6 +5988,11 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            // These group sliders shorten the duration a game method is handed, while the slider above
+            // multiplies the clock the tween runs on. `AnimationSpeed::duration_factor` bounds the pair
+            // at MAX_TWEEN_SPEED_PRODUCT on one completion, so raising both to 20 leaves the group
+            // factors with nothing to take (C58, ledger item 62). The story group's time scale half is a
+            // different quantity and answers to MAX_TIME_SCALE instead.
             if should_show_option(search, &t!("config_editor.transition_speed")) {
                 ui.label(t!("config_editor.transition_speed"));
                 ui.add(egui::Slider::new(&mut config.transition_speed, 1.0..=20.0).step_by(0.5));
