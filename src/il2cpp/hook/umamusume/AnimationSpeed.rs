@@ -2709,11 +2709,13 @@ pub fn plate_cascade_handoff(interval: f32) -> f32 { plate_cascade_interval(inte
 // reported 2.4 s of total length. The door on that path carrying a duration is `InitializePlateList`,
 // reached six times in the session on a float of 1.0, next to twelve gauge plays whose duration this
 // group had already cut from 2.4 s to 0.12 s. The list is a generic parameter and travels as a pointer
-// untouched (C48). Since item 59 the float travels untouched too: this door is `Group::Training`, which
-// has no factor behind it, because the interval is the beat `TrainingParamChangeUI` stores as
+// untouched (C48). Since item 59 the float is off the group levers too: this door is `Group::Training`,
+// which has no factor behind it, because the interval is the beat `TrainingParamChangeUI` stores as
 // `_groupInterval` / `_sequence_interval` and `CoroutineEndCheck` waits through - the completion the
 // plate cascade closes on is what the turn's coroutine resumes on, and item 59's arm list is the
-// measurement of what happens when a result screen slider shortens it. The door stays armed for two
+// measurement of what happens when a result screen slider shortens it. What does reach it is
+// `training_plate_speed`, a lever with no pair to price (C58, ledger item 74), and C62's floor is the
+// guard on how short it may hand the beat. The door stays armed for two
 // reasons: the census line `TrainingParamChangeUI.InitializePlateList=N` is one of the training doors a
 // run reads (C51), and `TrainingCuttProbe` cannot hook an address twice, so its plate cascade clocks are
 // fed from here (`note_plate_call`). The door used to stand in the probe itself, which installs nothing
