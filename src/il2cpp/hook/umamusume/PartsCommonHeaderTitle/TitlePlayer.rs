@@ -24,15 +24,19 @@ fn process_text(text: *mut Il2CppString) -> *mut Il2CppString {
 }
 
 type SetTextFn = extern "C" fn(this: *mut Il2CppObject, text: *mut Il2CppString);
-extern "C" fn SetText(this: *mut Il2CppObject, text: *mut Il2CppString) {
-    let text = process_text(text);
-    get_orig_fn!(SetText, SetTextFn)(this, text);
+def_detour! {
+    SetText(this: *mut Il2CppObject, text: *mut Il2CppString) {
+            let text = process_text(text);
+        get_orig_fn!(SetText, SetTextFn)(this, text);
+    }
 }
 
 type PlayFn = extern "C" fn(this: *mut Il2CppObject, text: *mut Il2CppString, callback: *mut Il2CppDelegate);
-extern "C" fn Play(this: *mut Il2CppObject, text: *mut Il2CppString, callback: *mut Il2CppDelegate) {
-    let text = process_text(text);
-    get_orig_fn!(Play, PlayFn)(this, text, callback);
+def_detour! {
+    Play(this: *mut Il2CppObject, text: *mut Il2CppString, callback: *mut Il2CppDelegate) {
+            let text = process_text(text);
+        get_orig_fn!(Play, PlayFn)(this, text, callback);
+    }
 }
 
 pub fn init(PartsCommonHeaderTitle: *mut Il2CppClass) {

@@ -35,7 +35,6 @@ const FIELD_ATTRIBUTE_LITERAL: c_int = 0x40;
 
 // Upper bound on how much of an animation may be removed in one step.
 const MAX_FACTOR: f32 = 20.0;
-const METHOD_ATTRIBUTE_STATIC: u16 = 0x0010;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -730,54 +729,42 @@ unsafe fn prove_value_shape(type_: *const Il2CppType, name: &str, index: Option<
     false
 }
 
-unsafe fn resolve_method_any(
-    class: *mut Il2CppClass,
+// The wrapper's own shape, spelled as the question asked of the class table: the parameters it
+// declares, the return type it reads, whether it reserves a register for `this`, and whether a slot
+// it declared as a pointer may be answered by a generic instantiation. A profile mapped onto the
+// wrong question is the C15 decision again - an instance wrapper asking the table as if it had no
+// `this`, or the return type it reads left out of the ask.
+fn request_for<'a>(params: &'a [Il2CppTypeEnum], ret: Il2CppTypeEnum, required: MethodMatch) -> crate::il2cpp::symbols::MethodRequest<'a> {
+    crate::il2cpp::symbols::MethodRequest {
+        params,
+        ret: Some(ret),
+        allow_static: required.allow_static,
+        require_static: required.require_static,
+        generic_slots: required.generic_slots,
+    }
+}
+
+// Whether one candidate that carries the signature can also sit behind this wrapper: it is not a
+// generic definition, its parameters travel the way the wrapper declares them, and so does its
+// result. Which candidate carries the signature is `symbols::select_overload`'s answer.
+unsafe fn candidate_holds_wrapper(
+    method: *const MethodInfo,
     name: &str,
     params: &[Il2CppTypeEnum],
-    ret: Il2CppTypeEnum,
     required: MethodMatch,
-) -> usize {
-    let method = match if required.generic_slots {
-        crate::il2cpp::symbols::get_method_overload_generic_ref(class, name, params)
-    }
-    else {
-        crate::il2cpp::symbols::get_method_overload(class, name, params)
-    } {
-        Ok(method) => method,
-        Err(_) => {
-            debug!("AnimationSpeed: {} has no overload with the expected signature", name);
-            return 0;
-        }
-    };
-
+) -> bool {
     if (*method).is_generic() != 0 {
         debug!("AnimationSpeed: {} is generic", name);
-        return 0;
+        return false;
     }
 
-    // A wrapper reserves the first register for `this`. Against a static method that
-    // register holds the first real argument, so every following argument would be read
-    // from the wrong place. `flags` is the MethodAttributes word, and bit 0x0010 is static.
-    let is_static = (*method).flags & METHOD_ATTRIBUTE_STATIC != 0;
-
-    if is_static {
-        if !required.allow_static && !required.require_static {
-            debug!("AnimationSpeed: {} is static, its arguments would be misread", name);
-            return 0;
-        }
-    }
-    else if required.require_static {
-        debug!("AnimationSpeed: {} is not static, a wrapper without `this` would misread it", name);
-        return 0;
-    }
-
-    for index in 0..params.len() as u32 {
-        let param = il2cpp_method_get_param(method, index);
+    for position in 0..params.len() as u32 {
+        let param = il2cpp_method_get_param(method, position);
 
         if param.is_null() {
             if required.require_ref {
-                debug!("AnimationSpeed: {} parameter {} has no readable type", name, index);
-                return 0;
+                debug!("AnimationSpeed: {} parameter {} has no readable type", name, position);
+                return false;
             }
 
             continue;
@@ -786,42 +773,119 @@ unsafe fn resolve_method_any(
         let byref = (*param).byref() != 0;
 
         if required.require_ref && !byref {
-            debug!("AnimationSpeed: {} parameter {} is not passed by reference", name, index);
-            return 0;
+            debug!("AnimationSpeed: {} parameter {} is not passed by reference", name, position);
+            return false;
         }
 
         if required.forbid_ref && byref {
-            debug!("AnimationSpeed: {} parameter {} is passed by reference, the wrapper declares a value", name, index);
-            return 0;
+            debug!("AnimationSpeed: {} parameter {} is passed by reference, the wrapper declares a value", name, position);
+            return false;
         }
 
         // A reference parameter travels as an address no matter what it points at, so its size is
         // the callee's business. The proof below is for the value a wrapper declared in its place.
-        if !byref && !prove_value_shape(param, name, Some(index), required) {
-            return 0;
+        if !byref && !prove_value_shape(param, name, Some(position), required) {
+            return false;
         }
     }
 
     let return_type = il2cpp_method_get_return_type(method);
 
-    if return_type.is_null() || (*return_type).type_() != ret {
-        warn!(
-            "AnimationSpeed: {} returns il2cpp type {}, wrapper expects {}",
-            name,
-            if return_type.is_null() { u32::MAX } else { (*return_type).type_() },
-            ret
-        );
-        return 0;
+    if return_type.is_null() {
+        debug!("AnimationSpeed: {} has no readable return type", name);
+        return false;
     }
 
     // The result travels the same way the arguments do, and the wrappers that read these results
     // as numbers are sized for a register: a struct returned through memory, or a reference handed
     // back where an `i32` was read, is the A5 and A7 hazard on the output side.
-    if !prove_value_shape(return_type, name, None, required) {
+    prove_value_shape(return_type, name, None, required)
+}
+
+unsafe fn resolve_method_any(
+    class: *mut Il2CppClass,
+    name: &str,
+    params: &[Il2CppTypeEnum],
+    ret: Il2CppTypeEnum,
+    required: MethodMatch,
+) -> usize {
+    use crate::il2cpp::symbols::{OverloadAnswer, OverloadRejection, get_method_overloads, overload_rejects_request, select_overload};
+
+    // C15. The class table is asked for the whole signature the wrapper was written against, and
+    // every method carrying it is a candidate. The walk used to answer the first method under the
+    // name and parameter list and the checks ran against that one method, so an overload that was
+    // not the one meant decided the install. The pair this client's dump prints for
+    // `Gallop.ModelController::GetBodyShader/2` - the `static class<Shader>(struct, struct)` at
+    // `introspect.log:1188` and the instance `class<Shader>(struct, struct)` at 1189 - is that
+    // shape: name, arity and parameter list answer 1188 first, and a caller written for 1189 has
+    // nothing left to stand on. No site in this tree asks for `GetBodyShader`, so what the pair
+    // would do to such a wrapper is what the checks below are for; the C15 concept counts the pairs
+    // of this shape this client has (two, in this dump) and which of them a hook site names (none).
+    let request = request_for(params, ret, required);
+    let candidates = get_method_overloads(class, name, &request);
+
+    if candidates.is_empty() {
+        debug!("AnimationSpeed: {} has no overload with the expected signature", name);
         return 0;
     }
 
-    (*method).methodPointer
+    match select_overload(&candidates, &request) {
+        // Nothing under this name carries the signature. The two reasons a candidate was not it are
+        // the two the install line used to print about a single method picked by table order, now
+        // read off each method that was found.
+        OverloadAnswer::None => {
+            for candidate in &candidates {
+                match overload_rejects_request(candidate, &request) {
+                    Some(OverloadRejection::Return { actual, expected }) => warn!(
+                        "AnimationSpeed: {name} returns il2cpp type {}, wrapper expects {}",
+                        actual.unwrap_or(u32::MAX),
+                        expected,
+                    ),
+                    Some(OverloadRejection::Staticness { candidate_is_static: true }) => {
+                        debug!("AnimationSpeed: {name} is static, its arguments would be misread")
+                    },
+                    Some(OverloadRejection::Staticness { candidate_is_static: false }) => {
+                        debug!("AnimationSpeed: {name} is not static, a wrapper without `this` would misread it")
+                    },
+                    None => {},
+                }
+            }
+
+            return 0;
+        },
+
+        // A2 is still open, and this is the honest shape of it: `CLASS` matches every reference type,
+        // so `SingleModeResultContentBase::FadeInContentFromRight/3` taking `UnityEngine.CanvasGroup`
+        // and the one taking `UnityEngine.UI.MaskableGraphic` (`introspect.log:24167-24168`) are one
+        // request to a matcher that compares enums. That collision is live at the site written
+        // against it: `hook/umamusume/SingleModeResultContentBase.rs` asks for the `/3` pair with
+        // `[class, r4, class]` and gets the ambiguity line below on every install. This file's own
+        // door is the different method the dump prints once, `TeamStadiumGrandResultViewController::
+        // FadeInContentFromRight/2 -> void(class<UnityEngine.CanvasGroup>, float)` at 25842, and
+        // answers it uniquely. The collision is printed instead of settled in silence, and the first
+        // candidate the table lists is bound as it always was: both travel as the pointer the wrapper
+        // declares, so what the collision decides is which of the two calls get scaled, not whether
+        // the arguments are read from the right register. Telling them apart is parameter class names.
+        OverloadAnswer::Ambiguous(count) => debug!(
+            "AnimationSpeed: {name} has {count} overloads carrying the requested signature, binding the first the class table lists",
+        ),
+
+        OverloadAnswer::Unique(_) => {},
+    }
+
+    for candidate in &candidates {
+        if overload_rejects_request(candidate, &request).is_some() {
+            continue;
+        }
+
+        let method = candidate.method;
+
+        if candidate_holds_wrapper(method, name, params, required) {
+            return (*method).methodPointer;
+        }
+    }
+
+    0
 }
 
 // Scaling only the read half of a settable property is unsafe: a game path that does
@@ -911,17 +975,81 @@ pub const TRAINING_HIT_SLOTS: [(usize, &str); 3] = [
 
 // These getters hand out a hardcoded duration or a playback scale, and are the only way
 // to reach a `const` duration that is not passed as an argument anywhere.
+//
+// C2: this was the last helper macro in the tree that wrote an armed wrapper with nothing in front
+// of its body. `get_orig_fn!` + `scale_*` + `hit()` in a bare `extern "C" fn` means a panic in the
+// `debug!` behind `hit`, or a fault on the way to the original, leaves through a trampoline frame
+// that has no unwind info at all, and the process goes with it. It now expands into `def_detour!`'s
+// publish arm, the shape every other armed detour in this tree is written with, and the two answers
+// a trip at this boundary may give are both stated here rather than left to the macro's last resort:
+//
+// - **The game's own number, published on the line it arrives on.** `answer.publish(raw)` sits
+//   directly after the original returns, so a trip anywhere later - in the scaling, in `hit`, in the
+//   logger behind it - hands the game back the value its method produced instead of a zero. At
+//   `get_TimeScaleEventWipe` / `get_TimeScaleAfterEndStory` a zero is a story clip that stops
+//   advancing, and at the three duration getters it is an animation removed wholesale; neither is a
+//   decision the mod gets to make on a trip that came out of its own logging half. It is the same
+//   order `StoryFrameProbe::get_TimeScale` and `StoryTimelineController_GetTimeScaleByHighSpeedType`
+//   publish in, for the same reason.
+// - **For the one case where the game's number cannot be reached at all, the value the wrapper
+//   states at its own call site.** That case is C1: `get_orig_fn!` answers 0 for a trampoline the
+//   detach path has just taken back, the call jumps to 0, the barrier takes an access violation, and
+//   the value it would then have to invent is the zero above. `get_orig_fn_guarded!` is the same
+//   `CachedTrampoline` answering `None`, so AGENTS section 2 ("unresolved targets stay inert, said
+//   once, off the hot path") holds at this boundary and the fault is never taken in the first place.
+//   What the wrapper answers then is the neutral value for what that getter hands out:
+//   `MIN_TIME_SCALE` for a playback scale (the game's own speed - a 0 scale is a pause), and 0.0 for
+//   a duration (no wait: the one value `scale_duration` already passes through untouched, and the
+//   failure mode that cannot stall a coroutine or add time the game did not plan for).
 macro_rules! def_getter_hook {
-    ($hook:ident, $group:expr, $scale:ident, $slot:literal) => {
-        extern "C" fn $hook(this: *mut Il2CppObject) -> f32 {
-            type Orig = extern "C" fn(*mut Il2CppObject) -> f32;
+    ($hook:ident, $group:expr, $scale:ident, $slot:literal, no_answer $no_answer:block) => {
+        def_getter_hook!(
+            $hook,
+            $group,
+            $scale,
+            $slot,
+            no_answer $no_answer,
+            // The shipped game half: this wrapper's own trampoline, or nothing.
+            orig {
+                type Original = extern "C" fn(*mut Il2CppObject) -> f32;
 
-            let raw = get_orig_fn!($hook, Orig)(this);
-            let scaled = $scale(raw, $group);
+                get_orig_fn_guarded!($hook, Original)
+            },
+            after_call {}
+        );
+    };
 
-            hit($slot, stringify!($hook), raw, scaled);
+    // The same wrapper with the two halves a test cannot reach supplied by the test: the shipped
+    // body asks the registry for its trampoline, whose cold branch reaches `Hachimi::instance()`,
+    // which ends the test process (AGENTS section 4). Nothing shipped instantiates this arm - the
+    // arm above delegates to it - so the wrappers the barrier tests drive are built from the shipped
+    // shape, with the game call and the mod half behind it written as expressions rather than as a
+    // copy of this body nobody checks against the shipped one.
+    ($name:ident, $group:expr, $scale:ident, $slot:literal, no_answer $no_answer:block, orig $orig:block, after_call $after_call:block) => {
+        def_detour! {
+            $name(this: *mut Il2CppObject) answer -> f32 {
+                let original = $orig;
 
-            scaled
+                let Some(orig) = original else {
+                    // Inert, and the reason is said once by `resolve_or_none` on the branch that is
+                    // already skipping the call. No call through 0 stands on this boundary.
+                    return $no_answer;
+                };
+
+                let raw = orig(this);
+
+                // Published the moment the game answers: a trip after this line answers with the
+                // game's value, and `hit`'s logging half can no longer cost the game its own number.
+                answer.publish(raw);
+
+                $after_call;
+
+                let scaled = $scale(raw, $group);
+
+                hit($slot, stringify!($name), raw, scaled);
+
+                scaled
+            }
         }
     };
 }
@@ -1237,31 +1365,121 @@ pub fn init(umamusume: *const Il2CppImage) {
     mark_dirty();
 }
 
-def_getter_hook!(CountupModifier_getDuration, Group::Screens, scale_duration, 8);
-def_getter_hook!(TextModifier_getDuration, Group::Screens, scale_duration, 9);
-def_getter_hook!(TextModifier_getDelay, Group::Screens, scale_duration, 10);
-def_getter_hook!(StoryTimeline_getTimeScaleEventWipe, Group::Story, scale_time_scale, 14);
-def_getter_hook!(StoryTimeline_getTimeScaleAfterEndStory, Group::Story, scale_time_scale, 15);
+// Each site states the answer its getter gives when it cannot reach its own original: 0.0 for a
+// duration (no wait - a value the game itself uses and `scale_duration` already refuses to change),
+// `MIN_TIME_SCALE` for a playback scale (the game's own speed, because a 0 scale is a pause).
+def_getter_hook!(CountupModifier_getDuration, Group::Screens, scale_duration, 8, no_answer { 0.0 });
+def_getter_hook!(TextModifier_getDuration, Group::Screens, scale_duration, 9, no_answer { 0.0 });
+def_getter_hook!(TextModifier_getDelay, Group::Screens, scale_duration, 10, no_answer { 0.0 });
+def_getter_hook!(StoryTimeline_getTimeScaleEventWipe, Group::Story, scale_time_scale, 14, no_answer { MIN_TIME_SCALE });
+def_getter_hook!(StoryTimeline_getTimeScaleAfterEndStory, Group::Story, scale_time_scale, 15, no_answer { MIN_TIME_SCALE });
+
+// The wrappers the barrier tests below drive, built by `def_getter_hook!` itself through the arm the
+// shipped arm delegates to. Slots 17 and 18 are test slots (the installed hooks use 6 through 16).
+//
+// The game half is one of these two functions rather than a trampoline: a unit test reaches no
+// trampoline and no `Hachimi::instance()` (AGENTS section 4), and the shipped body's registry lookup
+// ends the test process on its cold branch.
+#[cfg(test)]
+#[inline(never)]
+extern "C" fn game_getter_that_answers_2_4(_this: *mut Il2CppObject) -> f32 {
+    2.4
+}
+
+#[cfg(all(test, target_env = "msvc", target_arch = "x86_64"))]
+#[inline(never)]
+extern "C" fn game_getter_that_faults(_this: *mut Il2CppObject) -> f32 {
+    // The read `guard` already uses for this purpose: an address no module owns, taken inside the
+    // frames the barrier wrapped.
+    let mut value: u64 = 0;
+    unsafe { core::arch::asm!("mov rax, qword ptr [0x1000]", out("rax") value) };
+    value as f32
+}
+
+#[cfg(test)]
+def_getter_hook!(
+    GetterWithNoOriginalForADuration, Group::Screens, scale_duration, 17,
+    no_answer { 0.0 },
+    orig { None::<extern "C" fn(*mut Il2CppObject) -> f32> },
+    after_call {}
+);
+
+#[cfg(test)]
+def_getter_hook!(
+    GetterWithNoOriginalForATimeScale, Group::Story, scale_time_scale, 17,
+    no_answer { MIN_TIME_SCALE },
+    orig { None::<extern "C" fn(*mut Il2CppObject) -> f32> },
+    after_call {}
+);
+
+#[cfg(test)]
+def_getter_hook!(
+    GetterThatScalesCleanly, Group::Screens, scale_duration, 17,
+    no_answer { 0.0 },
+    orig { Some(game_getter_that_answers_2_4) },
+    after_call {}
+);
+
+#[cfg(test)]
+#[inline(never)]
+fn mod_half_that_panics_after_the_answer() {
+    // A function rather than a `panic!` written in the body: the wrapper's own half is what trips
+    // here, and a diverging call the compiler cannot see through is what keeps the scaling half it
+    // stands in front of a real statement instead of dead code.
+    panic!("the mod half of a getter tripped after the game had answered");
+}
+
+#[cfg(test)]
+def_getter_hook!(
+    GetterPanickingAfterTheGameAnswered, Group::Screens, scale_duration, 17,
+    no_answer { 0.0 },
+    orig { Some(game_getter_that_answers_2_4) },
+    after_call { mod_half_that_panics_after_the_answer() }
+);
+
+#[cfg(all(test, target_env = "msvc", target_arch = "x86_64"))]
+def_getter_hook!(
+    GetterFaultingAfterTheGameAnswered, Group::Story, scale_time_scale, 18,
+    no_answer { MIN_TIME_SCALE },
+    orig { Some(game_getter_that_answers_2_4) },
+    after_call {
+        let mut value: u64 = 0;
+        unsafe { core::arch::asm!("mov rax, qword ptr [0x1000]", out("rax") value) };
+        let _ = value;
+    }
+);
+
+#[cfg(all(test, target_env = "msvc", target_arch = "x86_64"))]
+def_getter_hook!(
+    GetterFaultingInsideTheOriginal, Group::Story, scale_time_scale, 18,
+    no_answer { MIN_TIME_SCALE },
+    orig { Some(game_getter_that_faults) },
+    after_call {}
+);
 
 // The training cut status in animation, scaled on the duration the game hands it (run 11: 106 calls at
 // 2.4 s). `frames`, the flag and the action are the game's own and go through untouched: multiplying a
 // frame count is the shape that stalled a story path in run 5.
 type TrainingCutStatusPlayInFn = extern "C" fn(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject);
-extern "C" fn TrainingCutStatus_PlayInSpeed(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject) {
-    let scaled = scale_duration(duration, Group::Screens);
-    hit(7, "SingleModeMainViewTrainingCutStatus.PlayIn", duration, scaled);
+def_detour! {
+    TrainingCutStatus_PlayInSpeed(this: *mut Il2CppObject, duration: f32, frames: i32, flag: bool, action: *mut Il2CppObject) {
+            let scaled = scale_duration(duration, Group::Screens);
+        hit(7, "SingleModeMainViewTrainingCutStatus.PlayIn", duration, scaled);
 
-    get_orig_fn!(TrainingCutStatus_PlayInSpeed, TrainingCutStatusPlayInFn)(this, scaled, frames, flag, action);
+        get_orig_fn!(TrainingCutStatus_PlayInSpeed, TrainingCutStatusPlayInFn)(this, scaled, frames, flag, action);
+    }
 }
 
 // The HP gauge progress bar blend time, the only float the gauge class takes. Run 11 measured 63,731
 // frames on the screen this class draws and never measured one animation door of it.
 type HpGaugeSetBlendTimeFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
-extern "C" fn HpGauge_SetBlendTimeSpeed(this: *mut Il2CppObject, time: f32) {
-    let scaled = scale_duration(time, Group::Screens);
-    hit(11, "SingleModeMainViewHpGauge.SetProgressbarBlendTime", time, scaled);
+def_detour! {
+    HpGauge_SetBlendTimeSpeed(this: *mut Il2CppObject, time: f32) {
+            let scaled = scale_duration(time, Group::Screens);
+        hit(11, "SingleModeMainViewHpGauge.SetProgressbarBlendTime", time, scaled);
 
-    get_orig_fn!(HpGauge_SetBlendTimeSpeed, HpGaugeSetBlendTimeFn)(this, scaled);
+        get_orig_fn!(HpGauge_SetBlendTimeSpeed, HpGaugeSetBlendTimeFn)(this, scaled);
+    }
 }
 
 // The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
@@ -1273,23 +1491,27 @@ extern "C" fn HpGauge_SetBlendTimeSpeed(this: *mut Il2CppObject, time: f32) {
 // installs nothing unless debug_mode is on, and a speed option has to work for a player who never turns
 // that switch: the scaling points run 12 and 13 were only reachable because the probe happened to be on.
 type PlateInitializeListFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32);
-extern "C" fn TrainingParamChangeUI_InitializePlateListSpeed(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
-    let scaled = scale_duration(interval, Group::Screens);
+def_detour! {
+    TrainingParamChangeUI_InitializePlateListSpeed(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32) {
+            let scaled = scale_duration(interval, Group::Screens);
 
-    hit(12, "TrainingParamChangeUI.InitializePlateList", interval, scaled);
-    TrainingCuttProbe::note_plate_call(this, interval);
+        hit(12, "TrainingParamChangeUI.InitializePlateList", interval, scaled);
+        TrainingCuttProbe::note_plate_call(this, interval);
 
-    get_orig_fn!(TrainingParamChangeUI_InitializePlateListSpeed, PlateInitializeListFn)(this, list, scaled);
+        get_orig_fn!(TrainingParamChangeUI_InitializePlateListSpeed, PlateInitializeListFn)(this, list, scaled);
+    }
 }
 
 // One float argument in a fixed position, so the wrapper cannot misread it. This is the
 // grand result screen's own entry point for its hardcoded DURATION constant.
 type GrandResultFadeInFromRightFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32);
-extern "C" fn TeamStadiumGrandResult_FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32) {
-    let scaled = scale_duration(duration, Group::Screens);
-    hit(6, "TeamStadiumGrandResultViewController.FadeInContentFromRight", duration, scaled);
+def_detour! {
+    TeamStadiumGrandResult_FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32) {
+            let scaled = scale_duration(duration, Group::Screens);
+        hit(6, "TeamStadiumGrandResultViewController.FadeInContentFromRight", duration, scaled);
 
-    get_orig_fn!(TeamStadiumGrandResult_FadeInContentFromRight, GrandResultFadeInFromRightFn)(this, content, scaled);
+        get_orig_fn!(TeamStadiumGrandResult_FadeInContentFromRight, GrandResultFadeInFromRightFn)(this, content, scaled);
+    }
 }
 
 // Every class named below has to be resolved before the getters are installed, because
@@ -2023,6 +2245,53 @@ mod tests {
         assert!(!shape_is_allowed(class_argument, MATCH_STATIC_VALUES_ONLY.values_only), "the i32 HighSpeedType wrappers do not");
     }
 
+    // C15. The question each wrapper profile asks the class table. A profile mapped onto the wrong
+    // question is the C15 decision again: an instance wrapper asking as if it had no `this`, a
+    // static-only wrapper asking as if it had one, or the return type the wrapper reads left out of
+    // the ask so that any method under that name could answer it.
+    #[test]
+    fn every_wrapper_profile_asks_the_class_table_for_its_own_shape() {
+        let instance = request_for(&[Il2CppTypeEnum_IL2CPP_TYPE_CLASS], Il2CppTypeEnum_IL2CPP_TYPE_VOID, MATCH_INSTANCE_VALUE);
+        assert_eq!((instance.allow_static, instance.require_static), (false, false), "an instance wrapper asked the table for a static method");
+        assert_eq!(instance.ret, Some(Il2CppTypeEnum_IL2CPP_TYPE_VOID), "the request dropped the return type its wrapper reads");
+        assert_eq!(instance.params, &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS], "the request dropped the parameter list its wrapper declares");
+        assert!(!instance.generic_slots, "an ordinary wrapper may not be answered by a generic instantiation");
+
+        // `StoryTimelineController::GetNextFrameCount_HighSpeed` is an instance method with `ref`
+        // parameters, so it asks the table the same shape question `resolve_method` asks.
+        let ref_method = request_for(&[Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_I4], Il2CppTypeEnum_IL2CPP_TYPE_VOID, MATCH_REFERENCE);
+        assert_eq!((ref_method.allow_static, ref_method.require_static), (false, false), "the ref wrappers ask for an instance method");
+
+        // A wrapper that declares only the real arguments has no `this` register, so the static bit
+        // is part of the signature it asks for, not a check it runs afterwards.
+        let static_values = request_for(&[Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE], Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN, MATCH_STATIC_VALUES_ONLY);
+        assert_eq!((static_values.allow_static, static_values.require_static), (true, true), "a wrapper without `this` asked the table as if it had one");
+        assert_eq!(static_values.ret, Some(Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN), "the HighSpeedType getter's bool was not part of the ask");
+
+        // A zero argument getter is safe either way: a static one ignores the `this` it is handed.
+        let getter = request_for(&[], Il2CppTypeEnum_IL2CPP_TYPE_R4, MATCH_GETTER_EITHER);
+        assert_eq!((getter.allow_static, getter.require_static), (true, false), "a getter refused a static method it could have taken");
+
+        // C48: the wider walk belongs to the pointer declaring wrappers, and only to them.
+        assert!(request_for(&[Il2CppTypeEnum_IL2CPP_TYPE_GENERICINST, Il2CppTypeEnum_IL2CPP_TYPE_R4], Il2CppTypeEnum_IL2CPP_TYPE_VOID, MATCH_GENERIC_REF).generic_slots);
+        assert!(request_for(&[Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE], Il2CppTypeEnum_IL2CPP_TYPE_VOID, MATCH_STATIC_GENERIC_REF).generic_slots);
+    }
+
+    // C15, the shape this client's dump prints at `introspect.log:1188-1189`: `GetBodyShader/2` is a
+    // `static` overload and an instance one, under one name, one argument count and the same two
+    // parameter enums. The matcher compares enums, so the two are one question; what the question
+    // now carries is the static bit the wrapper's own shape needs, which is what tells them apart
+    // (`symbols::select_overload` runs on candidates carrying their own return type and static bit).
+    #[test]
+    fn the_wrapper_shape_a_request_carries_is_what_separates_a_static_pair() {
+        let instance_wrapper = request_for(&[Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE, Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE], Il2CppTypeEnum_IL2CPP_TYPE_CLASS, MATCH_INSTANCE_VALUE);
+        let static_wrapper = request_for(&[Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE, Il2CppTypeEnum_IL2CPP_TYPE_VALUETYPE], Il2CppTypeEnum_IL2CPP_TYPE_CLASS, MATCH_STATIC_VALUE);
+
+        assert!(!instance_wrapper.allow_static && !instance_wrapper.require_static);
+        assert!(static_wrapper.require_static, "the two profiles asked the table the same question");
+        assert_eq!(instance_wrapper.params, static_wrapper.params, "the parameter list alone is what the old walk asked with");
+    }
+
     // C39. The read half of the time scale arithmetic, on the number a Story getter hands back:
     // a stored pause and a stored slow motion stay as the game stored them, the game's neutral
     // 1.0 is what the option exists to raise, the ceiling binds the raise, and a scale the game
@@ -2114,5 +2383,134 @@ mod tests {
         // defaults takes hands the game's own value back to it.
         assert_eq!(time_scale(), 1.0, "the default mirrored to a slow down");
         assert_eq!(scale_game_time_scale(4.0), 4.0, "the write path changed a value at the default lever");
+    }
+
+    // C2, at the five boundaries `def_getter_hook!` arms. The wrappers these tests call are written
+    // by that macro, through the arm the five shipped instantiations delegate to, with the game half
+    // supplied by the test: a unit test reaches no trampoline and no `Hachimi::instance()` (AGENTS
+    // section 4), and the shipped body's registry lookup ends the test process on its cold branch.
+    // The trip counters are process wide, so these cases take the barrier's one turn (AGENTS section
+    // 4: the probe/barrier counters are shared by several modules' tests).
+
+    #[test]
+    fn a_getter_call_that_reaches_the_game_still_scales_the_value_it_hands_back() {
+        // The migration must not have changed what a clean call does: the original is called, its
+        // duration is divided by the group factor, and nothing tripped.
+        let _turn = pass_turn();
+        SCREENS_FACTOR.store(4.0f32.to_bits(), Ordering::Release);
+
+        let call: extern "C" fn(*mut Il2CppObject) -> f32 = GetterThatScalesCleanly;
+
+        assert_eq!(call(std::ptr::null_mut()), 0.6, "a migrated getter stopped scaling the duration it hands the game");
+    }
+
+    #[test]
+    fn a_getter_with_no_trampoline_stays_inert_and_hands_the_game_no_zero_scale() {
+        use crate::il2cpp::hook::guard;
+
+        let _turn = guard::barrier_turn();
+        let before_panics = guard::panic_trip_count();
+        let before_invented = guard::invented_trip_count();
+
+        let duration: extern "C" fn(*mut Il2CppObject) -> f32 = GetterWithNoOriginalForADuration;
+        let scale: extern "C" fn(*mut Il2CppObject) -> f32 = GetterWithNoOriginalForATimeScale;
+
+        assert_eq!(duration(std::ptr::null_mut()), 0.0,
+            "the duration getter did not answer with the no-wait value its own site states");
+        assert_eq!(scale(std::ptr::null_mut()), MIN_TIME_SCALE,
+            "a missing trampoline handed the story timeline a 0 time scale, which is a pause");
+
+        assert_eq!(guard::panic_trip_count(), before_panics);
+        assert_eq!(guard::invented_trip_count(), before_invented,
+            "the barrier had to make up a value the wrapper states at its call site");
+    }
+
+    #[test]
+    #[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
+    fn a_getter_that_has_no_original_takes_no_fault_because_it_calls_through_nothing() {
+        use crate::il2cpp::hook::guard;
+
+        let _turn = guard::barrier_turn();
+        let before_faults = guard::fault_trip_count();
+        let before_jumps_to_zero = guard::null_target_fault_trip_count();
+
+        let duration: extern "C" fn(*mut Il2CppObject) -> f32 = GetterWithNoOriginalForADuration;
+        let scale: extern "C" fn(*mut Il2CppObject) -> f32 = GetterWithNoOriginalForATimeScale;
+
+        duration(std::ptr::null_mut());
+        scale(std::ptr::null_mut());
+
+        // C1, at the boundary this macro used to leave unguarded: the old body transmuted the
+        // registry's 0 into a function pointer and called it, which is an execution at address 0 -
+        // the signature `null_target_fault_trip_count` counts. `get_orig_fn_guarded!` is the same
+        // cache answering `None`, so nothing is called and nothing is counted.
+        assert_eq!(guard::fault_trip_count(), before_faults, "a call through 0 was still made here");
+        assert_eq!(guard::null_target_fault_trip_count(), before_jumps_to_zero, "the barrier saw a jump to 0");
+    }
+
+    #[test]
+    fn a_getter_trip_after_the_game_answered_hands_back_the_games_own_value() {
+        use crate::il2cpp::hook::guard;
+
+        let _turn = guard::barrier_turn();
+        let before_panics = guard::panic_trip_count();
+        let before_answered = guard::answered_trip_count();
+        let before_invented = guard::invented_trip_count();
+
+        let call: extern "C" fn(*mut Il2CppObject) -> f32 = GetterPanickingAfterTheGameAnswered;
+
+        // 2.4 is what the game's method returned. The barrier stopped the mod half *after* that, and
+        // the answer it hands back is the game's number - not a 0 duration the game then acts on.
+        assert_eq!(call(std::ptr::null_mut()), 2.4, "the barrier threw away the answer the game had already given");
+
+        assert_eq!(guard::panic_trip_count(), before_panics + 1);
+        assert_eq!(guard::answered_trip_count(), before_answered + 1, "the trip was not reported as answered");
+        assert_eq!(guard::invented_trip_count(), before_invented,
+            "a trip with the game's answer in hand invented a value anyway");
+    }
+
+    #[test]
+    #[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
+    fn a_getter_fault_after_the_game_answered_hands_back_the_games_own_value_too() {
+        use crate::il2cpp::hook::guard;
+
+        let _turn = guard::barrier_turn();
+        let before_faults = guard::fault_trip_count();
+        let before_answered = guard::answered_trip_count();
+        let before_invented = guard::invented_trip_count();
+
+        let call: extern "C" fn(*mut Il2CppObject) -> f32 = GetterFaultingAfterTheGameAnswered;
+
+        assert_eq!(call(std::ptr::null_mut()), 2.4,
+            "a fault in the mod half cost the story timeline the scale the game had just produced");
+
+        assert_eq!(guard::fault_trip_count(), before_faults + 1);
+        assert_eq!(guard::last_fault_code(), 0xC0000005, "the C frame did not take this as an access violation");
+        assert_eq!(guard::answered_trip_count(), before_answered + 1);
+        assert_eq!(guard::invented_trip_count(), before_invented, "the barrier made up a time scale");
+    }
+
+    #[test]
+    #[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
+    fn a_getter_fault_inside_the_game_method_is_taken_at_the_boundary_and_refused() {
+        use crate::il2cpp::hook::guard;
+
+        let _turn = guard::barrier_turn();
+        let before_faults = guard::fault_trip_count();
+        let before_jumps_to_zero = guard::null_target_fault_trip_count();
+        let before_invented = guard::invented_trip_count();
+
+        // The trip with nothing to answer: the game's own method faulted before it produced a value,
+        // so no answer of the game's exists and the wrapper replaying the call would fault again. The
+        // barrier's refusal - a zero, counted, and named in the log once for this wrapper - is the
+        // honest answer, and the process surviving the call is the half that was missing before.
+        let call: extern "C" fn(*mut Il2CppObject) -> f32 = GetterFaultingInsideTheOriginal;
+
+        assert_eq!(call(std::ptr::null_mut()), 0.0, "the wrapper did not answer the trip itself");
+
+        assert_eq!(guard::fault_trip_count(), before_faults + 1);
+        assert_eq!(guard::last_fault_code(), 0xC0000005);
+        assert_eq!(guard::null_target_fault_trip_count(), before_jumps_to_zero, "a read fault is not a call through 0");
+        assert_eq!(guard::invented_trip_count(), before_invented + 1, "the refusal the barrier had to make was not counted");
     }
 }

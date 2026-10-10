@@ -16,7 +16,7 @@ use once_cell::sync::Lazy;
 
 #[cfg(target_os = "windows")]
 use crate::{
-    core::Hachimi,
+    core::{hachimi::recover_lock, Hachimi},
     windows::free_camera,
 };
 
@@ -29,7 +29,7 @@ static RACE_INFO_GATE_NO: Lazy<Mutex<HashMap<usize, i32>>> =
 
 #[cfg(target_os = "windows")]
 pub fn clear_gate_no_cache() {
-    RACE_INFO_GATE_NO.lock().unwrap().clear();
+    recover_lock(&RACE_INFO_GATE_NO).clear();
 }
 
 #[cfg(target_os = "windows")]
@@ -38,46 +38,48 @@ type HorseRaceInfoReplayCtorFn = extern "C" fn(
     data: *mut Il2CppObject,
     reader: *mut Il2CppObject,
 );
-#[cfg(target_os = "windows")]
-extern "C" fn ctor(
+def_detour! {
+    #[cfg(target_os = "windows")]
+    ctor(
     this: *mut Il2CppObject,
     data: *mut Il2CppObject,
     reader: *mut Il2CppObject,
 ) {
-    get_orig_fn!(ctor, HorseRaceInfoReplayCtorFn)(this, data, reader);
+            get_orig_fn!(ctor, HorseRaceInfoReplayCtorFn)(this, data, reader);
 
-    if data.is_null() {
-        return;
+        if data.is_null() {
+            return;
+        }
+
+        let gate_no = HorseData::get_GateNo(data);
+        recover_lock(&RACE_INFO_GATE_NO).insert(this as usize, gate_no - 1);
     }
-
-    let gate_no = HorseData::get_GateNo(data);
-    RACE_INFO_GATE_NO.lock().unwrap().insert(this as usize, gate_no - 1);
 }
 
 #[cfg(target_os = "windows")]
 type get_RunMotionSpeedFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
-#[cfg(target_os = "windows")]
-extern "C" fn get_RunMotionSpeed(this: *mut Il2CppObject) -> f32 {
-    let result = get_orig_fn!(get_RunMotionSpeed, get_RunMotionSpeedFn)(this);
+def_detour! {
+    #[cfg(target_os = "windows")]
+    get_RunMotionSpeed(this: *mut Il2CppObject) -> f32 {
+            let result = get_orig_fn!(get_RunMotionSpeed, get_RunMotionSpeedFn)(this);
 
-    if !Hachimi::instance().config.load().windows.free_camera.enabled {
-        return result;
+        if !Hachimi::instance().config.load().windows.free_camera.enabled {
+            return result;
+        }
+
+        let gate_no = recover_lock(&RACE_INFO_GATE_NO)
+            .get(&(this as usize))
+            .copied()
+            .unwrap_or(-1);
+        if gate_no < 0 {
+            return result;
+        }
+
+        let pos = HorseRaceInfo::get__position(this);
+        let rot = HorseRaceInfo::get__rotationOnLane(this);
+        free_camera::update_race_target(gate_no, pos, rot);
+        result
     }
-
-    let gate_no = RACE_INFO_GATE_NO
-        .lock()
-        .unwrap()
-        .get(&(this as usize))
-        .copied()
-        .unwrap_or(-1);
-    if gate_no < 0 {
-        return result;
-    }
-
-    let pos = HorseRaceInfo::get__position(this);
-    let rot = HorseRaceInfo::get__rotationOnLane(this);
-    free_camera::update_race_target(gate_no, pos, rot);
-    result
 }
 
 def_field_value_accessors!(get__temptationMode, set__temptationMode, TEMPTATION_MODE_FIELD, TemptationMode);

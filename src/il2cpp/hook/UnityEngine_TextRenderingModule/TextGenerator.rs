@@ -6,51 +6,61 @@ type PopulateWithErrorsFn = extern "C" fn(
     this: *mut Il2CppObject, str: *mut Il2CppString,
     settings: TextGenerationSettings_t, context: *mut Il2CppObject
 ) -> bool;
-extern "C" fn PopulateWithErrors(
+def_detour! {
+    PopulateWithErrors(
     this: *mut Il2CppObject, str_: *mut Il2CppString,
     mut settings: TextGenerationSettings_t, context: *mut Il2CppObject
-) -> bool {
-    let orig_fn = get_orig_fn!(PopulateWithErrors, PopulateWithErrorsFn);
-    let localized_data = &Hachimi::instance().localized_data.load();
-    let hashed_dict = &localized_data.hashed_dict;
+) moves -> bool {
+            let orig_fn = get_orig_fn!(PopulateWithErrors, PopulateWithErrorsFn);
 
-    let mut new_str: Option<&String> = None;
-    let mut has_template: bool = false;
-    let ld_str: String;
-
-    // Check if the hashed dict has a match.
-    let hashed_text = hashed_dict.is_empty().not()
-        .then(|| hashed_dict.get(&unsafe { (*str_).hash() }))
-        .flatten();
-    if let Some(text) = hashed_text {
-        new_str = hashed_text;
-        has_template = text.contains("$");
-    }
-    // The string can be localized or original. Skip if we are sure it's not localized.
-    else if !localized_data.localize_dict.is_empty() || !localized_data.text_data_dict.is_empty() {
-        let utf_str = unsafe { (*str_).as_utf16str() };
-        if utf_str.as_slice().contains(&36) { // 36 = dollar sign ($)
-            has_template = true;
-            ld_str = utf_str.to_string();
-            new_str = Some(&ld_str);
+        // C9: `str_` is the string the game is measuring, and a generation call that carries none is
+        // the game's own business. This hook only rewrites a string that exists, so a null is handed
+        // to the original untouched rather than hashed.
+        if str_.is_null() {
+            return orig_fn(this, str_, settings, context);
         }
-    }
 
-    if let Some(text) = new_str {
-        // Only try to evaluate a template if it looked like one
-        if has_template {
-            let mut template_context = TemplateContext {
-                settings: &mut settings
-            };
-            let tpl_text = &Hachimi::instance().template_parser.eval_with_context(text, &mut template_context);
-            orig_fn(this, tpl_text.to_il2cpp_string(), settings, context)
+        let localized_data = &Hachimi::instance().localized_data.load();
+        let hashed_dict = &localized_data.hashed_dict;
+
+        let mut new_str: Option<&String> = None;
+        let mut has_template: bool = false;
+        let ld_str: String;
+
+        // Check if the hashed dict has a match.
+        let hashed_text = hashed_dict.is_empty().not()
+            .then(|| hashed_dict.get(&unsafe { (*str_).hash() }))
+            .flatten();
+        if let Some(text) = hashed_text {
+            new_str = hashed_text;
+            has_template = text.contains("$");
+        }
+        // The string can be localized or original. Skip if we are sure it's not localized.
+        else if !localized_data.localize_dict.is_empty() || !localized_data.text_data_dict.is_empty() {
+            let utf_str = unsafe { (*str_).as_utf16str() };
+            if utf_str.as_slice().contains(&36) { // 36 = dollar sign ($)
+                has_template = true;
+                ld_str = utf_str.to_string();
+                new_str = Some(&ld_str);
+            }
+        }
+
+        if let Some(text) = new_str {
+            // Only try to evaluate a template if it looked like one
+            if has_template {
+                let mut template_context = TemplateContext {
+                    settings: &mut settings
+                };
+                let tpl_text = &Hachimi::instance().template_parser.eval_with_context(text, &mut template_context);
+                orig_fn(this, tpl_text.to_il2cpp_string(), settings, context)
+            }
+            else {
+                orig_fn(this, text.to_il2cpp_string(), settings, context)
+            }
         }
         else {
-            orig_fn(this, text.to_il2cpp_string(), settings, context)
+            orig_fn(this, str_, settings, context)
         }
-    }
-    else {
-        orig_fn(this, str_, settings, context)
     }
 }
 

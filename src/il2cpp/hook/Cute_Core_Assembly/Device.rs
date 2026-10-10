@@ -1,6 +1,10 @@
 use crate::il2cpp::{symbols::get_method_addr, types::*};
 
-extern "C" fn IsIllegalUser() -> bool { false }
+def_detour! {
+    IsIllegalUser() -> bool {
+         false
+    }
+}
 
 pub fn init(Cute_Core_Assembly: *const Il2CppImage) {
     get_class_or_return!(Cute_Core_Assembly, "Cute.Core", Device);

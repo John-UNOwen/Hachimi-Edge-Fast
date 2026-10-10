@@ -148,18 +148,28 @@ type WaitCtorFn = extern "C" fn(this: *mut Il2CppObject, seconds: f32);
 
 // `WaitForSeconds::.ctor/1 -> void(float)`. The float the constructor is handed is the wait the coroutine
 // asked for, so it is read out of the argument rather than out of `m_Duration` after the fact.
-extern "C" fn WaitForSeconds_ctor(this: *mut Il2CppObject, seconds: f32) {
-    WAIT_SECONDS.note(seconds);
+def_detour! {
+    WaitForSeconds_ctor(this: *mut Il2CppObject, seconds: f32) {
+            WAIT_SECONDS.note(seconds);
 
-    get_orig_fn!(WaitForSeconds_ctor, WaitCtorFn)(this, seconds);
+        get_orig_fn!(WaitForSeconds_ctor, WaitCtorFn)(this, seconds);
+    }
+    bail {
+                get_orig_fn!(WaitForSeconds_ctor, WaitCtorFn)(this, seconds)
+    }
 }
 
 // `WaitForSecondsRealTime::.ctor/1 -> void(float)`: the same wait measured against unscaled time, which is
 // the one `time_scale` cannot reach.
-extern "C" fn WaitForSecondsRealTime_ctor(this: *mut Il2CppObject, seconds: f32) {
-    WAIT_REALTIME.note(seconds);
+def_detour! {
+    WaitForSecondsRealTime_ctor(this: *mut Il2CppObject, seconds: f32) {
+            WAIT_REALTIME.note(seconds);
 
-    get_orig_fn!(WaitForSecondsRealTime_ctor, WaitCtorFn)(this, seconds);
+        get_orig_fn!(WaitForSecondsRealTime_ctor, WaitCtorFn)(this, seconds);
+    }
+    bail {
+                get_orig_fn!(WaitForSecondsRealTime_ctor, WaitCtorFn)(this, seconds)
+    }
 }
 
 const ONE_FLOAT: &[Il2CppTypeEnum] = &[Il2CppTypeEnum_IL2CPP_TYPE_R4];

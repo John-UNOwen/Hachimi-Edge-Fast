@@ -24,6 +24,18 @@ static APPLIED_LEVER: AtomicU32 = AtomicU32::new(f32::NAN.to_bits());
 /// compounding C35 describes.
 static GAME_REQUESTED: AtomicU32 = AtomicU32::new(f32::NAN.to_bits());
 
+/// The last number *this layer* handed to the game's setter - a scaled write from the hook
+/// below, or the one write `apply()` makes - NAN until the first. It is what makes the layer
+/// provably unable to multiply its own write twice: a game write that arrives as exactly this
+/// number is the game passing our product back (the read-modify-write loop C22/C24/C35 refuse,
+/// AGENTS section 5 "never multiply the current value"), and the lever is already inside it. It
+/// is also what makes the layer provably unable to lower a game value: `apply()` may write below
+/// `Time.timeScale`'s current only when the current is one of these numbers, so the only value
+/// ever lowered is one this layer itself put there, down to the game's own last request.
+/// `StoryTimelineController`'s `HIGH_SPEED_LAST_WRITTEN` is the same device for the static it
+/// rewrites.
+static PRODUCED: AtomicU32 = AtomicU32::new(f32::NAN.to_bits());
+
 /// Addresses of the icall implementations. 0 when this build does not expose them, in
 /// which case every entry point here stays inert instead of calling through a null pointer.
 static mut SET_TIME_SCALE_ADDR: usize = 0;
@@ -31,16 +43,18 @@ static mut GET_TIME_SCALE_ADDR: usize = 0;
 
 type SetTimeScaleFn = extern "C" fn(value: f32);
 
-/// The trampoline of the original icall, resolved once and kept here. `get_orig_fn!` is a
-/// `Mutex<FnvHashMap>` lookup with an `unwrap()` (C33), so calling the original that way
-/// puts a lock - and a poisoned lock waiting to panic across an `extern "C"` frame (C2) - on
-/// every value the game writes into `Time.timeScale`. Cached, the neutral path is one atomic
-/// load and a jump.
+/// The trampoline of the original icall, resolved once and kept here. This hook does not reach
+/// the original through `get_orig_fn!` - it asks `get_trampoline_addr` for the icall by name -
+/// and that is a registry read per call: a lock over the hook map, on a hook the game writes
+/// through whenever it touches `Time.timeScale`. Cached, the neutral path is one atomic load and
+/// a jump.
 ///
-/// The cache cannot go stale underneath us: a detour is only reachable through its own
-/// trampoline, so the moment the hook is removed nothing routes into the code that would read
-/// the cached address any more. It stays 0 until the first armed call has resolved it, which
-/// also keeps `init` out of the hook map while `begin_batch`/`finish_batch` are arming.
+/// `get_orig_fn!` (C33) keeps the same address per detour and re-reads only when the registry's
+/// install generation moves; this copy cannot go stale for the same reason a detour's cannot,
+/// which is stronger than a generation: a detour is only reachable through its own trampoline, so
+/// the moment the hook is removed nothing routes into the code that would read the cached address
+/// any more. It stays 0 until the first armed call has resolved it, which also keeps `init` out of
+/// the hook map while `begin_batch`/`finish_batch` are arming.
 static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static NO_TRAMPOLINE_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -79,14 +93,15 @@ const CALL_DETAIL_LIMIT: usize = 6;
 const CALL_CHUNK: usize = 4096;
 static CALLS: AtomicUsize = AtomicUsize::new(0);
 
-fn log_call(value: f32, scaled: f32, lever: f32) {
+fn log_call(value: f32, scaled: f32, lever: f32, echoed: bool) {
     let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let tail = if echoed { ", echoed" } else { "" };
 
     if calls <= CALL_DETAIL_LIMIT {
-        debug!("Time::set_timeScale call {calls}: {value} -> {scaled} (lever x{lever})");
+        debug!("Time::set_timeScale call {calls}: {value} -> {scaled} (lever x{lever}{tail})");
     }
     else if calls % CALL_CHUNK == 0 {
-        debug!("Time::set_timeScale {calls} calls, most recent {value} -> {scaled} (lever x{lever})");
+        debug!("Time::set_timeScale {calls} calls, most recent {value} -> {scaled} (lever x{lever}{tail})");
     }
 }
 
@@ -96,6 +111,18 @@ fn log_call(value: f32, scaled: f32, lever: f32) {
 /// a test module repeating them. `set_timeScale` reads the mirror and hands the lever in, so this
 /// half needs no config and reaches no game pointer.
 fn scale_game_write(value: f32, lever: f32) -> f32 {
+    if value == f32::from_bits(PRODUCED.load(Ordering::Acquire)) {
+        // The game is handing back the exact number this layer last put in `Time.timeScale`.
+        // The lever is already inside that number; multiplying it a second time is the
+        // read-modify-write compounding C22/C24/C35 exist to refuse - the ceiling bounds that
+        // compounding, but a bounded multiply-twice is not what "never multiply the current
+        // value" asks for. Pass it through, and leave `GAME_REQUESTED` on the raw request the
+        // produced number was derived from: recording the scaled echo there is what would
+        // compound the baseline a later `apply()` scales from.
+        log_call(value, value, lever, true);
+        return value;
+    }
+
     // Recorded on both paths below, the neutral one included. `apply()` scales and restores
     // from the game's own last request, so a record written only on the scaling path goes
     // stale the moment the game writes while the lever is neutral, and the next config change
@@ -106,7 +133,7 @@ fn scale_game_write(value: f32, lever: f32) -> f32 {
         // Neutral fast exit: at the shipped default this hook has nothing to change, so the
         // value goes to the original as it came, with no scaling, no ceiling arithmetic and no
         // lock.
-        log_call(value, value, lever);
+        log_call(value, value, lever, false);
         return value;
     }
 
@@ -114,27 +141,35 @@ fn scale_game_write(value: f32, lever: f32) -> f32 {
     // its 0 pauses and its sub-1 slow motion stay as the game asked for, a value above 1.0 is
     // raised only up to MAX_TIME_SCALE even when a story getter already scaled it and this lever
     // scales it again, and a scale the game already holds above that ceiling is left where the
-    // game put it.
+    // game put it - `apply_time_scale` never returns a value below the one it was handed, so
+    // this hook cannot lower what the game asked for.
     let scaled = AnimationSpeed::apply_time_scale(value, lever);
-    log_call(value, scaled, lever);
+
+    // The number the game now holds *from this layer*, for the echo check above and the
+    // never-lower guard in `plan_write`.
+    PRODUCED.store(scaled.to_bits(), Ordering::Release);
+
+    log_call(value, scaled, lever, false);
 
     scaled
 }
 
-extern "C" fn set_timeScale(value: f32) {
-    // The lever is the atomic mirror `AnimationSpeed` keeps for hot paths, not a config load:
-    // the config is read once per pass by `refresh_time_scale` / `refresh_config_mirrors`.
-    let lever = AnimationSpeed::time_scale();
+def_detour! {
+    set_timeScale(value: f32) {
+            // The lever is the atomic mirror `AnimationSpeed` keeps for hot paths, not a config load:
+        // the config is read once per pass by `refresh_time_scale` / `refresh_config_mirrors`.
+        let lever = AnimationSpeed::time_scale();
 
-    if APPLYING.load(Ordering::Acquire) {
-        // Our own write from `apply()`. It is clamped where the lever is read, so it
-        // passes through instead of being multiplied a second time. Not counted: this is the
-        // mod's write, and the counter is the answer to "did the game reach this hook".
-        call_original(value);
-        return;
+        if APPLYING.load(Ordering::Acquire) {
+            // Our own write from `apply()`. It is clamped where the lever is read, so it
+            // passes through instead of being multiplied a second time. Not counted: this is the
+            // mod's write, and the counter is the answer to "did the game reach this hook".
+            call_original(value);
+            return;
+        }
+
+        call_original(scale_game_write(value, lever));
     }
-
-    call_original(scale_game_write(value, lever));
 }
 
 /// The value Unity is holding right now, read through the game's own getter. NAN when
@@ -154,14 +189,18 @@ fn read_time_scale() -> f32 {
 /// The decision `apply()` makes, kept free of il2cpp so the sequence is testable.
 ///
 /// `game_value` is what the game holds, `current` is what Unity is holding (NAN when it
-/// cannot be read). `None` means leave the game alone, and that covers every case the
-/// overwrite used to break: a game value at or below 1.0 is its 0 pause, its slow motion
-/// or its neutral 1.0, and none of them is ours to replace with a configured number. A
-/// value above 1.0 is the game's own fast forward: the lever raises it through the same
-/// arithmetic the write hook uses, bounded by MAX_TIME_SCALE, instead of swapping in the
-/// configured value - which for a lever below the game's own number would have slowed
-/// the fast forward down.
-fn plan_write(game_value: f32, lever: f32, current: f32) -> Option<f32> {
+/// cannot be read), and `current_is_ours` says whether that current is a number this layer
+/// itself wrote (`PRODUCED`) - the only case a value below the game's current may be written.
+/// `None` means leave the game alone, and that covers every case the overwrite used to break: a
+/// game value at or below 1.0 is its 0 pause, its slow motion or its neutral 1.0, and none of
+/// them is ours to replace with a configured number. A value above 1.0 is the game's own fast
+/// forward: the lever raises it through the same arithmetic the write hook uses - which never
+/// returns below the value it was handed - bounded by MAX_TIME_SCALE, instead of swapping in the
+/// configured value - which for a lever below the game's own number would have slowed the fast
+/// forward down. A number below Unity's current is only ever the restore, down to the game's own
+/// last request, and only when the current is one of this layer's writes: a scale the game
+/// reached on its own is left exactly where the game put it.
+fn plan_write(game_value: f32, lever: f32, current: f32, current_is_ours: bool) -> Option<f32> {
     if !game_value.is_finite() || !lever.is_finite() || game_value <= 1.0 {
         return None;
     }
@@ -169,6 +208,11 @@ fn plan_write(game_value: f32, lever: f32, current: f32) -> Option<f32> {
     let desired = AnimationSpeed::apply_time_scale(game_value, lever);
 
     if !desired.is_finite() || desired == current {
+        return None;
+    }
+
+    if desired < current && !current_is_ours {
+        warn!("Time::apply: the game holds {current}, which this layer did not write; not lowering it to {desired}");
         return None;
     }
 
@@ -202,7 +246,10 @@ fn claim_lever(lever: f32) -> bool {
 /// `plan_write` bounds the value handed to the game by the same ceiling. At the neutral
 /// lever with nothing previously scaled this writes nothing at all, so the game's own use
 /// of timeScale (pauses, slow motion) is left untouched, and dropping the lever back to
-/// 1.0 writes the game's own value once.
+/// 1.0 writes the game's own value once. The two `PRODUCED` reads - the echo check the hook
+/// runs on every game write, and the current-is-ours gate here - are what make the layer
+/// provably unable to multiply its own write twice, and unable to write under a scale the
+/// game reached on its own.
 pub fn apply() {
     let addr = unsafe { SET_TIME_SCALE_ADDR };
     if addr == 0 {
@@ -222,13 +269,24 @@ pub fn apply() {
     let requested = f32::from_bits(GAME_REQUESTED.load(Ordering::Acquire));
     let game_value = if requested.is_finite() { requested } else { current };
 
-    let Some(desired) = plan_write(game_value, lever, current) else {
+    // Unity's current counts as one of ours only while it matches the number this layer last
+    // wrote. That is what lets the restore write the game's own value back over our own scaled
+    // one, and what makes every other current - a scale the game reached on its own - a value
+    // this layer will not write under.
+    let ours = f32::from_bits(PRODUCED.load(Ordering::Acquire)) == current;
+
+    let Some(desired) = plan_write(game_value, lever, current, ours) else {
         return;
     };
 
     info!("Time::apply: game {game_value} x lever {lever} -> {desired}");
 
     unsafe {
+        // Recorded as ours before the write reaches the game: the detour passes an APPLYING
+        // write through without re-scaling it, and the number this write leaves behind is one
+        // the echo check may pass back through, and the restore may write under, for exactly
+        // that reason.
+        PRODUCED.store(desired.to_bits(), Ordering::Release);
         APPLYING.store(true, Ordering::Release);
         let set_time_scale: extern "C" fn(value: f32) = std::mem::transmute(addr);
         set_time_scale(desired);
@@ -280,10 +338,11 @@ mod tests {
     // Where `Time.timeScale` stands in this process: `unity` is the value the game holds,
     // `writes` the values a pass handed it. Nothing here re-implements a decision: `game_write`
     // calls `scale_game_write`, the function the detour runs for every value the game writes, and
-    // `apply` calls `claim_lever` and `plan_write`, the two functions `apply` itself runs. The one
-    // part of `apply` a test process cannot run is `read_time_scale` and the icall write it ends
-    // with, both of which go through the game's own getter and setter, so `unity` stands in for
-    // the read and what a run has to confirm is written in the ledger.
+    // `apply` calls `claim_lever` and `plan_write`, the two functions `apply` itself runs, with
+    // the same `PRODUCED` marker `apply` reads and writes around its icall. The one part of
+    // `apply` a test process cannot run is `read_time_scale` and the icall write it ends with,
+    // both of which go through the game's own getter and setter, so `unity` stands in for the
+    // read and what a run has to confirm is written in the ledger.
     struct Game {
         // The turn this case is running in, held for as long as the fixture lives.
         _turn: std::sync::MutexGuard<'static, ()>,
@@ -310,8 +369,10 @@ mod tests {
             let current = self.unity;
             let requested = f32::from_bits(GAME_REQUESTED.load(Ordering::Acquire));
             let game_value = if requested.is_finite() { requested } else { current };
+            let ours = f32::from_bits(PRODUCED.load(Ordering::Acquire)) == current;
 
-            if let Some(desired) = plan_write(game_value, lever, current) {
+            if let Some(desired) = plan_write(game_value, lever, current, ours) {
+                PRODUCED.store(desired.to_bits(), Ordering::Release);
                 self.writes.push(desired);
                 self.unity = desired;
             }
@@ -328,6 +389,7 @@ mod tests {
 
         GAME_REQUESTED.store(f32::NAN.to_bits(), Ordering::Release);
         APPLIED_LEVER.store(f32::NAN.to_bits(), Ordering::Release);
+        PRODUCED.store(f32::NAN.to_bits(), Ordering::Release);
         CALLS.store(0, Ordering::Relaxed);
 
         turn
@@ -434,9 +496,9 @@ mod tests {
         assert_eq!(game.writes, Vec::<f32>::new(), "apply wrote a slowed value into the game");
         assert_eq!(game.unity, 4.0, "the game's fast forward was replaced by a slow motion");
 
-        assert_eq!(plan_write(4.0, 0.1, 4.0), None);
-        assert_eq!(plan_write(4.0, 0.5, 4.0), None);
-        assert_eq!(plan_write(2.0, 0.9, 2.0), None);
+        assert_eq!(plan_write(4.0, 0.1, 4.0, false), None);
+        assert_eq!(plan_write(4.0, 0.5, 4.0, false), None);
+        assert_eq!(plan_write(2.0, 0.9, 2.0, false), None);
     }
 
     #[test]
@@ -472,7 +534,7 @@ mod tests {
         assert_eq!(game.unity, 1.0, "a game sitting at 1.0 was pushed to the configured lever");
 
         // What the stale record would have written instead, had the fast exit skipped it.
-        assert_eq!(plan_write(4.0, 2.0, 1.0), Some(5.0));
+        assert_eq!(plan_write(4.0, 2.0, 1.0, false), Some(5.0));
     }
 
     // Captures what the counter actually writes to the log. "Installed is not the same as
@@ -538,14 +600,15 @@ mod tests {
 
     #[test]
     fn plan_write_leaves_every_game_value_at_or_below_one_alone() {
-        assert_eq!(plan_write(0.0, 2.0, 0.0), None, "pause");
-        assert_eq!(plan_write(0.5, 3.0, 0.5), None, "slow motion");
-        assert_eq!(plan_write(1.0, 2.0, 1.0), None, "the game's neutral 1.0");
-        assert_eq!(plan_write(1.0, 2.0, 5.0), None, "not ours to reset");
-        assert_eq!(plan_write(f32::NAN, 2.0, 4.0), None, "nothing known");
-        assert_eq!(plan_write(4.0, 2.0, 4.0), Some(5.0), "already at the ceiling");
-        assert_eq!(plan_write(2.0, 2.0, 2.0), Some(4.0));
-        assert_eq!(plan_write(4.0, 1.0, 5.0), Some(4.0), "restore the game's own value");
+        assert_eq!(plan_write(0.0, 2.0, 0.0, false), None, "pause");
+        assert_eq!(plan_write(0.5, 3.0, 0.5, false), None, "slow motion");
+        assert_eq!(plan_write(1.0, 2.0, 1.0, false), None, "the game's neutral 1.0");
+        assert_eq!(plan_write(1.0, 2.0, 5.0, false), None, "not ours to reset");
+        assert_eq!(plan_write(f32::NAN, 2.0, 4.0, false), None, "nothing known");
+        assert_eq!(plan_write(4.0, 2.0, 4.0, false), Some(5.0), "already at the ceiling");
+        assert_eq!(plan_write(2.0, 2.0, 2.0, false), Some(4.0));
+        assert_eq!(plan_write(4.0, 1.0, 5.0, true), Some(4.0), "restore our own write to the game's own value");
+        assert_eq!(plan_write(4.0, 1.0, 5.0, false), None, "the restore lowered a 5.0 the game held itself");
     }
 
     // The two writers of Time.timeScale share `AnimationSpeed::apply_time_scale`, so both take
@@ -562,11 +625,65 @@ mod tests {
         assert_eq!(game.writes, Vec::<f32>::new(), "apply wrote 5.0 over the game's 8.0");
         assert_eq!(game.unity, 8.0);
 
-        assert_eq!(plan_write(8.0, 2.0, 8.0), None, "the plan lowered the game's own scale");
+        assert_eq!(plan_write(8.0, 2.0, 8.0, false), None, "the plan lowered the game's own scale");
         assert_eq!(scale_game_write(8.0, 5.0), 8.0);
 
         // The ceiling still binds every raise the mod itself makes, so nothing compounds.
         assert_eq!(scale_game_write(4.0, 5.0), 5.0, "the ceiling stopped binding the mod's own raise");
         assert_eq!(scale_game_write(5.0, 5.0), 5.0, "a raise at the ceiling compounded");
+    }
+
+    // C12's other half: a ceiling makes a multiplied-twice value bounded, but a bounded
+    // multiply-twice is still the read-modify-write compounding C22/C24/C35 exist to refuse
+    // (AGENTS section 5: remember the original, never multiply the current value). The game
+    // reading `Time.timeScale` back hands the hook its own scaled write; the `PRODUCED` marker
+    // is what lets the hook see that and pass it through instead of multiplying the lever a
+    // second time.
+    #[test]
+    fn a_write_the_game_hands_back_is_not_multiplied_a_second_time() {
+        let lever = 1.2;
+        let mut game = Game::new();
+
+        game.game_write(2.0, lever);   // the hook raised the game's 2.0 to 2.4
+        assert_eq!(game.unity, 2.4, "the first raise did not happen");
+
+        game.game_write(2.4, lever);   // the game read `Time.timeScale` back and wrote what it saw
+        assert_eq!(game.unity, 2.4, "our own 2.4 was multiplied again to {}", game.unity);
+
+        for _ in 0..10 {
+            game.game_write(2.4, lever); // ten more read-modify-write rounds
+        }
+
+        assert_eq!(game.unity, 2.4, "the lever compounded the layer's own write to {}", game.unity);
+
+        // And the baseline a restore scales from is still the game's raw request, not the echo:
+        // recording the echo as the game's request is what would compound the next pass.
+        game.apply(1.0);               // turning the option back off
+        assert_eq!(game.writes, vec![2.0], "the restore wrote the scaled echo, not the game's 2.0");
+        assert_eq!(game.unity, 2.0);
+    }
+
+    // Runs 19 to 21 hold `Time.timeScale` at 1.0 while the training cut's own clock peaks at
+    // 8.334 in values this layer never wrote. A config change whose restore or raise lands
+    // below such a current must leave it alone: the layer may write under `Time.timeScale` only
+    // over its own number.
+    #[test]
+    fn a_restore_never_lowers_a_scale_the_game_reached_on_its_own() {
+        let mut game = Game::new();
+
+        game.game_write(4.0, 1.2);     // the layer's own write is 4.8
+        assert_eq!(game.unity, 4.8);
+
+        // The game then stands `Time.timeScale` at a number this layer did not write.
+        game.unity = 8.0;
+
+        game.apply(1.05);              // a config change for a lever above 1.0
+        assert_eq!(game.writes, Vec::<f32>::new(), "apply wrote {:?} over the game's own 8.0", game.writes);
+        assert_eq!(game.unity, 8.0, "the layer lowered the game's own scale under its record");
+
+        // The guard is on the decision itself, not only on the sequence above.
+        assert_eq!(plan_write(4.0, 1.0, 8.0, false), None, "the restore lowered the game's 8.0 to 4.0");
+        assert_eq!(plan_write(4.0, 2.0, 8.0, false), None, "a raise derived from an old record undercut a game 8.0");
+        assert_eq!(plan_write(4.0, 1.0, 4.8, true), Some(4.0), "our own 4.8 could not be restored to the game's 4.0");
     }
 }

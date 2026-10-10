@@ -96,9 +96,19 @@ static mut GET_LIVETOTALTIME_ADDR: usize = 0;
 impl_addr_wrapper_fn!(get_LiveTotalTime, GET_LIVETOTALTIME_ADDR, f32, this: *mut Il2CppObject);
 
 type PauseLiveFn = extern "C" fn(this: *mut Il2CppObject, is_pause: bool);
-pub extern "C" fn PauseLive(this: *mut Il2CppObject, is_pause: bool) {
-    get_orig_fn!(PauseLive, PauseLiveFn)(this, is_pause);
-    IS_LIVE_PAUSED.store(is_pause, Ordering::Release);
+def_detour! {
+    pub PauseLive(this: *mut Il2CppObject, is_pause: bool) {
+            // `core::live_utils.rs` pauses and resumes a Live straight from mod code, so this body
+            // runs on paths that are not its trampoline. Nothing to call when the method never
+            // resolved, and the pause flag stays out of the way: it would otherwise claim a pause
+            // the game never took (C1).
+        let Some(pause_live) = get_orig_fn_guarded!(PauseLive, PauseLiveFn) else {
+            return;
+        };
+
+        pause_live(this, is_pause);
+        IS_LIVE_PAUSED.store(is_pause, Ordering::Release);
+    }
 }
 
 static mut ISPAUSELIVE_ADDR: usize = 0;
@@ -460,90 +470,98 @@ fn is_trainer_live_director(director: *mut Il2CppObject) -> bool {
 }
 
 type AwakeFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Awake(this: *mut Il2CppObject) {
-    get_orig_fn!(Awake, AwakeFn)(this);
-    IS_LIVE_SCENE.store(true, Ordering::Release);
-    IS_LIVE_PAUSED.store(IsPauseLive(this), Ordering::Release);
+def_detour! {
+    Awake(this: *mut Il2CppObject) {
+            get_orig_fn!(Awake, AwakeFn)(this);
+        IS_LIVE_SCENE.store(true, Ordering::Release);
+        IS_LIVE_PAUSED.store(IsPauseLive(this), Ordering::Release);
 
-    #[cfg(target_os = "windows")]
-    update_free_camera_live_availability(this);
+        #[cfg(target_os = "windows")]
+        update_free_camera_live_availability(this);
 
-    if is_trainer_live_director(this) && Hachimi::instance().config.load().trainer_live_landscape {
-        set_displayMode(this, DisplayMode::Landscape);
-    }
+        if is_trainer_live_director(this) && Hachimi::instance().config.load().trainer_live_landscape {
+            set_displayMode(this, DisplayMode::Landscape);
+        }
 
-    if Hachimi::instance().config.load().champions_live_show_text {
-        patch_champions_live(this);
+        if Hachimi::instance().config.load().champions_live_show_text {
+            patch_champions_live(this);
+        }
     }
 }
 
 #[cfg(target_os = "android")]
 type ApplyTrainerCameraFovFn = extern "C" fn(this: *mut Il2CppObject);
-#[cfg(target_os = "android")]
-extern "C" fn ApplyTrainerCameraFov(this: *mut Il2CppObject) {
-    get_orig_fn!(ApplyTrainerCameraFov, ApplyTrainerCameraFovFn)(this);
+def_detour! {
+    #[cfg(target_os = "android")]
+    ApplyTrainerCameraFov(this: *mut Il2CppObject) {
+            get_orig_fn!(ApplyTrainerCameraFov, ApplyTrainerCameraFovFn)(this);
 
-    let config = Hachimi::instance().config.load();
-    let force_landscape = (!Screen::get_IsVertical() && config.trainer_live_landscape)
-        || config.android.force_orientation_mode == ScreenOrientation_LandscapeLeft;
+        let config = Hachimi::instance().config.load();
+        let force_landscape = (!Screen::get_IsVertical() && config.trainer_live_landscape)
+            || config.android.force_orientation_mode == ScreenOrientation_LandscapeLeft;
 
-    if force_landscape {
-        let trainer_camera = get__trainerCameraTargetCamera(this);
-        if trainer_camera.is_null() {
-            return;
+        if force_landscape {
+            let trainer_camera = get__trainerCameraTargetCamera(this);
+            if trainer_camera.is_null() {
+                return;
+            }
+
+            let base_fov = 150.0;
+            let fov_rate = get__trainerCameraFovRate(this);
+            let fov_rate: f32 = if fov_rate == 0.0 { 1.0 } else { fov_rate.clamp(0.1, 1.0) };
+            set__trainerCameraFovRate(this, fov_rate);
+            Camera::set_fieldOfView(trainer_camera, base_fov * fov_rate);
         }
-
-        let base_fov = 150.0;
-        let fov_rate = get__trainerCameraFovRate(this);
-        let fov_rate: f32 = if fov_rate == 0.0 { 1.0 } else { fov_rate.clamp(0.1, 1.0) };
-        set__trainerCameraFovRate(this, fov_rate);
-        Camera::set_fieldOfView(trainer_camera, base_fov * fov_rate);
     }
 }
 
 #[cfg(target_os = "windows")]
 type AlterUpdateFn = extern "C" fn(this: *mut Il2CppObject, delta_time: f32, is_update_delta_time: bool);
-#[cfg(target_os = "windows")]
-extern "C" fn AlterUpdate(this: *mut Il2CppObject, delta_time: f32, is_update_delta_time: bool) {
-    free_camera::begin_live_director_update();
-    get_orig_fn!(AlterUpdate, AlterUpdateFn)(this, delta_time, is_update_delta_time);
-    if !Hachimi::instance().config.load().windows.free_camera.enabled && is_trainer_live_director(this) {
-        if Hachimi::instance().config.load().trainer_live_landscape {
-            let camera = get_MainCameraObject(this);
-            if !camera.is_null() {
-                Camera::set_fieldOfView(camera, 60.0);
+def_detour! {
+    #[cfg(target_os = "windows")]
+    AlterUpdate(this: *mut Il2CppObject, delta_time: f32, is_update_delta_time: bool) {
+            free_camera::begin_live_director_update();
+        get_orig_fn!(AlterUpdate, AlterUpdateFn)(this, delta_time, is_update_delta_time);
+        if !Hachimi::instance().config.load().windows.free_camera.enabled && is_trainer_live_director(this) {
+            if Hachimi::instance().config.load().trainer_live_landscape {
+                let camera = get_MainCameraObject(this);
+                if !camera.is_null() {
+                    Camera::set_fieldOfView(camera, 60.0);
+                }
             }
         }
-    }
 
-    free_camera::set_live_active();
-    apply_live_character_options(this);
-    update_live_free_camera_target(this);
-    enforce_live_free_camera_output(this);
+        free_camera::set_live_active();
+        apply_live_character_options(this);
+        update_live_free_camera_target(this);
+        enforce_live_free_camera_output(this);
+    }
 }
 
 
 #[cfg(target_os = "windows")]
 type SetupOrientationFn = extern "C" fn(this: *mut Il2CppObject, display_mode: DisplayMode);
-#[cfg(target_os = "windows")]
-extern "C" fn SetupOrientation(this: *mut Il2CppObject, display_mode: DisplayMode) {
-    let config = Hachimi::instance().config.load();
-    let mut target_display_mode = display_mode;
-    if config.windows.freeform_window {
-        if let Some((width, height)) = crate::windows::wnd_hook::get_client_size() {
-            target_display_mode = if width > height {
-                DisplayMode::Landscape
-            } else {
-                DisplayMode::Portrait
-            };
+def_detour! {
+    #[cfg(target_os = "windows")]
+    SetupOrientation(this: *mut Il2CppObject, display_mode: DisplayMode) {
+            let config = Hachimi::instance().config.load();
+        let mut target_display_mode = display_mode;
+        if config.windows.freeform_window {
+            if let Some((width, height)) = crate::windows::wnd_hook::get_client_size() {
+                target_display_mode = if width > height {
+                    DisplayMode::Landscape
+                } else {
+                    DisplayMode::Portrait
+                };
+            }
         }
-    }
 
-    if config.trainer_live_landscape && is_trainer_live_director(this) {
-        target_display_mode = DisplayMode::Landscape;
-    }
+        if config.trainer_live_landscape && is_trainer_live_director(this) {
+            target_display_mode = DisplayMode::Landscape;
+        }
 
-    get_orig_fn!(SetupOrientation, SetupOrientationFn)(this, target_display_mode)
+        get_orig_fn!(SetupOrientation, SetupOrientationFn)(this, target_display_mode)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

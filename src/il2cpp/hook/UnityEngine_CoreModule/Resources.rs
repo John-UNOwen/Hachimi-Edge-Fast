@@ -1,3 +1,4 @@
+use crate::core::hachimi::recover_lock;
 use crate::il2cpp::{hook::umamusume::TextFrame, symbols::{create_delegate, get_method_addr, GCHandle}, types::*};
 
 use super::{AsyncOperation, Object};
@@ -12,14 +13,18 @@ static mut LOAD_ADDR: usize = 0;
 impl_addr_wrapper_fn!(Load, LOAD_ADDR, *mut Il2CppObject, path: *mut Il2CppString, type_object: *mut Il2CppObject);
 
 type UnloadUnusedAssetsFn = extern "C" fn() -> *mut Il2CppObject;
-extern "C" fn UnloadUnusedAssets() -> *mut Il2CppObject {
-    let res = get_orig_fn!(UnloadUnusedAssets, UnloadUnusedAssetsFn)();
-    let delegate = create_delegate(unsafe { AsyncOperation::ACTION_ASYNCOPERATION_CLASS }, 1, || {
-        TextFrame::PROCESSED.lock().unwrap().retain(retain_object_gc_handle);
-    }).unwrap();
-    AsyncOperation::add_completed(res, delegate);
+def_detour! {
+    UnloadUnusedAssets() -> *mut Il2CppObject {
+            let res = get_orig_fn!(UnloadUnusedAssets, UnloadUnusedAssetsFn)();
+        let delegate = create_delegate(unsafe { AsyncOperation::ACTION_ASYNCOPERATION_CLASS }, 1, || {
+            // C2: the delegate body is a frame the game calls through `create_delegate`, so this is
+            // the same hazard as the wrapper above it, one call later.
+            recover_lock(&TextFrame::PROCESSED).retain(retain_object_gc_handle);
+        }).unwrap();
+        AsyncOperation::add_completed(res, delegate);
 
-    res
+        res
+    }
 }
 
 fn retain_object_gc_handle<'a, 'b>(_ptr: &'a usize, gc_handle: &'b mut GCHandle) -> bool {

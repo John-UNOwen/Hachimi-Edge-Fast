@@ -232,17 +232,20 @@ pub fn on_LoadAsset(_bundle: *mut Il2CppObject, this: *mut Il2CppObject, name: &
                 text_block_dict.new_clip_length.is_some() ||
                 tcps_mult < 1.0
             {
+                let orig_clip_len = StoryTimelineClipData::get_ClipLength(clip_data);
                 let new_clip_len = text_block_dict.new_clip_length.unwrap_or_else(|| {
                     let text_len = utils::IsolateTags::new(new_text).fold(0, |total_len, (s, is_not_tag)| 
                         if is_not_tag { total_len + s.chars().count() } else { total_len }
                     );
                     // Everything else down here is in the unit of frames at 30fps
-                    let typewrite_len = get_typewrite_length(text_len, tcps);
-                    return StoryTimelineTextClipData::get_WaitFrame(clip_data) +
-                        typewrite_len.max(StoryTimelineTextClipData::get_VoiceLength(clip_data));
+                    match get_typewrite_length(text_len, tcps) {
+                        Some(typewrite_len) => StoryTimelineTextClipData::get_WaitFrame(clip_data) +
+                            typewrite_len.max(StoryTimelineTextClipData::get_VoiceLength(clip_data)),
+                        // No known speed: keep the length the game already had.
+                        None => orig_clip_len,
+                    }
                 });
 
-                let orig_clip_len = StoryTimelineClipData::get_ClipLength(clip_data);
                 if new_clip_len > orig_clip_len {
                     let new_block_len = apply_clip_length(
                         clip_data, orig_clip_len, new_clip_len,
@@ -290,8 +293,16 @@ pub fn on_LoadAsset(_bundle: *mut Il2CppObject, this: *mut Il2CppObject, name: &
     }
 }
 
-fn get_typewrite_length(text_len: usize, tcps: f32) -> i32 {
-    (text_len as f32 / tcps * 30.0).round() as i32 // len / cps * fps
+// A typewrite speed of zero is not a speed (C9): it is what the read answers when this client has no
+// `TypewriteCountPerSecond` field, or when the game's own asset carries none. Dividing a text length
+// by it would turn every clip into a saturated i32 length written into the game's story data, so an
+// unknown speed answers "no length" and the caller leaves the clip as the game made it.
+fn get_typewrite_length(text_len: usize, tcps: f32) -> Option<i32> {
+    if !tcps.is_finite() || tcps <= 0.0 {
+        return None;
+    }
+
+    Some((text_len as f32 / tcps * 30.0).round() as i32) // len / cps * fps
 }
 
 fn rewrite_story_shadow_types(this: *mut Il2CppObject) {
@@ -318,6 +329,12 @@ fn rewrite_story_shadow_types(this: *mut Il2CppObject) {
             continue;
         };
         for clip_data in clip_list.iter() {
+            // C9: a slot of the game's own clip list nobody filled is not a Bg3D clip, and it is
+            // not something to take a class off address 0 either.
+            if clip_data.is_null() {
+                continue;
+            }
+
             if unsafe { (*clip_data).klass() } != StoryTimelineBg3DClipData::class() {
                 continue;
             }
@@ -356,13 +373,13 @@ fn adjust_clips_length_with_tcps(this: *mut Il2CppObject, tcps: f32) {
         }
         else {
             let orig_clip_len = StoryTimelineClipData::get_ClipLength(clip_data);
-            let new_clip_len = get_typewrite_length(unsafe { (*text).as_utf16str().chars().count() }, tcps);
 
-            if new_clip_len > orig_clip_len {
-                apply_clip_length(clip_data, orig_clip_len, new_clip_len, block_data, orig_block_len)
-            }
-            else {
-                orig_block_len
+            match get_typewrite_length(unsafe { (*text).as_utf16str().chars().count() }, tcps) {
+                Some(new_clip_len) if new_clip_len > orig_clip_len => apply_clip_length(
+                    clip_data, orig_clip_len, new_clip_len, block_data, orig_block_len
+                ),
+                // No known speed, or nothing longer to write: the block keeps its own length.
+                _ => orig_block_len,
             }
         }
     }

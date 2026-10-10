@@ -78,37 +78,39 @@ fn log_guard_contended(this: *mut Il2CppObject) {
 }
 
 type ActivateSkipButtonFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn ActivateSkipButton(this: *mut Il2CppObject) {
-    // Without a line here the run log could only prove the hook was installed, never that
-    // auto_skip_result_screens actually ran. An entry line counts a request; the
-    // `SkipFadeInTween unavailable` warning and the `skip guard busy` line are the two ways
-    // a request that was logged can still have done nothing.
-    let auto_skip = Hachimi::instance().config.load().auto_skip_result_screens;
-    debug!("SingleModeResultContentBase::ActivateSkipButton (auto_skip_result_screens {auto_skip})");
+def_detour! {
+    ActivateSkipButton(this: *mut Il2CppObject) {
+            // Without a line here the run log could only prove the hook was installed, never that
+        // auto_skip_result_screens actually ran. An entry line counts a request; the
+        // `SkipFadeInTween unavailable` warning and the `skip guard busy` line are the two ways
+        // a request that was logged can still have done nothing.
+        let auto_skip = Hachimi::instance().config.load().auto_skip_result_screens;
+        debug!("SingleModeResultContentBase::ActivateSkipButton (auto_skip_result_screens {auto_skip})");
 
-    get_orig_fn!(ActivateSkipButton, ActivateSkipButtonFn)(this);
+        get_orig_fn!(ActivateSkipButton, ActivateSkipButtonFn)(this);
 
-    if !auto_skip {
-        return;
-    }
-
-    let addr = match skip_fade_in_tween_addr(this) {
-        Some(addr) => addr,
-        None => return,
-    };
-
-    let _guard = match SkipGuard::try_enter(this) {
-        Some(guard) => guard,
-        None => {
-            log_guard_contended(this);
-
+        if !auto_skip {
             return;
         }
-    };
 
-    unsafe {
-        let skip_fn: extern "C" fn(this: *mut Il2CppObject) = std::mem::transmute(addr);
-        skip_fn(this);
+        let addr = match skip_fade_in_tween_addr(this) {
+            Some(addr) => addr,
+            None => return,
+        };
+
+        let _guard = match SkipGuard::try_enter(this) {
+            Some(guard) => guard,
+            None => {
+                log_guard_contended(this);
+
+                return;
+            }
+        };
+
+        unsafe {
+            let skip_fn: extern "C" fn(this: *mut Il2CppObject) = std::mem::transmute(addr);
+            skip_fn(this);
+        }
     }
 }
 
@@ -118,30 +120,51 @@ const SCREENS: AnimationSpeed::Group = AnimationSpeed::Group::Screens;
 // to these three as float arguments. Same reason as NowLoading above: the constants
 // themselves are `const`, so the argument is where they can still be reached.
 type FadeInContentFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject);
-extern "C" fn FadeInContent(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject) {
-    log_duration("FadeInContent", duration);
+def_detour! {
+    FadeInContent(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject) {
+            log_duration("FadeInContent", duration);
 
-    get_orig_fn!(FadeInContent, FadeInContentFn)(
-        this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
-    );
+        get_orig_fn!(FadeInContent, FadeInContentFn)(
+            this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+        );
+    }
+    bail {
+                get_orig_fn!(FadeInContent, FadeInContentFn)(
+                this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+            )
+    }
 }
 
 type FadeInContentFromRightFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject);
-extern "C" fn FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject) {
-    log_duration("FadeInContentFromRight", duration);
+def_detour! {
+    FadeInContentFromRight(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject) {
+            log_duration("FadeInContentFromRight", duration);
 
-    get_orig_fn!(FadeInContentFromRight, FadeInContentFromRightFn)(
-        this, content, AnimationSpeed::scale_duration(duration, SCREENS), onComplete
-    );
+        get_orig_fn!(FadeInContentFromRight, FadeInContentFromRightFn)(
+            this, content, AnimationSpeed::scale_duration(duration, SCREENS), onComplete
+        );
+    }
+    bail {
+                get_orig_fn!(FadeInContentFromRight, FadeInContentFromRightFn)(
+                this, content, AnimationSpeed::scale_duration(duration, SCREENS), onComplete
+            )
+    }
 }
 
 type FadeInContentFromBottomFn = extern "C" fn(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject);
-extern "C" fn FadeInContentFromBottom(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject) {
-    log_duration("FadeInContentFromBottom", duration);
+def_detour! {
+    FadeInContentFromBottom(this: *mut Il2CppObject, content: *mut Il2CppObject, duration: f32, offset: *mut Il2CppObject, onComplete: *mut Il2CppObject) {
+            log_duration("FadeInContentFromBottom", duration);
 
-    get_orig_fn!(FadeInContentFromBottom, FadeInContentFromBottomFn)(
-        this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
-    );
+        get_orig_fn!(FadeInContentFromBottom, FadeInContentFromBottomFn)(
+            this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+        );
+    }
+    bail {
+                get_orig_fn!(FadeInContentFromBottom, FadeInContentFromBottomFn)(
+                this, content, AnimationSpeed::scale_duration(duration, SCREENS), offset, onComplete
+            )
+    }
 }
 
 fn log_duration(name: &str, duration: f32) {

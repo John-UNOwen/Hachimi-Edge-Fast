@@ -9,11 +9,16 @@ use crate::{
 use super::{HorseRaceInfoReplay, RaceViewBase};
 
 type OnDestroyFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn OnDestroy(this: *mut Il2CppObject) {
-    RaceViewBase::restore_race_disabled_heads(0, true);
-    HorseRaceInfoReplay::clear_gate_no_cache();
-    free_camera::end_scene(CameraScene::Race);
-    get_orig_fn!(OnDestroy, OnDestroyFn)(this);
+def_detour! {
+    OnDestroy(this: *mut Il2CppObject) {
+            RaceViewBase::restore_race_disabled_heads(0, true);
+        HorseRaceInfoReplay::clear_gate_no_cache();
+        free_camera::end_scene(CameraScene::Race);
+        get_orig_fn!(OnDestroy, OnDestroyFn)(this);
+    }
+    bail {
+                get_orig_fn!(OnDestroy, OnDestroyFn)(this)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

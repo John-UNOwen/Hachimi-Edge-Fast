@@ -14,15 +14,25 @@ def_method_wrapper_fn!(GetHorseRaceInfos, GET_HORSE_RACE_INFOS_ADDR, *mut Il2Cpp
 def_method_wrapper_fn!(GetPlayerHorseIndex, GET_PLAYER_HORSE_INDEX_ADDR, i32, this: *mut Il2CppObject);
 
 type RaceHorseManagerBase_InitFn = extern "C" fn(this: *mut Il2CppObject, raceInfo: *mut Il2CppObject);
-extern "C" fn RaceHorseManagerBase_Init(this: *mut Il2CppObject, raceInfo: *mut Il2CppObject) {
-    RACE_ACTIVE.store(true, Ordering::Release);
-    get_orig_fn!(RaceHorseManagerBase_Init, RaceHorseManagerBase_InitFn)(this, raceInfo);
+def_detour! {
+    RaceHorseManagerBase_Init(this: *mut Il2CppObject, raceInfo: *mut Il2CppObject) {
+            RACE_ACTIVE.store(true, Ordering::Release);
+        get_orig_fn!(RaceHorseManagerBase_Init, RaceHorseManagerBase_InitFn)(this, raceInfo);
+    }
+    bail {
+                get_orig_fn!(RaceHorseManagerBase_Init, RaceHorseManagerBase_InitFn)(this, raceInfo)
+    }
 }
 
 type RaceHorseManagerBase_ReleaseFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn RaceHorseManagerBase_Release(this: *mut Il2CppObject) {
-    RACE_ACTIVE.store(false, Ordering::Release);
-    get_orig_fn!(RaceHorseManagerBase_Release, RaceHorseManagerBase_ReleaseFn)(this);
+def_detour! {
+    RaceHorseManagerBase_Release(this: *mut Il2CppObject) {
+            RACE_ACTIVE.store(false, Ordering::Release);
+        get_orig_fn!(RaceHorseManagerBase_Release, RaceHorseManagerBase_ReleaseFn)(this);
+    }
+    bail {
+                get_orig_fn!(RaceHorseManagerBase_Release, RaceHorseManagerBase_ReleaseFn)(this)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

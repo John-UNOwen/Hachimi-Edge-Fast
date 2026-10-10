@@ -803,147 +803,209 @@ fn close_cut_run() {
 type GetTrainingCutTimeScaleFn = extern "C" fn(scale: f32) -> f32;
 // Dumped static: `GetTrainingCutTimeScale/1 -> static float(float)`, so the wrapper declares the
 // dumped argument and no `this` (A3).
-extern "C" fn TrainingCuttUtils_GetTrainingCutTimeScale(scale: f32) -> f32 {
-    let value = get_orig_fn!(TrainingCuttUtils_GetTrainingCutTimeScale, GetTrainingCutTimeScaleFn)(scale);
-    GET_TRAINING_CUT_TIME_SCALE.observe_peak(&[scale as f64, value as f64], value);
+def_detour! {
+    TrainingCuttUtils_GetTrainingCutTimeScale(scale: f32) -> f32 {
+            let value = get_orig_fn!(TrainingCuttUtils_GetTrainingCutTimeScale, GetTrainingCutTimeScaleFn)(scale);
+        GET_TRAINING_CUT_TIME_SCALE.observe_peak(&[scale as f64, value as f64], value);
 
-    value
+        value
+    }
 }
 
 type CutInSkipRuntimeFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn TrainingCuttHelper_SkipRuntime(this: *mut Il2CppObject) {
-    CUT_IN_SKIP_RUNTIME.count();
+def_detour! {
+    TrainingCuttHelper_SkipRuntime(this: *mut Il2CppObject) {
+            CUT_IN_SKIP_RUNTIME.count();
 
-    get_orig_fn!(TrainingCuttHelper_SkipRuntime, CutInSkipRuntimeFn)(this);
+        get_orig_fn!(TrainingCuttHelper_SkipRuntime, CutInSkipRuntimeFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCuttHelper_SkipRuntime, CutInSkipRuntimeFn)(this)
+    }
 }
 
 type CutInGetTargetSpeedFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
-extern "C" fn TrainingCuttHelper_GetTargetSpeed(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(TrainingCuttHelper_GetTargetSpeed, CutInGetTargetSpeedFn)(this);
-    CUT_IN_GET_TARGET_SPEED.observe_peak(&[value as f64], value);
+def_detour! {
+    TrainingCuttHelper_GetTargetSpeed(this: *mut Il2CppObject) -> f32 {
+            let value = get_orig_fn!(TrainingCuttHelper_GetTargetSpeed, CutInGetTargetSpeedFn)(this);
+        CUT_IN_GET_TARGET_SPEED.observe_peak(&[value as f64], value);
 
-    value
+        value
+    }
 }
 
 // Dumped static: `IsHighSpeedMode/0 -> static bool()`. Counted only, because a training screen reads
 // it every frame and a bool has no value worth printing per call.
 type CutInIsHighSpeedModeFn = extern "C" fn() -> bool;
-extern "C" fn TrainingCuttHelper_IsHighSpeedMode() -> bool {
-    CUT_IN_IS_HIGH_SPEED_MODE.count();
+def_detour! {
+    TrainingCuttHelper_IsHighSpeedMode() -> bool {
+            CUT_IN_IS_HIGH_SPEED_MODE.count();
 
-    get_orig_fn!(TrainingCuttHelper_IsHighSpeedMode, CutInIsHighSpeedModeFn)()
+        get_orig_fn!(TrainingCuttHelper_IsHighSpeedMode, CutInIsHighSpeedModeFn)()
+    }
+    bail {
+                get_orig_fn!(TrainingCuttHelper_IsHighSpeedMode, CutInIsHighSpeedModeFn)()
+    }
 }
 
 type CuttResetCurrentTimeFn = extern "C" fn(this: *mut Il2CppObject);
 // Kept as a count, not as the run boundary. Run 9 showed a training cut-in never reaches it, which is why
 // `cut runs` read 0 while the timeline was reached 3194 times (C47). A cut-in that does reset the timeline
 // is still visible here.
-extern "C" fn CuttTimeline_ResetCurrentTime(this: *mut Il2CppObject) {
-    CUTT_RESET_CURRENT_TIME.count();
+def_detour! {
+    CuttTimeline_ResetCurrentTime(this: *mut Il2CppObject) {
+            CUTT_RESET_CURRENT_TIME.count();
 
-    get_orig_fn!(CuttTimeline_ResetCurrentTime, CuttResetCurrentTimeFn)(this);
+        get_orig_fn!(CuttTimeline_ResetCurrentTime, CuttResetCurrentTimeFn)(this);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_ResetCurrentTime, CuttResetCurrentTimeFn)(this)
+    }
 }
 
 type CuttGetCurrentTimeFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
-extern "C" fn CuttTimeline_GetCurrentTime(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(CuttTimeline_GetCurrentTime, CuttGetCurrentTimeFn)(this);
-    CUTT_GET_CURRENT_TIME.sample(value);
+def_detour! {
+    CuttTimeline_GetCurrentTime(this: *mut Il2CppObject) -> f32 {
+            let value = get_orig_fn!(CuttTimeline_GetCurrentTime, CuttGetCurrentTimeFn)(this);
+        CUTT_GET_CURRENT_TIME.sample(value);
 
-    let bits = peak_merge(RUN_PEAK_BITS.load(atomic::Ordering::Relaxed), value);
-    RUN_PEAK_BITS.fetch_max(bits, atomic::Ordering::Relaxed);
+        let bits = peak_merge(RUN_PEAK_BITS.load(atomic::Ordering::Relaxed), value);
+        RUN_PEAK_BITS.fetch_max(bits, atomic::Ordering::Relaxed);
 
-    value
+        value
+    }
 }
 
 type CuttGetCurrentTimeScaleFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
-extern "C" fn CuttTimeline_GetCurrentTimeScale(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(CuttTimeline_GetCurrentTimeScale, CuttGetCurrentTimeScaleFn)(this);
-    CUTT_GET_CURRENT_TIME_SCALE.sample(value);
+def_detour! {
+    CuttTimeline_GetCurrentTimeScale(this: *mut Il2CppObject) -> f32 {
+            let value = get_orig_fn!(CuttTimeline_GetCurrentTimeScale, CuttGetCurrentTimeScaleFn)(this);
+        CUTT_GET_CURRENT_TIME_SCALE.sample(value);
 
-    value
+        value
+    }
 }
 
 type CuttGetWaitingTimeFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
-extern "C" fn CuttTimeline_GetWaitingTime(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(CuttTimeline_GetWaitingTime, CuttGetWaitingTimeFn)(this);
-    CUTT_GET_WAITING_TIME.sample(value);
+def_detour! {
+    CuttTimeline_GetWaitingTime(this: *mut Il2CppObject) -> f32 {
+            let value = get_orig_fn!(CuttTimeline_GetWaitingTime, CuttGetWaitingTimeFn)(this);
+        CUTT_GET_WAITING_TIME.sample(value);
 
-    value
+        value
+    }
 }
 
 type CuttSetSpeedFn = extern "C" fn(this: *mut Il2CppObject, speed: f32);
-extern "C" fn CuttTimeline_SetSpeed(this: *mut Il2CppObject, speed: f32) {
-    CUTT_SET_SPEED.observe_peak(&[speed as f64], speed);
+def_detour! {
+    CuttTimeline_SetSpeed(this: *mut Il2CppObject, speed: f32) {
+            CUTT_SET_SPEED.observe_peak(&[speed as f64], speed);
 
-    get_orig_fn!(CuttTimeline_SetSpeed, CuttSetSpeedFn)(this, speed);
+        get_orig_fn!(CuttTimeline_SetSpeed, CuttSetSpeedFn)(this, speed);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SetSpeed, CuttSetSpeedFn)(this, speed)
+    }
 }
 
 type CuttUpdateSpeedFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn CuttTimeline_UpdateSpeed(this: *mut Il2CppObject) {
-    CUTT_UPDATE_SPEED.count();
+def_detour! {
+    CuttTimeline_UpdateSpeed(this: *mut Il2CppObject) {
+            CUTT_UPDATE_SPEED.count();
 
-    get_orig_fn!(CuttTimeline_UpdateSpeed, CuttUpdateSpeedFn)(this);
+        get_orig_fn!(CuttTimeline_UpdateSpeed, CuttUpdateSpeedFn)(this);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_UpdateSpeed, CuttUpdateSpeedFn)(this)
+    }
 }
 
 type CuttSkipRuntimeTimeFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
-extern "C" fn CuttTimeline_SkipRuntimeTime(this: *mut Il2CppObject, time: f32) {
-    CUTT_SKIP_RUNTIME_TIME.observe(&[time as f64]);
+def_detour! {
+    CuttTimeline_SkipRuntimeTime(this: *mut Il2CppObject, time: f32) {
+            CUTT_SKIP_RUNTIME_TIME.observe(&[time as f64]);
 
-    get_orig_fn!(CuttTimeline_SkipRuntimeTime, CuttSkipRuntimeTimeFn)(this, time);
+        get_orig_fn!(CuttTimeline_SkipRuntimeTime, CuttSkipRuntimeTimeFn)(this, time);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SkipRuntimeTime, CuttSkipRuntimeTimeFn)(this, time)
+    }
 }
 
 type CuttSkipRuntimeFramesFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, keep: bool);
-extern "C" fn CuttTimeline_SkipRuntimeFrames(this: *mut Il2CppObject, frames: i32, keep: bool) {
-    CUTT_SKIP_RUNTIME_FRAMES.observe(&[frames as f64, bit(keep)]);
+def_detour! {
+    CuttTimeline_SkipRuntimeFrames(this: *mut Il2CppObject, frames: i32, keep: bool) {
+            CUTT_SKIP_RUNTIME_FRAMES.observe(&[frames as f64, bit(keep)]);
 
-    get_orig_fn!(CuttTimeline_SkipRuntimeFrames, CuttSkipRuntimeFramesFn)(this, frames, keep);
+        get_orig_fn!(CuttTimeline_SkipRuntimeFrames, CuttSkipRuntimeFramesFn)(this, frames, keep);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SkipRuntimeFrames, CuttSkipRuntimeFramesFn)(this, frames, keep)
+    }
 }
 
 type CuttSkipTimeDirectFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
-extern "C" fn CuttTimeline_SkipTimeDirect(this: *mut Il2CppObject, time: f32) {
-    CUTT_SKIP_TIME_DIRECT.observe(&[time as f64]);
+def_detour! {
+    CuttTimeline_SkipTimeDirect(this: *mut Il2CppObject, time: f32) {
+            CUTT_SKIP_TIME_DIRECT.observe(&[time as f64]);
 
-    get_orig_fn!(CuttTimeline_SkipTimeDirect, CuttSkipTimeDirectFn)(this, time);
+        get_orig_fn!(CuttTimeline_SkipTimeDirect, CuttSkipTimeDirectFn)(this, time);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SkipTimeDirect, CuttSkipTimeDirectFn)(this, time)
+    }
 }
 
 type CutStatusSkipFn = extern "C" fn(this: *mut Il2CppObject, skip: bool);
-extern "C" fn TrainingCutStatus_Skip(this: *mut Il2CppObject, skip: bool) {
-    CUT_STATUS_SKIP.observe(&[bit(skip)]);
+def_detour! {
+    TrainingCutStatus_Skip(this: *mut Il2CppObject, skip: bool) {
+            CUT_STATUS_SKIP.observe(&[bit(skip)]);
 
-    get_orig_fn!(TrainingCutStatus_Skip, CutStatusSkipFn)(this, skip);
+        get_orig_fn!(TrainingCutStatus_Skip, CutStatusSkipFn)(this, skip);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatus_Skip, CutStatusSkipFn)(this, skip)
+    }
 }
 
 // `WaitTapAsync/0 -> class<System.Collections.IEnumerator>()` and `FadeOutResultFlash/0 -> void()` are
 // the two ends of the cut that already have a dumped signature. The coroutine object is handed back
 // untouched.
 type WaitTapAsyncFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObject;
-extern "C" fn TrainingCutt_WaitTapAsync(this: *mut Il2CppObject) -> *mut Il2CppObject {
-    CUTT_WAIT_TAP_ASYNC.count();
+def_detour! {
+    TrainingCutt_WaitTapAsync(this: *mut Il2CppObject) -> *mut Il2CppObject {
+            CUTT_WAIT_TAP_ASYNC.count();
 
-    // Where the tap wait clock starts. Only while a run is open, so a request outside a measured cut
-    // cannot be charged to one, and the last request of a cut is still the one its wait is measured from.
-    // The first request also splits that cut's wall: what it played before asking is measured here, and
-    // what it waited after asking is the tap wait.
-    if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) >= 0 {
-        let now = elapsed_ms();
+        // Where the tap wait clock starts. Only while a run is open, so a request outside a measured cut
+        // cannot be charged to one, and the last request of a cut is still the one its wait is measured from.
+        // The first request also splits that cut's wall: what it played before asking is measured here, and
+        // what it waited after asking is the tap wait.
+        if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) >= 0 {
+            let now = elapsed_ms();
 
-        if now >= 0 && RUN_TAP_REQUESTED_MS.swap(now, atomic::Ordering::Relaxed) < 0 {
-            if let Some(played_ms) = span_from(RUN_OPENED_MS.load(atomic::Ordering::Relaxed), now) {
-                WALL_OPEN_TO_TAP_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
-                WALL_OPEN_TO_TAP_MS_TOTAL.fetch_add(played_ms, atomic::Ordering::Relaxed);
-                WALL_OPEN_TO_TAP_WORST_MS.fetch_max(played_ms, atomic::Ordering::Relaxed);
+            if now >= 0 && RUN_TAP_REQUESTED_MS.swap(now, atomic::Ordering::Relaxed) < 0 {
+                if let Some(played_ms) = span_from(RUN_OPENED_MS.load(atomic::Ordering::Relaxed), now) {
+                    WALL_OPEN_TO_TAP_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+                    WALL_OPEN_TO_TAP_MS_TOTAL.fetch_add(played_ms, atomic::Ordering::Relaxed);
+                    WALL_OPEN_TO_TAP_WORST_MS.fetch_max(played_ms, atomic::Ordering::Relaxed);
+                }
             }
         }
-    }
 
-    get_orig_fn!(TrainingCutt_WaitTapAsync, WaitTapAsyncFn)(this)
+        get_orig_fn!(TrainingCutt_WaitTapAsync, WaitTapAsyncFn)(this)
+    }
 }
 
 type FadeOutResultFlashFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn TrainingCutt_FadeOutResultFlash(this: *mut Il2CppObject) {
-    CUTT_FADE_OUT_RESULT_FLASH.count();
+def_detour! {
+    TrainingCutt_FadeOutResultFlash(this: *mut Il2CppObject) {
+            CUTT_FADE_OUT_RESULT_FLASH.count();
 
-    get_orig_fn!(TrainingCutt_FadeOutResultFlash, FadeOutResultFlashFn)(this);
+        get_orig_fn!(TrainingCutt_FadeOutResultFlash, FadeOutResultFlashFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_FadeOutResultFlash, FadeOutResultFlashFn)(this)
+    }
 }
 
 // The plate list door is hooked by AnimationSpeed, because a duration this fork scales has to stand
@@ -978,30 +1040,45 @@ pub(crate) fn note_plate_call(this: *mut Il2CppObject, interval: f32) {
 // the plate class itself opens. Both parameters travel untouched; the index is recorded because a cascade
 // that plays plates out of order is a different problem from a slow one.
 type PlatePlayIconFn = extern "C" fn(this: *mut Il2CppObject, index: i32, info: *mut Il2CppObject);
-extern "C" fn TrainingParamChangeUI_PlayIcon(this: *mut Il2CppObject, index: i32, info: *mut Il2CppObject) {
-    PLATE_PLAY_ICON.observe(&[index as f64]);
-    record_play_cadence(&PLATE_PLAY_LAST_MS, &PLATE_PLAY_RUNS, &PLATE_PLAY_MS_TOTAL, &PLATE_PLAY_WORST_MS);
+def_detour! {
+    TrainingParamChangeUI_PlayIcon(this: *mut Il2CppObject, index: i32, info: *mut Il2CppObject) {
+            PLATE_PLAY_ICON.observe(&[index as f64]);
+        record_play_cadence(&PLATE_PLAY_LAST_MS, &PLATE_PLAY_RUNS, &PLATE_PLAY_MS_TOTAL, &PLATE_PLAY_WORST_MS);
 
-    get_orig_fn!(TrainingParamChangeUI_PlayIcon, PlatePlayIconFn)(this, index, info);
+        get_orig_fn!(TrainingParamChangeUI_PlayIcon, PlatePlayIconFn)(this, index, info);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_PlayIcon, PlatePlayIconFn)(this, index, info)
+    }
 }
 
 // `IsGroupPlay/1 -> bool(class<Gallop.TrainingParamChangeUI.ChangeParameterInfo>)`: the client's own
 // answer to whether a plate belongs to a group that is type written together. The answer is the game's
 // and is handed back untouched.
 type PlateIsGroupPlayFn = extern "C" fn(this: *mut Il2CppObject, info: *mut Il2CppObject) -> bool;
-extern "C" fn TrainingParamChangeUI_IsGroupPlay(this: *mut Il2CppObject, info: *mut Il2CppObject) -> bool {
-    PLATE_IS_GROUP_PLAY.count();
+def_detour! {
+    TrainingParamChangeUI_IsGroupPlay(this: *mut Il2CppObject, info: *mut Il2CppObject) -> bool {
+            PLATE_IS_GROUP_PLAY.count();
 
-    get_orig_fn!(TrainingParamChangeUI_IsGroupPlay, PlateIsGroupPlayFn)(this, info)
+        get_orig_fn!(TrainingParamChangeUI_IsGroupPlay, PlateIsGroupPlayFn)(this, info)
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_IsGroupPlay, PlateIsGroupPlayFn)(this, info)
+    }
 }
 
 // `Update/0 -> void()`: counted only, because a per frame door must not format anything. Whether the
 // plate UI has one at all decides if the cascade is driven by frames or by a tween sequence.
 type PlateUpdateFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn TrainingParamChangeUI_Update(this: *mut Il2CppObject) {
-    PLATE_UPDATE.count();
+def_detour! {
+    TrainingParamChangeUI_Update(this: *mut Il2CppObject) {
+            PLATE_UPDATE.count();
 
-    get_orig_fn!(TrainingParamChangeUI_Update, PlateUpdateFn)(this);
+        get_orig_fn!(TrainingParamChangeUI_Update, PlateUpdateFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_Update, PlateUpdateFn)(this)
+    }
 }
 
 // The chain the plate class walks once the list exists: `StartSequence/0`, `StartGroupTypewrite/0`,
@@ -1012,56 +1089,96 @@ extern "C" fn TrainingParamChangeUI_Update(this: *mut Il2CppObject) {
 // untouched. `OnTapScreen` matters for a different reason: if the cascade advances on taps, the wall
 // clock between two plates is partly the player's reaction and no duration hook owns it.
 type PlateVoidFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn TrainingParamChangeUI_StartSequence(this: *mut Il2CppObject) {
-    PLATE_START_SEQUENCE.count();
-    open_plate_pass();
+def_detour! {
+    TrainingParamChangeUI_StartSequence(this: *mut Il2CppObject) {
+            PLATE_START_SEQUENCE.count();
+        open_plate_pass();
 
-    get_orig_fn!(TrainingParamChangeUI_StartSequence, PlateVoidFn)(this);
+        get_orig_fn!(TrainingParamChangeUI_StartSequence, PlateVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_StartSequence, PlateVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingParamChangeUI_StartGroupTypewrite(this: *mut Il2CppObject) {
-    PLATE_START_GROUP_TYPEWRITE.count();
+def_detour! {
+    TrainingParamChangeUI_StartGroupTypewrite(this: *mut Il2CppObject) {
+            PLATE_START_GROUP_TYPEWRITE.count();
 
-    get_orig_fn!(TrainingParamChangeUI_StartGroupTypewrite, PlateVoidFn)(this);
+        get_orig_fn!(TrainingParamChangeUI_StartGroupTypewrite, PlateVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_StartGroupTypewrite, PlateVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingParamChangeUI_StartTypewrite(this: *mut Il2CppObject, index: i32) {
-    PLATE_START_TYPEWRITE.observe(&[index as f64]);
-    record_typewrite_cadence();
+def_detour! {
+    TrainingParamChangeUI_StartTypewrite(this: *mut Il2CppObject, index: i32) {
+            PLATE_START_TYPEWRITE.observe(&[index as f64]);
+        record_typewrite_cadence();
 
-    get_orig_fn!(TrainingParamChangeUI_StartTypewrite, PlateIntFn)(this, index);
+        get_orig_fn!(TrainingParamChangeUI_StartTypewrite, PlateIntFn)(this, index);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_StartTypewrite, PlateIntFn)(this, index)
+    }
 }
 
-extern "C" fn TrainingParamChangeUI_OnNextTypewrite(this: *mut Il2CppObject) {
-    PLATE_ON_NEXT_TYPEWRITE.count();
+def_detour! {
+    TrainingParamChangeUI_OnNextTypewrite(this: *mut Il2CppObject) {
+            PLATE_ON_NEXT_TYPEWRITE.count();
 
-    get_orig_fn!(TrainingParamChangeUI_OnNextTypewrite, PlateVoidFn)(this);
+        get_orig_fn!(TrainingParamChangeUI_OnNextTypewrite, PlateVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_OnNextTypewrite, PlateVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingParamChangeUI_OnEndTypeWrite(this: *mut Il2CppObject, index: i32) {
-    PLATE_ON_END_TYPE_WRITE.observe(&[index as f64]);
+def_detour! {
+    TrainingParamChangeUI_OnEndTypeWrite(this: *mut Il2CppObject, index: i32) {
+            PLATE_ON_END_TYPE_WRITE.observe(&[index as f64]);
 
-    get_orig_fn!(TrainingParamChangeUI_OnEndTypeWrite, PlateIntFn)(this, index);
+        get_orig_fn!(TrainingParamChangeUI_OnEndTypeWrite, PlateIntFn)(this, index);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_OnEndTypeWrite, PlateIntFn)(this, index)
+    }
 }
 
-extern "C" fn TrainingParamChangeUI_OnAllTypewriteEnd(this: *mut Il2CppObject) {
-    PLATE_ON_ALL_TYPEWRITE_END.count();
-    close_plate_pass();
+def_detour! {
+    TrainingParamChangeUI_OnAllTypewriteEnd(this: *mut Il2CppObject) {
+            PLATE_ON_ALL_TYPEWRITE_END.count();
+        close_plate_pass();
 
-    get_orig_fn!(TrainingParamChangeUI_OnAllTypewriteEnd, PlateVoidFn)(this);
+        get_orig_fn!(TrainingParamChangeUI_OnAllTypewriteEnd, PlateVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_OnAllTypewriteEnd, PlateVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingParamChangeUI_OnTapScreen(this: *mut Il2CppObject) {
-    PLATE_ON_TAP_SCREEN.count();
+def_detour! {
+    TrainingParamChangeUI_OnTapScreen(this: *mut Il2CppObject) {
+            PLATE_ON_TAP_SCREEN.count();
 
-    get_orig_fn!(TrainingParamChangeUI_OnTapScreen, PlateVoidFn)(this);
+        get_orig_fn!(TrainingParamChangeUI_OnTapScreen, PlateVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_OnTapScreen, PlateVoidFn)(this)
+    }
 }
 
 type PlateIntFn = extern "C" fn(this: *mut Il2CppObject, value: i32);
-extern "C" fn TrainingParamChangeUI_SetTapButtonOrder(this: *mut Il2CppObject, order: i32) {
-    PLATE_TAP_BUTTON_ORDER.observe(&[order as f64]);
+def_detour! {
+    TrainingParamChangeUI_SetTapButtonOrder(this: *mut Il2CppObject, order: i32) {
+            PLATE_TAP_BUTTON_ORDER.observe(&[order as f64]);
 
-    get_orig_fn!(TrainingParamChangeUI_SetTapButtonOrder, PlateIntFn)(this, order);
+        get_orig_fn!(TrainingParamChangeUI_SetTapButtonOrder, PlateIntFn)(this, order);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_SetTapButtonOrder, PlateIntFn)(this, order)
+    }
 }
 
 // `InitializeFlash/4 -> void(generic<List<ChangeParameterInfo>>, float, bool, class<Canvas>)`: the sibling
@@ -1070,10 +1187,15 @@ extern "C" fn TrainingParamChangeUI_SetTapButtonOrder(this: *mut Il2CppObject, o
 // SPEED` is a compile time constant, so this argument is the only route to the flash pacing that a hook
 // can take, and a route has to be measured before it is shortened.
 type PlateFlashFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32, flag: bool, canvas: *mut Il2CppObject);
-extern "C" fn TrainingParamChangeUI_InitializeFlash(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32, flag: bool, canvas: *mut Il2CppObject) {
-    PLATE_INITIALIZE_FLASH.observe_peak(&[interval as f64, bit(flag)], interval);
+def_detour! {
+    TrainingParamChangeUI_InitializeFlash(this: *mut Il2CppObject, list: *mut Il2CppObject, interval: f32, flag: bool, canvas: *mut Il2CppObject) {
+            PLATE_INITIALIZE_FLASH.observe_peak(&[interval as f64, bit(flag)], interval);
 
-    get_orig_fn!(TrainingParamChangeUI_InitializeFlash, PlateFlashFn)(this, list, interval, flag, canvas);
+        get_orig_fn!(TrainingParamChangeUI_InitializeFlash, PlateFlashFn)(this, list, interval, flag, canvas);
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_InitializeFlash, PlateFlashFn)(this, list, interval, flag, canvas)
+    }
 }
 
 // `Initialize/15`, the setup door. Its two floats are recorded in the order the dump spells them and
@@ -1099,7 +1221,8 @@ type PlateInitializeFn = extern "C" fn(
     flag_fourth: bool,
     flag_fifth: bool,
 );
-extern "C" fn TrainingParamChangeUI_Initialize(
+def_detour! {
+    TrainingParamChangeUI_Initialize(
     this: *mut Il2CppObject,
     content: *mut Il2CppObject,
     list: *mut Il2CppObject,
@@ -1117,11 +1240,17 @@ extern "C" fn TrainingParamChangeUI_Initialize(
     flag_fourth: bool,
     flag_fifth: bool,
 ) {
-    PLATE_INITIALIZE.observe_peak(&[first as f64, second as f64], first);
+            PLATE_INITIALIZE.observe_peak(&[first as f64, second as f64], first);
 
-    get_orig_fn!(TrainingParamChangeUI_Initialize, PlateInitializeFn)(
-        this, content, list, canvas, action, first, second, flag_first, flag_second, hp_gauge, motivation_button, order, on_end, flag_third, flag_fourth, flag_fifth,
-    );
+        get_orig_fn!(TrainingParamChangeUI_Initialize, PlateInitializeFn)(
+            this, content, list, canvas, action, first, second, flag_first, flag_second, hp_gauge, motivation_button, order, on_end, flag_third, flag_fourth, flag_fifth,
+        );
+    }
+    bail {
+                get_orig_fn!(TrainingParamChangeUI_Initialize, PlateInitializeFn)(
+                this, content, list, canvas, action, first, second, flag_first, flag_second, hp_gauge, motivation_button, order, on_end, flag_third, flag_fourth, flag_fifth,
+            )
+    }
 }
 
 // `PlayParameterChangeAsync/2 -> IEnumerator(generic<List<ChangeParameterInfo>>, float)`, on
@@ -1131,10 +1260,15 @@ extern "C" fn TrainingParamChangeUI_Initialize(
 // controller that queues them. The pointer the coroutine object comes back on is the game's and is handed
 // back untouched.
 type PlayParameterChangeFn = extern "C" fn(this: *mut Il2CppObject, list: *mut Il2CppObject, delay: f32) -> *mut Il2CppObject;
-extern "C" fn StoryViewController_PlayParameterChangeAsync(this: *mut Il2CppObject, list: *mut Il2CppObject, delay: f32) -> *mut Il2CppObject {
-    STORY_PLAY_PARAMETER_CHANGE.observe_peak(&[delay as f64], delay);
+def_detour! {
+    StoryViewController_PlayParameterChangeAsync(this: *mut Il2CppObject, list: *mut Il2CppObject, delay: f32) -> *mut Il2CppObject {
+            STORY_PLAY_PARAMETER_CHANGE.observe_peak(&[delay as f64], delay);
 
-    get_orig_fn!(StoryViewController_PlayParameterChangeAsync, PlayParameterChangeFn)(this, list, delay)
+        get_orig_fn!(StoryViewController_PlayParameterChangeAsync, PlayParameterChangeFn)(this, list, delay)
+    }
+    bail {
+                get_orig_fn!(StoryViewController_PlayParameterChangeAsync, PlayParameterChangeFn)(this, list, delay)
+    }
 }
 
 // The wall clock between two `InitializePlateList` calls is what the interval the game passed actually
@@ -1257,84 +1391,133 @@ fn record_cut_hole() {
 // untouched. `SetProgressbarBlendTime` records its float because it is a duration, and a scaling hook
 // only belongs on it once a run shows how often the game reaches it.
 type HpGaugePlayInFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn HpGauge_PlayIn(this: *mut Il2CppObject) {
-    HP_GAUGE_PLAY_IN.count();
-    record_play_cadence(&GAUGE_PLAY_LAST_MS, &GAUGE_PLAY_RUNS, &GAUGE_PLAY_MS_TOTAL, &GAUGE_PLAY_WORST_MS);
+def_detour! {
+    HpGauge_PlayIn(this: *mut Il2CppObject) {
+            HP_GAUGE_PLAY_IN.count();
+        record_play_cadence(&GAUGE_PLAY_LAST_MS, &GAUGE_PLAY_RUNS, &GAUGE_PLAY_MS_TOTAL, &GAUGE_PLAY_WORST_MS);
 
-    get_orig_fn!(HpGauge_PlayIn, HpGaugePlayInFn)(this);
+        get_orig_fn!(HpGauge_PlayIn, HpGaugePlayInFn)(this);
+    }
+    bail {
+                get_orig_fn!(HpGauge_PlayIn, HpGaugePlayInFn)(this)
+    }
 }
 
 type HpGaugePlayValueFn = extern "C" fn(this: *mut Il2CppObject, value: i32);
-extern "C" fn HpGauge_PlayValue(this: *mut Il2CppObject, value: i32) {
-    HP_GAUGE_PLAY_VALUE.observe(&[value as f64]);
+def_detour! {
+    HpGauge_PlayValue(this: *mut Il2CppObject, value: i32) {
+            HP_GAUGE_PLAY_VALUE.observe(&[value as f64]);
 
-    get_orig_fn!(HpGauge_PlayValue, HpGaugePlayValueFn)(this, value);
+        get_orig_fn!(HpGauge_PlayValue, HpGaugePlayValueFn)(this, value);
+    }
+    bail {
+                get_orig_fn!(HpGauge_PlayValue, HpGaugePlayValueFn)(this, value)
+    }
 }
 
 type HpGaugePlayOutFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn HpGauge_PlayOut(this: *mut Il2CppObject) {
-    HP_GAUGE_PLAY_OUT.count();
+def_detour! {
+    HpGauge_PlayOut(this: *mut Il2CppObject) {
+            HP_GAUGE_PLAY_OUT.count();
 
-    get_orig_fn!(HpGauge_PlayOut, HpGaugePlayOutFn)(this);
+        get_orig_fn!(HpGauge_PlayOut, HpGaugePlayOutFn)(this);
+    }
+    bail {
+                get_orig_fn!(HpGauge_PlayOut, HpGaugePlayOutFn)(this)
+    }
 }
 
 type StatusPlayPreInFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn TrainingCutStatus_PlayPreIn(this: *mut Il2CppObject) {
-    STATUS_PLAY_PRE_IN.count();
+def_detour! {
+    TrainingCutStatus_PlayPreIn(this: *mut Il2CppObject) {
+            STATUS_PLAY_PRE_IN.count();
 
-    get_orig_fn!(TrainingCutStatus_PlayPreIn, StatusPlayPreInFn)(this);
+        get_orig_fn!(TrainingCutStatus_PlayPreIn, StatusPlayPreInFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatus_PlayPreIn, StatusPlayPreInFn)(this)
+    }
 }
 
 type StatusPlayEndFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn TrainingCutStatus_PlayEnd(this: *mut Il2CppObject) {
-    STATUS_PLAY_END.count();
+def_detour! {
+    TrainingCutStatus_PlayEnd(this: *mut Il2CppObject) {
+            STATUS_PLAY_END.count();
 
-    get_orig_fn!(TrainingCutStatus_PlayEnd, StatusPlayEndFn)(this);
+        get_orig_fn!(TrainingCutStatus_PlayEnd, StatusPlayEndFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatus_PlayEnd, StatusPlayEndFn)(this)
+    }
 }
 
 type PlateGetIsAutoPlayFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
-extern "C" fn PlateUI_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(PlateUI_GetIsAutoPlay, PlateGetIsAutoPlayFn)(this);
-    PLATE_GET_IS_AUTO_PLAY.observe(&[bit(value)]);
+def_detour! {
+    PlateUI_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(PlateUI_GetIsAutoPlay, PlateGetIsAutoPlayFn)(this);
+        PLATE_GET_IS_AUTO_PLAY.observe(&[bit(value)]);
 
-    value
+        value
+    }
 }
 
 type CoroutineReturnFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObject;
 type CoroutineVoidFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn SingleModeMain_CoroutineDoTweenTimeScale(this: *mut Il2CppObject) -> *mut Il2CppObject {
-    MAIN_COROUTINE_DOTWEEN_SCALE.count();
+def_detour! {
+    SingleModeMain_CoroutineDoTweenTimeScale(this: *mut Il2CppObject) -> *mut Il2CppObject {
+            MAIN_COROUTINE_DOTWEEN_SCALE.count();
 
-    get_orig_fn!(SingleModeMain_CoroutineDoTweenTimeScale, CoroutineReturnFn)(this)
+        get_orig_fn!(SingleModeMain_CoroutineDoTweenTimeScale, CoroutineReturnFn)(this)
+    }
+    bail {
+                get_orig_fn!(SingleModeMain_CoroutineDoTweenTimeScale, CoroutineReturnFn)(this)
+    }
 }
 
-extern "C" fn SingleModeMain_WaitTap(this: *mut Il2CppObject) -> *mut Il2CppObject {
-    MAIN_WAIT_TAP.count();
+def_detour! {
+    SingleModeMain_WaitTap(this: *mut Il2CppObject) -> *mut Il2CppObject {
+            MAIN_WAIT_TAP.count();
 
-    get_orig_fn!(SingleModeMain_WaitTap, CoroutineReturnFn)(this)
+        get_orig_fn!(SingleModeMain_WaitTap, CoroutineReturnFn)(this)
+    }
+    bail {
+                get_orig_fn!(SingleModeMain_WaitTap, CoroutineReturnFn)(this)
+    }
 }
 
 // `OnClickTraining/0 -> void()`: the click that opens a training turn. Run 15 logged 17 plate cascades
 // and 5 cuts, so the turn count and the reveal count are not the same thing, and the hole clock needs to
 // know which side of the click it is on.
-extern "C" fn SingleModeMain_OnClickTraining(this: *mut Il2CppObject) {
-    MAIN_ON_CLICK_TRAINING.count();
+def_detour! {
+    SingleModeMain_OnClickTraining(this: *mut Il2CppObject) {
+            MAIN_ON_CLICK_TRAINING.count();
 
-    get_orig_fn!(SingleModeMain_OnClickTraining, CoroutineVoidFn)(this);
+        get_orig_fn!(SingleModeMain_OnClickTraining, CoroutineVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(SingleModeMain_OnClickTraining, CoroutineVoidFn)(this)
+    }
 }
 
-extern "C" fn SingleModeMain_BackFromTraining(this: *mut Il2CppObject) -> *mut Il2CppObject {
-    MAIN_BACK_FROM_TRAINING.count();
+def_detour! {
+    SingleModeMain_BackFromTraining(this: *mut Il2CppObject) -> *mut Il2CppObject {
+            MAIN_BACK_FROM_TRAINING.count();
 
-    get_orig_fn!(SingleModeMain_BackFromTraining, CoroutineReturnFn)(this)
+        get_orig_fn!(SingleModeMain_BackFromTraining, CoroutineReturnFn)(this)
+    }
+    bail {
+                get_orig_fn!(SingleModeMain_BackFromTraining, CoroutineReturnFn)(this)
+    }
 }
 
 type RemainTurnChangeFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
-extern "C" fn SingleModeMain_TryRemainTurnChange(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(SingleModeMain_TryRemainTurnChange, RemainTurnChangeFn)(this);
-    MAIN_TRY_REMAIN_TURN_CHANGE.sample(flag_bit(value));
+def_detour! {
+    SingleModeMain_TryRemainTurnChange(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(SingleModeMain_TryRemainTurnChange, RemainTurnChangeFn)(this);
+        MAIN_TRY_REMAIN_TURN_CHANGE.sample(flag_bit(value));
 
-    value
+        value
+    }
 }
 
 // `CommonSendCommandAsync/2 -> IEnumerator(struct<SingleModeDefine.CommandType:4B>, struct<TrainingDefine.TrainingCommandId:4B>)`:
@@ -1343,135 +1526,209 @@ extern "C" fn SingleModeMain_TryRemainTurnChange(this: *mut Il2CppObject) -> boo
 // two integers are recorded because the dump spells them as part of the command, and a run that shows a
 // command send at the start of a hole is a run that says the hole is a request the fork must not shorten.
 type CommonSendCommandFn = extern "C" fn(this: *mut Il2CppObject, command: i32, id: i32) -> *mut Il2CppObject;
-extern "C" fn SingleModeMain_CommonSendCommandAsync(this: *mut Il2CppObject, command: i32, id: i32) -> *mut Il2CppObject {
-    MAIN_COMMON_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64]);
+def_detour! {
+    SingleModeMain_CommonSendCommandAsync(this: *mut Il2CppObject, command: i32, id: i32) -> *mut Il2CppObject {
+            MAIN_COMMON_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64]);
 
-    get_orig_fn!(SingleModeMain_CommonSendCommandAsync, CommonSendCommandFn)(this, command, id)
+        get_orig_fn!(SingleModeMain_CommonSendCommandAsync, CommonSendCommandFn)(this, command, id)
+    }
+    bail {
+                get_orig_fn!(SingleModeMain_CommonSendCommandAsync, CommonSendCommandFn)(this, command, id)
+    }
 }
 
 // `SendCommandAsync/6 -> static IEnumerator(CommandType, TrainingCommandId, int, int, Action<SingleModeCommandResult>, Action<Cute.Http.ErrorType, int>)`,
 // the static sibling the view also has. It has no hidden `this` (A3), which is why its wrapper declares
 // only the six dumped arguments.
 type SendCommandFn = extern "C" fn(command: i32, id: i32, first: i32, second: i32, on_result: *mut Il2CppObject, on_error: *mut Il2CppObject) -> *mut Il2CppObject;
-extern "C" fn SingleModeMain_SendCommandAsync(command: i32, id: i32, first: i32, second: i32, on_result: *mut Il2CppObject, on_error: *mut Il2CppObject) -> *mut Il2CppObject {
-    MAIN_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64, first as f64, second as f64]);
+def_detour! {
+    SingleModeMain_SendCommandAsync(command: i32, id: i32, first: i32, second: i32, on_result: *mut Il2CppObject, on_error: *mut Il2CppObject) -> *mut Il2CppObject {
+            MAIN_SEND_COMMAND_ASYNC.observe(&[command as f64, id as f64, first as f64, second as f64]);
 
-    get_orig_fn!(SingleModeMain_SendCommandAsync, SendCommandFn)(command, id, first, second, on_result, on_error)
+        get_orig_fn!(SingleModeMain_SendCommandAsync, SendCommandFn)(command, id, first, second, on_result, on_error)
+    }
+    bail {
+                get_orig_fn!(SingleModeMain_SendCommandAsync, SendCommandFn)(command, id, first, second, on_result, on_error)
+    }
 }
 
 type SetIsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
 // Dumped: `set_IsPlayingCutt/1 -> void(bool)` on the training cutt controller. Run 10 installed it and it
 // printed nothing for a whole career (C49), so it no longer drives the run. It stays counted because a
 // client that does use the flag would show up here, and the value is handed back exactly as it arrived.
-extern "C" fn TrainingCutt_SetIsPlayingCutt(this: *mut Il2CppObject, playing: bool) {
-    CUTT_SET_IS_PLAYING_CUTT.count();
+def_detour! {
+    TrainingCutt_SetIsPlayingCutt(this: *mut Il2CppObject, playing: bool) {
+            CUTT_SET_IS_PLAYING_CUTT.count();
 
-    get_orig_fn!(TrainingCutt_SetIsPlayingCutt, SetIsPlayingCuttFn)(this, playing);
+        get_orig_fn!(TrainingCutt_SetIsPlayingCutt, SetIsPlayingCuttFn)(this, playing);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_SetIsPlayingCutt, SetIsPlayingCuttFn)(this, playing)
+    }
 }
 
 type IsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
-extern "C" fn TrainingCutt_GetIsPlayingCutt(this: *mut Il2CppObject) -> bool {
-    CUTT_GET_IS_PLAYING_CUTT.count();
+def_detour! {
+    TrainingCutt_GetIsPlayingCutt(this: *mut Il2CppObject) -> bool {
+            CUTT_GET_IS_PLAYING_CUTT.count();
 
-    get_orig_fn!(TrainingCutt_GetIsPlayingCutt, IsPlayingCuttFn)(this)
+        get_orig_fn!(TrainingCutt_GetIsPlayingCutt, IsPlayingCuttFn)(this)
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_GetIsPlayingCutt, IsPlayingCuttFn)(this)
+    }
 }
 
 type CuttBoolFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
 // `IsAutoPlay/0 -> bool()`: whether the cut-in is already set to play without a tap. Sampled as a peak
 // of 1.0 so the totals line answers "was it ever on" without a line per read.
-extern "C" fn TrainingCutt_IsAutoPlay(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(TrainingCutt_IsAutoPlay, CuttBoolFn)(this);
-    CUTT_IS_AUTO_PLAY.sample(flag_bit(value));
+def_detour! {
+    TrainingCutt_IsAutoPlay(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(TrainingCutt_IsAutoPlay, CuttBoolFn)(this);
+        CUTT_IS_AUTO_PLAY.sample(flag_bit(value));
 
-    value
+        value
+    }
 }
 
 type CuttVoidFn = extern "C" fn(this: *mut Il2CppObject);
 // The three drivers the cut-in runs through. Counted rather than sampled: these are the frames the
 // animation actually spends, and a run's cost is the count of them.
-extern "C" fn TrainingCutt_UpdateTrainingCutIn(this: *mut Il2CppObject) {
-    CUTT_UPDATE_TRAINING_CUT_IN.count();
+def_detour! {
+    TrainingCutt_UpdateTrainingCutIn(this: *mut Il2CppObject) {
+            CUTT_UPDATE_TRAINING_CUT_IN.count();
 
-    get_orig_fn!(TrainingCutt_UpdateTrainingCutIn, CuttVoidFn)(this);
+        get_orig_fn!(TrainingCutt_UpdateTrainingCutIn, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_UpdateTrainingCutIn, CuttVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutt_FixedUpdateTrainingCutIn(this: *mut Il2CppObject) {
-    CUTT_FIXED_UPDATE_TRAINING_CUT_IN.count();
+def_detour! {
+    TrainingCutt_FixedUpdateTrainingCutIn(this: *mut Il2CppObject) {
+            CUTT_FIXED_UPDATE_TRAINING_CUT_IN.count();
 
-    get_orig_fn!(TrainingCutt_FixedUpdateTrainingCutIn, CuttVoidFn)(this);
+        get_orig_fn!(TrainingCutt_FixedUpdateTrainingCutIn, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_FixedUpdateTrainingCutIn, CuttVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutt_LateUpdateTrainingCutIn(this: *mut Il2CppObject) {
-    CUTT_LATE_UPDATE_TRAINING_CUT_IN.count();
+def_detour! {
+    TrainingCutt_LateUpdateTrainingCutIn(this: *mut Il2CppObject) {
+            CUTT_LATE_UPDATE_TRAINING_CUT_IN.count();
 
-    get_orig_fn!(TrainingCutt_LateUpdateTrainingCutIn, CuttVoidFn)(this);
+        get_orig_fn!(TrainingCutt_LateUpdateTrainingCutIn, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_LateUpdateTrainingCutIn, CuttVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutt_CleanUpCutt(this: *mut Il2CppObject) {
-    CUTT_CLEAN_UP_CUTT.count();
-    close_cut_run();
+def_detour! {
+    TrainingCutt_CleanUpCutt(this: *mut Il2CppObject) {
+            CUTT_CLEAN_UP_CUTT.count();
+        close_cut_run();
 
-    get_orig_fn!(TrainingCutt_CleanUpCutt, CuttVoidFn)(this);
+        get_orig_fn!(TrainingCutt_CleanUpCutt, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_CleanUpCutt, CuttVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutt_PlayInTrainingStatus(this: *mut Il2CppObject) {
-    CUTT_PLAY_IN_TRAINING_STATUS.count();
+def_detour! {
+    TrainingCutt_PlayInTrainingStatus(this: *mut Il2CppObject) {
+            CUTT_PLAY_IN_TRAINING_STATUS.count();
 
-    get_orig_fn!(TrainingCutt_PlayInTrainingStatus, CuttVoidFn)(this);
+        get_orig_fn!(TrainingCutt_PlayInTrainingStatus, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_PlayInTrainingStatus, CuttVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutt_PlayOutTrainingStatus(this: *mut Il2CppObject) {
-    CUTT_PLAY_OUT_TRAINING_STATUS.count();
+def_detour! {
+    TrainingCutt_PlayOutTrainingStatus(this: *mut Il2CppObject) {
+            CUTT_PLAY_OUT_TRAINING_STATUS.count();
 
-    get_orig_fn!(TrainingCutt_PlayOutTrainingStatus, CuttVoidFn)(this);
+        get_orig_fn!(TrainingCutt_PlayOutTrainingStatus, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_PlayOutTrainingStatus, CuttVoidFn)(this)
+    }
 }
 
 type PlayTrainingCutFn = extern "C" fn(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject;
 // Dumped: `PlayTrainingCut/1 -> IEnumerator(class<Gallop.SingleModeMainTrainingCuttController.CuttPlayInfo>)`.
 // The coroutine object is created by the original and handed straight back, so nothing here changes what
 // the game ends up playing.
-extern "C" fn TrainingCutt_PlayTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
-    CUTT_PLAY_TRAINING_CUT.count();
-    open_cut_run();
+def_detour! {
+    TrainingCutt_PlayTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
+            CUTT_PLAY_TRAINING_CUT.count();
+        open_cut_run();
 
-    // The coroutine the game just built is the state machine of the whole cut, and the values it captured
-    // are the ones the game computed for this cut. They are read after the original ran, and the object is
-    // handed back exactly as it came (CutStateProbe).
-    let coroutine = get_orig_fn!(TrainingCutt_PlayTrainingCut, PlayTrainingCutFn)(this, info);
-    super::CutStateProbe::note_play_training_cut(coroutine);
+        // The coroutine the game just built is the state machine of the whole cut, and the values it captured
+        // are the ones the game computed for this cut. They are read after the original ran, and the object is
+        // handed back exactly as it came (CutStateProbe).
+        let coroutine = get_orig_fn!(TrainingCutt_PlayTrainingCut, PlayTrainingCutFn)(this, info);
+        super::CutStateProbe::note_play_training_cut(coroutine);
 
-    coroutine
+        coroutine
+    }
 }
 
-extern "C" fn TrainingCutt_PlayScenarioTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
-    CUTT_PLAY_SCENARIO_TRAINING_CUT.count();
-    open_cut_run();
+def_detour! {
+    TrainingCutt_PlayScenarioTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
+            CUTT_PLAY_SCENARIO_TRAINING_CUT.count();
+        open_cut_run();
 
-    get_orig_fn!(TrainingCutt_PlayScenarioTrainingCut, PlayTrainingCutFn)(this, info)
+        get_orig_fn!(TrainingCutt_PlayScenarioTrainingCut, PlayTrainingCutFn)(this, info)
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_PlayScenarioTrainingCut, PlayTrainingCutFn)(this, info)
+    }
 }
 
 type TrainingIdCoroutineFn = extern "C" fn(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject;
 // Dumped: `TrainingAsync/1 -> IEnumerator(struct<Gallop.TrainingDefine.TrainingCommandId:4B>)`. A four
 // byte struct travels in a general purpose register (A5) and this wrapper only passes it through, so it
 // never has to interpret what the id means.
-extern "C" fn TrainingCutt_TrainingAsync(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject {
-    CUTT_TRAINING_ASYNC.count();
+def_detour! {
+    TrainingCutt_TrainingAsync(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject {
+            CUTT_TRAINING_ASYNC.count();
 
-    get_orig_fn!(TrainingCutt_TrainingAsync, TrainingIdCoroutineFn)(this, id)
+        get_orig_fn!(TrainingCutt_TrainingAsync, TrainingIdCoroutineFn)(this, id)
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_TrainingAsync, TrainingIdCoroutineFn)(this, id)
+    }
 }
 
-extern "C" fn TrainingCutt_PlayTrainingSaboriAsync(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject {
-    CUTT_PLAY_TRAINING_SABORI.count();
-    open_cut_run();
+def_detour! {
+    TrainingCutt_PlayTrainingSaboriAsync(this: *mut Il2CppObject, id: i32) -> *mut Il2CppObject {
+            CUTT_PLAY_TRAINING_SABORI.count();
+        open_cut_run();
 
-    get_orig_fn!(TrainingCutt_PlayTrainingSaboriAsync, TrainingIdCoroutineFn)(this, id)
+        get_orig_fn!(TrainingCutt_PlayTrainingSaboriAsync, TrainingIdCoroutineFn)(this, id)
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_PlayTrainingSaboriAsync, TrainingIdCoroutineFn)(this, id)
+    }
 }
 
 type PlayTrainingCutEndFn = extern "C" fn(this: *mut Il2CppObject, id: i32, first: bool, second: bool) -> *mut Il2CppObject;
-extern "C" fn TrainingCutt_PlayTrainingCutEndAsync(this: *mut Il2CppObject, id: i32, first: bool, second: bool) -> *mut Il2CppObject {
-    CUTT_PLAY_TRAINING_CUT_END.count();
+def_detour! {
+    TrainingCutt_PlayTrainingCutEndAsync(this: *mut Il2CppObject, id: i32, first: bool, second: bool) -> *mut Il2CppObject {
+            CUTT_PLAY_TRAINING_CUT_END.count();
 
-    get_orig_fn!(TrainingCutt_PlayTrainingCutEndAsync, PlayTrainingCutEndFn)(this, id, first, second)
+        get_orig_fn!(TrainingCutt_PlayTrainingCutEndAsync, PlayTrainingCutEndFn)(this, id, first, second)
+    }
+    bail {
+                get_orig_fn!(TrainingCutt_PlayTrainingCutEndAsync, PlayTrainingCutEndFn)(this, id, first, second)
+    }
 }
 
 type IsValidTagFn = extern "C" fn(this: *mut Il2CppObject, result: i32, cards: *mut Il2CppObject) -> bool;
@@ -1479,149 +1736,208 @@ type IsValidTagFn = extern "C" fn(this: *mut Il2CppObject, result: i32, cards: *
 // the game deciding whether the cards a training produced carry a friendship, which is the only place a
 // probe can tell a friendship cut-in from a regular one (A28). The answer is remembered for the cut that
 // is opened next, and both arguments are handed back untouched.
-extern "C" fn TrainingCutt_IsValidTag(this: *mut Il2CppObject, result: i32, cards: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(TrainingCutt_IsValidTag, IsValidTagFn)(this, result, cards);
+def_detour! {
+    TrainingCutt_IsValidTag(this: *mut Il2CppObject, result: i32, cards: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(TrainingCutt_IsValidTag, IsValidTagFn)(this, result, cards);
 
-    LAST_TAG_ANSWER.store(if value { TAG_FRIENDSHIP } else { TAG_REGULAR }, atomic::Ordering::Relaxed);
-    TAG_IS_VALID_TAG.count();
+        LAST_TAG_ANSWER.store(if value { TAG_FRIENDSHIP } else { TAG_REGULAR }, atomic::Ordering::Relaxed);
+        TAG_IS_VALID_TAG.count();
 
-    value
+        value
+    }
 }
 
 type TagCutInPlayerPlayFn = extern "C" fn(this: *mut Il2CppObject, cards: *mut Il2CppObject, done: *mut Il2CppObject);
 // Dumped: `PlayCutIn/2 -> void(generic<List<SupportCardData>>, class<System.Action>)`. Both parameters are
 // references the wrapper holds as addresses and passes straight back. The call is also what settles the
 // kind of the cut that is open, because this is the door a friendship cut-in is played through.
-extern "C" fn TagCutInPlayer_PlayCutIn(this: *mut Il2CppObject, cards: *mut Il2CppObject, done: *mut Il2CppObject) {
-    TAG_PLAYER_PLAY_CUT_IN.count();
-    RUN_TAG_PLAYER_SEEN.store(1, atomic::Ordering::Relaxed);
+def_detour! {
+    TagCutInPlayer_PlayCutIn(this: *mut Il2CppObject, cards: *mut Il2CppObject, done: *mut Il2CppObject) {
+            TAG_PLAYER_PLAY_CUT_IN.count();
+        RUN_TAG_PLAYER_SEEN.store(1, atomic::Ordering::Relaxed);
 
-    get_orig_fn!(TagCutInPlayer_PlayCutIn, TagCutInPlayerPlayFn)(this, cards, done);
+        get_orig_fn!(TagCutInPlayer_PlayCutIn, TagCutInPlayerPlayFn)(this, cards, done);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_PlayCutIn, TagCutInPlayerPlayFn)(this, cards, done)
+    }
 }
 
 type TagCutInPlayerPlayOutFn = extern "C" fn(this: *mut Il2CppObject, done: *mut Il2CppObject);
-extern "C" fn TagCutInPlayer_PlayCutInOut(this: *mut Il2CppObject, done: *mut Il2CppObject) {
-    TAG_PLAYER_PLAY_CUT_OUT.count();
+def_detour! {
+    TagCutInPlayer_PlayCutInOut(this: *mut Il2CppObject, done: *mut Il2CppObject) {
+            TAG_PLAYER_PLAY_CUT_OUT.count();
 
-    get_orig_fn!(TagCutInPlayer_PlayCutInOut, TagCutInPlayerPlayOutFn)(this, done);
+        get_orig_fn!(TagCutInPlayer_PlayCutInOut, TagCutInPlayerPlayOutFn)(this, done);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_PlayCutInOut, TagCutInPlayerPlayOutFn)(this, done)
+    }
 }
 
 type StaticIsValidTagFn = extern "C" fn(cards: *mut Il2CppObject) -> bool;
 // Dumped: `IsValidTag/1 -> static bool(generic<List<SupportCardData>>)`. A static target has no hidden
 // `this`, so this wrapper declares only the dumped argument (A3).
-extern "C" fn TagCutInPlayer_IsValidTag(cards: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(TagCutInPlayer_IsValidTag, StaticIsValidTagFn)(cards);
+def_detour! {
+    TagCutInPlayer_IsValidTag(cards: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(TagCutInPlayer_IsValidTag, StaticIsValidTagFn)(cards);
 
-    LAST_TAG_ANSWER.store(if value { TAG_FRIENDSHIP } else { TAG_REGULAR }, atomic::Ordering::Relaxed);
-    TAG_PLAYER_IS_VALID_TAG.count();
+        LAST_TAG_ANSWER.store(if value { TAG_FRIENDSHIP } else { TAG_REGULAR }, atomic::Ordering::Relaxed);
+        TAG_PLAYER_IS_VALID_TAG.count();
 
-    value
+        value
+    }
 }
 
 type GetTotalTimeFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
 // The cut-in engine's own answer to how long the animation is, read from inside its detours where `this`
 // is a live timeline. A length measured this way does not have to be inferred from wall clock (A29).
-extern "C" fn CuttTimeline_GetTotalTime(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(CuttTimeline_GetTotalTime, GetTotalTimeFn)(this);
-    CUTT_GET_TOTAL_TIME.sample(value);
+def_detour! {
+    CuttTimeline_GetTotalTime(this: *mut Il2CppObject) answer -> f32 {
+            let value = get_orig_fn!(CuttTimeline_GetTotalTime, GetTotalTimeFn)(this);
+        // The length is published before the sampling: a trip in the probe half answers the cut-in
+        // engine with its own length, not with a 0 that means an animation of no length.
+        answer.publish(value);
+        CUTT_GET_TOTAL_TIME.sample(value);
 
-    value
+        value
+    }
 }
 
 type TimelineGetSpeedFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
-extern "C" fn CuttTimeline_GetSpeed(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(CuttTimeline_GetSpeed, TimelineGetSpeedFn)(this);
-    CUTT_GET_SPEED.sample(value);
+def_detour! {
+    CuttTimeline_GetSpeed(this: *mut Il2CppObject) answer -> f32 {
+            let value = get_orig_fn!(CuttTimeline_GetSpeed, TimelineGetSpeedFn)(this);
+        answer.publish(value);
+        CUTT_GET_SPEED.sample(value);
 
-    value
+        value
+    }
 }
 
 type TimelineIntFn = extern "C" fn(this: *mut Il2CppObject) -> i32;
-extern "C" fn CuttTimeline_GetTotalFrameCeil(this: *mut Il2CppObject) -> i32 {
-    let value = get_orig_fn!(CuttTimeline_GetTotalFrameCeil, TimelineIntFn)(this);
+def_detour! {
+    CuttTimeline_GetTotalFrameCeil(this: *mut Il2CppObject) answer -> i32 {
+            let value = get_orig_fn!(CuttTimeline_GetTotalFrameCeil, TimelineIntFn)(this);
+        answer.publish(value);
 
-    if value > 0 {
-        TIMELINE_TOTAL_FRAMES_PEAK.fetch_max(value as u32, atomic::Ordering::Relaxed);
+        if value > 0 {
+            TIMELINE_TOTAL_FRAMES_PEAK.fetch_max(value as u32, atomic::Ordering::Relaxed);
+        }
+
+        value
     }
-
-    value
 }
 
-extern "C" fn CuttTimeline_GetCurrentFrame(this: *mut Il2CppObject) -> i32 {
-    let value = get_orig_fn!(CuttTimeline_GetCurrentFrame, TimelineIntFn)(this);
+def_detour! {
+    CuttTimeline_GetCurrentFrame(this: *mut Il2CppObject) answer -> i32 {
+            let value = get_orig_fn!(CuttTimeline_GetCurrentFrame, TimelineIntFn)(this);
+        answer.publish(value);
 
-    if value > 0 {
-        TIMELINE_CURRENT_FRAME_PEAK.fetch_max(value as u32, atomic::Ordering::Relaxed);
+        if value > 0 {
+            TIMELINE_CURRENT_FRAME_PEAK.fetch_max(value as u32, atomic::Ordering::Relaxed);
+        }
+
+        value
     }
-
-    value
 }
 
-extern "C" fn CuttTimeline_GetTargetFps(this: *mut Il2CppObject) -> i32 {
-    let value = get_orig_fn!(CuttTimeline_GetTargetFps, TimelineIntFn)(this);
+def_detour! {
+    CuttTimeline_GetTargetFps(this: *mut Il2CppObject) answer -> i32 {
+            let value = get_orig_fn!(CuttTimeline_GetTargetFps, TimelineIntFn)(this);
+        // This one is a divisor in the game's own timeline math, so 0 is not an answer that can be
+        // handed back when it is the probe that tripped.
+        answer.publish(value);
 
-    if value > 0 {
-        TIMELINE_TARGET_FPS.fetch_max(value as u32, atomic::Ordering::Relaxed) as i32;
+        if value > 0 {
+            TIMELINE_TARGET_FPS.fetch_max(value as u32, atomic::Ordering::Relaxed) as i32;
+        }
+
+        value
     }
-
-    value
 }
 
 type SetSkipFrameFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
 // `set_SkipFrame/1 -> void(int)`: whether the game itself uses the door an auto skip option would have to
 // use. Observed only, and the frame count is written back untouched (A30).
-extern "C" fn CuttTimeline_SetSkipFrame(this: *mut Il2CppObject, frames: i32) {
-    CUTT_SET_SKIP_FRAME.observe(&[frames as f64]);
+def_detour! {
+    CuttTimeline_SetSkipFrame(this: *mut Il2CppObject, frames: i32) {
+            CUTT_SET_SKIP_FRAME.observe(&[frames as f64]);
 
-    get_orig_fn!(CuttTimeline_SetSkipFrame, SetSkipFrameFn)(this, frames);
+        get_orig_fn!(CuttTimeline_SetSkipFrame, SetSkipFrameFn)(this, frames);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SetSkipFrame, SetSkipFrameFn)(this, frames)
+    }
 }
 
 type TimelineSetFlagFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
-extern "C" fn CuttTimeline_SetIsAutoPlay(this: *mut Il2CppObject, playing: bool) {
-    CUTT_SET_IS_AUTO_PLAY.observe(&[bit(playing)]);
+def_detour! {
+    CuttTimeline_SetIsAutoPlay(this: *mut Il2CppObject, playing: bool) {
+            CUTT_SET_IS_AUTO_PLAY.observe(&[bit(playing)]);
 
-    get_orig_fn!(CuttTimeline_SetIsAutoPlay, TimelineSetFlagFn)(this, playing);
+        get_orig_fn!(CuttTimeline_SetIsAutoPlay, TimelineSetFlagFn)(this, playing);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SetIsAutoPlay, TimelineSetFlagFn)(this, playing)
+    }
 }
 
-extern "C" fn CuttTimeline_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(CuttTimeline_GetIsAutoPlay, CuttBoolFn)(this);
-    CUTT_GET_IS_AUTO_PLAY.sample(flag_bit(value));
+def_detour! {
+    CuttTimeline_GetIsAutoPlay(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(CuttTimeline_GetIsAutoPlay, CuttBoolFn)(this);
+        CUTT_GET_IS_AUTO_PLAY.sample(flag_bit(value));
 
-    value
+        value
+    }
 }
 
 type StatusPlayOutFn = extern "C" fn(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject);
-extern "C" fn TrainingCutStatus_PlayOut(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject) {
-    STATUS_PLAY_OUT.observe(&[bit(flag)]);
-    record_cut_hole();
+def_detour! {
+    TrainingCutStatus_PlayOut(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject) {
+            STATUS_PLAY_OUT.observe(&[bit(flag)]);
+        record_cut_hole();
 
-    get_orig_fn!(TrainingCutStatus_PlayOut, StatusPlayOutFn)(this, flag, action);
+        get_orig_fn!(TrainingCutStatus_PlayOut, StatusPlayOutFn)(this, flag, action);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatus_PlayOut, StatusPlayOutFn)(this, flag, action)
+    }
 }
 
 type StatusIntervalFn = extern "C" fn(this: *mut Il2CppObject, time: f32) -> f32;
 // `GetIntervalOutBegine/1 -> float(float)`, with no setter sibling in the dump. Sampled as a peak because
 // it is the gap the status panel waits before it plays out.
-extern "C" fn TrainingCutStatus_GetIntervalOutBegine(this: *mut Il2CppObject, time: f32) -> f32 {
-    let value = get_orig_fn!(TrainingCutStatus_GetIntervalOutBegine, StatusIntervalFn)(this, time);
-    STATUS_INTERVAL_OUT.observe_peak(&[time as f64, value as f64], value);
+def_detour! {
+    TrainingCutStatus_GetIntervalOutBegine(this: *mut Il2CppObject, time: f32) -> f32 {
+            let value = get_orig_fn!(TrainingCutStatus_GetIntervalOutBegine, StatusIntervalFn)(this, time);
+        STATUS_INTERVAL_OUT.observe_peak(&[time as f64, value as f64], value);
 
-    value
+        value
+    }
 }
 
 type StatusBoolFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
 // `WillRankUpInHighSpeedMode/0 -> bool()`: the game's own decision that the status panel may rank up in
 // high speed mode. Sampled as a peak of 1.0 so the totals line answers whether it ever said yes.
-extern "C" fn TrainingCutStatus_WillRankUpInHighSpeedMode(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(TrainingCutStatus_WillRankUpInHighSpeedMode, StatusBoolFn)(this);
-    STATUS_RANK_UP_HIGH_SPEED.sample(flag_bit(value));
+def_detour! {
+    TrainingCutStatus_WillRankUpInHighSpeedMode(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(TrainingCutStatus_WillRankUpInHighSpeedMode, StatusBoolFn)(this);
+        STATUS_RANK_UP_HIGH_SPEED.sample(flag_bit(value));
 
-    value
+        value
+    }
 }
 
-extern "C" fn TrainingCutStatus_ExistPlayingFrame(this: *mut Il2CppObject) -> bool {
-    STATUS_EXIST_PLAYING_FRAME.count();
+def_detour! {
+    TrainingCutStatus_ExistPlayingFrame(this: *mut Il2CppObject) -> bool {
+            STATUS_EXIST_PLAYING_FRAME.count();
 
-    get_orig_fn!(TrainingCutStatus_ExistPlayingFrame, StatusBoolFn)(this)
+        get_orig_fn!(TrainingCutStatus_ExistPlayingFrame, StatusBoolFn)(this)
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatus_ExistPlayingFrame, StatusBoolFn)(this)
+    }
 }
 
 // The dump prints a class as `namespace.name`, and this client has only ever looked classes up under

@@ -14,9 +14,14 @@ pub fn shadow_resolution(orig_resolution: i32) -> i32 {
 }
 
 type CascadeShadow_GetShadowResolutionFn = extern "C" fn(this: *mut Il2CppObject, default_shadow_map_width: i32) -> i32;
-extern "C" fn CascadeShadow_GetShadowResolution(this: *mut Il2CppObject, default_shadow_map_width: i32) -> i32 {
-    let orig = get_orig_fn!(CascadeShadow_GetShadowResolution, CascadeShadow_GetShadowResolutionFn)(this, default_shadow_map_width);
-    shadow_resolution(orig)
+def_detour! {
+    CascadeShadow_GetShadowResolution(this: *mut Il2CppObject, default_shadow_map_width: i32) answer -> i32 {
+            let orig = get_orig_fn!(CascadeShadow_GetShadowResolution, CascadeShadow_GetShadowResolutionFn)(this, default_shadow_map_width);
+        // Published before the config read: the setting half is where a trip happens, and a shadow
+        // map width of 0 is not a size the game can allocate. Its own answer is.
+        answer.publish(orig);
+        shadow_resolution(orig)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

@@ -13,10 +13,12 @@ pub fn get_ribbon(this: *mut Il2CppObject) -> *mut Il2CppObject {
 }
 
 type SetupFn = extern "C" fn(this: *mut Il2CppObject, nickNameId: i32, onSelect: *mut Il2CppDelegate) -> *mut Il2CppObject;
-extern "C" fn Setup(this: *mut Il2CppObject, nickNameId: i32, onSelect: *mut Il2CppDelegate) -> *mut Il2CppObject {
-    let orig = get_orig_fn!(Setup, SetupFn)(this, nickNameId, onSelect);
-    PartsNickNameRibbon::fit_text(get_ribbon(this));
-    orig
+def_detour! {
+    Setup(this: *mut Il2CppObject, nickNameId: i32, onSelect: *mut Il2CppDelegate) -> *mut Il2CppObject {
+            let orig = get_orig_fn!(Setup, SetupFn)(this, nickNameId, onSelect);
+        PartsNickNameRibbon::fit_text(get_ribbon(this));
+        orig
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

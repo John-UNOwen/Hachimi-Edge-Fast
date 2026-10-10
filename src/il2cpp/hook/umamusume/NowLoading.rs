@@ -8,51 +8,57 @@ fn get__comicTitle(this: *mut Il2CppObject) -> *mut Il2CppObject {
 const COMIC_TITLE_LINE_WIDTH: usize = 23;
 
 type SetupLoadingTipsFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn SetupLoadingTips(this: *mut Il2CppObject) {
-    get_orig_fn!(SetupLoadingTips, SetupLoadingTipsFn)(this);
+def_detour! {
+    SetupLoadingTips(this: *mut Il2CppObject) {
+            get_orig_fn!(SetupLoadingTips, SetupLoadingTipsFn)(this);
 
-    if Hachimi::instance().localized_data.load().config.now_loading_comic_title_ellipsis {
-        let comic_title = get__comicTitle(this);
-        if comic_title.is_null() { return; }
+        if Hachimi::instance().localized_data.load().config.now_loading_comic_title_ellipsis {
+            let comic_title = get__comicTitle(this);
+            if comic_title.is_null() { return; }
 
-        let text = Text::get_text(comic_title);
-        if text.is_null() { return; }
+            let text = Text::get_text(comic_title);
+            if text.is_null() { return; }
 
-        if let Some(new_text) = truncate_text_il2cpp(text, COMIC_TITLE_LINE_WIDTH, true) {
-            Text::set_horizontalOverflow(comic_title, 1);
-            Text::set_text(comic_title, new_text);
+            if let Some(new_text) = truncate_text_il2cpp(text, COMIC_TITLE_LINE_WIDTH, true) {
+                Text::set_horizontalOverflow(comic_title, 1);
+                Text::set_text(comic_title, new_text);
+            }
         }
     }
 }
 
 type ShowFn = extern "C" fn(this: *mut Il2CppObject, type_: i32, onComplete: *mut Il2CppDelegate, overrideDuration: *mut Il2CppObject, easeType: i32, customInEffect: *mut Il2CppObject, customLoopEffect: *mut Il2CppObject, customOutEffect: *mut Il2CppObject, charaId: i32);
-extern "C" fn Show(this: *mut Il2CppObject, #[allow(unused_mut)] mut type_: i32, onComplete: *mut Il2CppDelegate, overrideDuration: *mut Il2CppObject, easeType: i32, customInEffect: *mut Il2CppObject, customLoopEffect: *mut Il2CppObject, customOutEffect: *mut Il2CppObject, charaId: i32) {
-    let config = crate::core::Hachimi::instance().config.load();
-    #[cfg(target_os = "windows")]
-    if type_ == 2 && !config.windows.ui_loading_show_orientation_guide {
-        type_ = 0;
-    }
-    if !config.hide_now_loading {
-        get_orig_fn!(Show, ShowFn)(this, type_, onComplete, overrideDuration, easeType, customInEffect, customLoopEffect, customOutEffect, charaId);
-    }
-    if config.hide_now_loading && !onComplete.is_null() {
-        unsafe {
-            let invoke: extern "C" fn(*mut Il2CppObject, *const MethodInfo) = std::mem::transmute((*onComplete).method_ptr);
-            invoke((*onComplete).target, (*onComplete).method);
+def_detour! {
+    Show(this: *mut Il2CppObject, #[allow(unused_mut)] mut type_: i32, onComplete: *mut Il2CppDelegate, overrideDuration: *mut Il2CppObject, easeType: i32, customInEffect: *mut Il2CppObject, customLoopEffect: *mut Il2CppObject, customOutEffect: *mut Il2CppObject, charaId: i32) {
+            let config = crate::core::Hachimi::instance().config.load();
+        #[cfg(target_os = "windows")]
+        if type_ == 2 && !config.windows.ui_loading_show_orientation_guide {
+            type_ = 0;
+        }
+        if !config.hide_now_loading {
+            get_orig_fn!(Show, ShowFn)(this, type_, onComplete, overrideDuration, easeType, customInEffect, customLoopEffect, customOutEffect, charaId);
+        }
+        if config.hide_now_loading && !onComplete.is_null() {
+            unsafe {
+                let invoke: extern "C" fn(*mut Il2CppObject, *const MethodInfo) = std::mem::transmute((*onComplete).method_ptr);
+                invoke((*onComplete).target, (*onComplete).method);
+            }
         }
     }
 }
 
 type HideFn = extern "C" fn(this: *mut Il2CppObject, onComplete: *mut Il2CppDelegate, overrideDuration: *mut Il2CppObject, easeType: i32, onUnloadCustomEffectResourcesComplete: *mut Il2CppDelegate);
-extern "C" fn Hide(this: *mut Il2CppObject, onComplete: *mut Il2CppDelegate, overrideDuration: *mut Il2CppObject, easeType: i32, onUnloadCustomEffectResourcesComplete: *mut Il2CppDelegate) {
-    let config = crate::core::Hachimi::instance().config.load();
-    if !config.hide_now_loading {
-        get_orig_fn!(Hide, HideFn)(this, onComplete, overrideDuration, easeType, onUnloadCustomEffectResourcesComplete);
-    }
-    if config.hide_now_loading && !onComplete.is_null() {
-        unsafe {
-            let invoke: extern "C" fn(*mut Il2CppObject, *const MethodInfo) = std::mem::transmute((*onComplete).method_ptr);
-            invoke((*onComplete).target, (*onComplete).method);
+def_detour! {
+    Hide(this: *mut Il2CppObject, onComplete: *mut Il2CppDelegate, overrideDuration: *mut Il2CppObject, easeType: i32, onUnloadCustomEffectResourcesComplete: *mut Il2CppDelegate) {
+            let config = crate::core::Hachimi::instance().config.load();
+        if !config.hide_now_loading {
+            get_orig_fn!(Hide, HideFn)(this, onComplete, overrideDuration, easeType, onUnloadCustomEffectResourcesComplete);
+        }
+        if config.hide_now_loading && !onComplete.is_null() {
+            unsafe {
+                let invoke: extern "C" fn(*mut Il2CppObject, *const MethodInfo) = std::mem::transmute((*onComplete).method_ptr);
+                invoke((*onComplete).target, (*onComplete).method);
+            }
         }
     }
 }
@@ -68,36 +74,42 @@ extern "C" fn Hide(this: *mut Il2CppObject, onComplete: *mut Il2CppDelegate, ove
 const TRANSITION: AnimationSpeed::Group = AnimationSpeed::Group::Transition;
 
 type PlayFadeNowLoadingFn = extern "C" fn(this: *mut Il2CppObject, first: f32, second: f32, third: f32, onComplete: *mut Il2CppObject);
-extern "C" fn PlayFadeNowLoading(this: *mut Il2CppObject, first: f32, second: f32, third: f32, onComplete: *mut Il2CppObject) {
-    if AnimationSpeed::factor(TRANSITION) != 1.0 {
-        debug!("NowLoading::PlayFadeNowLoading({}, {}, {})", first, second, third);
-    }
+def_detour! {
+    PlayFadeNowLoading(this: *mut Il2CppObject, first: f32, second: f32, third: f32, onComplete: *mut Il2CppObject) {
+            if AnimationSpeed::factor(TRANSITION) != 1.0 {
+            debug!("NowLoading::PlayFadeNowLoading({}, {}, {})", first, second, third);
+        }
 
-    get_orig_fn!(PlayFadeNowLoading, PlayFadeNowLoadingFn)(
-        this,
-        first,
-        second,
-        AnimationSpeed::scale_duration(third, TRANSITION),
-        onComplete
-    );
+        get_orig_fn!(PlayFadeNowLoading, PlayFadeNowLoadingFn)(
+            this,
+            first,
+            second,
+            AnimationSpeed::scale_duration(third, TRANSITION),
+            onComplete
+        );
+    }
 }
 
 type PlayInNowLoadingFn = extern "C" fn(this: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject);
-extern "C" fn PlayInNowLoading(this: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject) {
-    if AnimationSpeed::factor(TRANSITION) != 1.0 {
-        debug!("NowLoading::PlayInNowLoading({})", duration);
-    }
+def_detour! {
+    PlayInNowLoading(this: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject) {
+            if AnimationSpeed::factor(TRANSITION) != 1.0 {
+            debug!("NowLoading::PlayInNowLoading({})", duration);
+        }
 
-    get_orig_fn!(PlayInNowLoading, PlayInNowLoadingFn)(this, AnimationSpeed::scale_duration(duration, TRANSITION), onComplete);
+        get_orig_fn!(PlayInNowLoading, PlayInNowLoadingFn)(this, AnimationSpeed::scale_duration(duration, TRANSITION), onComplete);
+    }
 }
 
 type PlayOutNowLoadingFn = extern "C" fn(this: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject);
-extern "C" fn PlayOutNowLoading(this: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject) {
-    if AnimationSpeed::factor(TRANSITION) != 1.0 {
-        debug!("NowLoading::PlayOutNowLoading({})", duration);
-    }
+def_detour! {
+    PlayOutNowLoading(this: *mut Il2CppObject, duration: f32, onComplete: *mut Il2CppObject) {
+            if AnimationSpeed::factor(TRANSITION) != 1.0 {
+            debug!("NowLoading::PlayOutNowLoading({})", duration);
+        }
 
-    get_orig_fn!(PlayOutNowLoading, PlayOutNowLoadingFn)(this, AnimationSpeed::scale_duration(duration, TRANSITION), onComplete);
+        get_orig_fn!(PlayOutNowLoading, PlayOutNowLoadingFn)(this, AnimationSpeed::scale_duration(duration, TRANSITION), onComplete);
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

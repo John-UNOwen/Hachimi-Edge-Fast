@@ -58,75 +58,98 @@ impl LyricsDataCommon for LyricsDataGlobal {
 }
 
 type LoadLyricsFn = extern "C" fn(this: *mut Il2CppObject, id: i32, path: *mut Il2CppString) -> bool;
-extern "C" fn LoadLyrics(this: *mut Il2CppObject, id: i32, path: *mut Il2CppString) -> bool {
-    if !get_orig_fn!(LoadLyrics, LoadLyricsFn)(this, id, path) {
-        return false;
-    }
-
-    // Live/MusicScores/mXXXX/mXXXX_lyrics
-    let path_str = unsafe { (*path).as_utf16str() };
-
-    let mut dict_path = Path::new("lyrics").join(path_str.path_filename().to_string());
-    dict_path.set_extension("json");
-    let localized_data = Hachimi::instance().localized_data.load();
-    let Some(dict): Option<FnvHashMap<i32, String>> = localized_data.load_assets_dict(Some(&dict_path)) else {
-        return true;
-    };
-    // dont let pbork interactive know about this
-    let secs_dict: FnvHashMap<i32, String> = dict.into_iter()
-        .map(|(time, lyrics)| (f32::to_bits(time as f32 / 1000.0).cast_signed(), lyrics) )
-        .collect();
-
-    let lyrics_data_dict = get__lyricsDataDic(this);
-    let Some(lyrics_data_array) = lyrics_data_dict.get(&id) else {
-        return true;
-    };
-
-    let process_element = |data: &mut dyn LyricsDataCommon| {
-        let time_key = data.get_key();
-        if let Some(text) = secs_dict.get(&time_key) {
-            *data.lyrics_mut() = text.to_il2cpp_string();
+def_detour! {
+    LoadLyrics(this: *mut Il2CppObject, id: i32, path: *mut Il2CppString) -> bool {
+            if !get_orig_fn!(LoadLyrics, LoadLyricsFn)(this, id, path) {
+            return false;
         }
-    };
 
-    unsafe {
-        let raw_array: *mut Il2CppArray = lyrics_data_array.this;
+        // C9: `path` is the string the game loaded these lyrics from, and a song with no lyrics
+        // file of its own is a legitimate call that carries none. There is no file name to read off
+        // address 0, and the game's own answer - true, nothing patched - is the right one.
+        if path.is_null() {
+            return true;
+        }
 
-        let length = (*raw_array).max_length;
+        // Live/MusicScores/mXXXX/mXXXX_lyrics
+        let path_str = unsafe { (*path).as_utf16str() };
 
-        let klass_ref: &mut *mut Il2CppClass =
-            (&mut (*raw_array).obj.__bindgen_anon_1.klass).as_mut();
+        let mut dict_path = Path::new("lyrics").join(path_str.path_filename().to_string());
+        dict_path.set_extension("json");
+        let localized_data = Hachimi::instance().localized_data.load();
+        let Some(dict): Option<FnvHashMap<i32, String>> = localized_data.load_assets_dict(Some(&dict_path)) else {
+            return true;
+        };
+        // dont let pbork interactive know about this
+        let secs_dict: FnvHashMap<i32, String> = dict.into_iter()
+            .map(|(time, lyrics)| (f32::to_bits(time as f32 / 1000.0).cast_signed(), lyrics) )
+            .collect();
 
-        let element_size = (*(*klass_ref)).element_size as usize;
+        let lyrics_data_dict = get__lyricsDataDic(this);
+        let Some(lyrics_data_array) = lyrics_data_dict.get(&id) else {
+            return true;
+        };
 
-        let data_ptr = (raw_array as *mut u8).add(kIl2CppSizeOfArray);
+        let process_element = |data: &mut dyn LyricsDataCommon| {
+            let time_key = data.get_key();
+            if let Some(text) = secs_dict.get(&time_key) {
+                *data.lyrics_mut() = text.to_il2cpp_string();
+            }
+        };
 
-        match Hachimi::instance().game.region {
-            Region::Japan => {
-                if element_size != std::mem::size_of::<LyricsDataJP>() {
-                    return true;
+        unsafe {
+            let raw_array: *mut Il2CppArray = lyrics_data_array.this;
+
+            // C9: this array is a value the game keeps in its own dictionary, and a song whose slot
+            // the game never filled holds null there - "no lyric data for this song yet", which is
+            // the same thing this hook already returns true for. `max_length` and the element size
+            // of that would both be read from address 0.
+            if raw_array.is_null() {
+                return true;
+            }
+
+            let length = (*raw_array).max_length;
+
+            let klass_ref: &mut *mut Il2CppClass =
+                (&mut (*raw_array).obj.__bindgen_anon_1.klass).as_mut();
+
+            // C9: elements are walked by the size their class gives, so a class the game did not
+            // fill stops the walk instead of becoming a read at address 0.
+            if klass_ref.is_null() {
+                return true;
+            }
+
+            let element_size = (*(*klass_ref)).element_size as usize;
+
+            let data_ptr = (raw_array as *mut u8).add(kIl2CppSizeOfArray);
+
+            match Hachimi::instance().game.region {
+                Region::Japan => {
+                    if element_size != std::mem::size_of::<LyricsDataJP>() {
+                        return true;
+                    }
+
+                    for i in 0..length {
+                        let element_ptr = data_ptr.add(i * element_size) as *mut LyricsDataJP;
+                        process_element(&mut *element_ptr);
+                    }
                 }
+                _ => {
+                    if element_size != std::mem::size_of::<LyricsDataGlobal>() {
+                        // Log an error.
+                        return true;
+                    }
 
-                for i in 0..length {
-                    let element_ptr = data_ptr.add(i * element_size) as *mut LyricsDataJP;
-                    process_element(&mut *element_ptr);
+                    for i in 0..length {
+                        let element_ptr = data_ptr.add(i * element_size) as *mut LyricsDataGlobal;
+                        process_element(&mut *element_ptr);
+                    }
                 }
             }
-            _ => {
-                if element_size != std::mem::size_of::<LyricsDataGlobal>() {
-                    // Log an error.
-                    return true;
-                }
-
-                for i in 0..length {
-                    let element_ptr = data_ptr.add(i * element_size) as *mut LyricsDataGlobal;
-                    process_element(&mut *element_ptr);
-                }
-            }
         }
-    }
 
-    true
+        true
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

@@ -31,31 +31,41 @@ impl_addr_wrapper_fn!(SetTextFontSize, SET_TEXT_FONTSIZE_ADDR, (), this: *mut Il
 
 
 type SetTextFn = extern "C" fn(this: *mut Il2CppObject, text: *mut Il2CppString);
-extern "C" fn SetText(this: *mut Il2CppObject, mut text: *mut Il2CppString) {
-    let text_utf = unsafe { (*text).as_utf16str() };
-    if !text_utf.as_slice().contains(&36) { // 36 = dollar sign ($)
-        return get_orig_fn!(SetText, SetTextFn)(this, text);
+def_detour! {
+    SetText(this: *mut Il2CppObject, mut text: *mut Il2CppString) {
+            // C9: `text` is the string the game is writing into this animated text component, and
+            // clearing a text is done by handing it null. There is no string to look for a template
+            // in, and the game's own call is the one that clears it.
+            let text_utf = if text.is_null() {
+                return get_orig_fn!(SetText, SetTextFn)(this, text);
+            }
+            else {
+                unsafe { (*text).as_utf16str() }
+            };
+        if !text_utf.as_slice().contains(&36) { // 36 = dollar sign ($)
+            return get_orig_fn!(SetText, SetTextFn)(this, text);
+        }
+
+        // Rationale: AnText has fields and functions. The functions set the fields + update display.
+        // Setting fields alone does not update current display, but does use them next time.
+        // We store state, possibly modify current through templates, and restore state for next use.
+
+        let line_space = get_lineSpace(this);
+        let anchor = get_textAnchor(this);
+        let font_size = get_fontSize(this);
+        let fit = get_useFit(this);
+
+        text = Hachimi::instance()
+            .template_parser
+            .eval_with_context(&text_utf.to_string(), &mut TemplateContext { component: this })
+            .to_il2cpp_string();
+        get_orig_fn!(SetText, SetTextFn)(this, text);
+
+        set_lineSpace(this, line_space);
+        set_textAnchor(this, anchor);
+        set_fontSize(this, font_size);
+        set_useFit(this, fit);
     }
-
-    // Rationale: AnText has fields and functions. The functions set the fields + update display.
-    // Setting fields alone does not update current display, but does use them next time.
-    // We store state, possibly modify current through templates, and restore state for next use.
-
-    let line_space = get_lineSpace(this);
-    let anchor = get_textAnchor(this);
-    let font_size = get_fontSize(this);
-    let fit = get_useFit(this);
-
-    text = Hachimi::instance()
-        .template_parser
-        .eval_with_context(&text_utf.to_string(), &mut TemplateContext { component: this })
-        .to_il2cpp_string();
-    get_orig_fn!(SetText, SetTextFn)(this, text);
-
-    set_lineSpace(this, line_space);
-    set_textAnchor(this, anchor);
-    set_fontSize(this, font_size);
-    set_useFit(this, fit);
 }
 
 struct TemplateContext {

@@ -25,36 +25,51 @@ pub fn instance() -> *mut Il2CppObject {
 }
 
 type GetVirtualResolutionFn = extern "C" fn(this: *mut Il2CppObject) -> Vector2Int_t;
-extern "C" fn GetVirtualResolution(this: *mut Il2CppObject) -> Vector2Int_t {
-    let mut res = get_orig_fn!(GetVirtualResolution, GetVirtualResolutionFn)(this);
-    let mult = Hachimi::instance().config.load().virtual_res_mult;
-    if mult != 1.0 {
-        res *= mult;
+def_detour! {
+    GetVirtualResolution(this: *mut Il2CppObject) answer -> Vector2Int_t {
+            let mut res = get_orig_fn!(GetVirtualResolution, GetVirtualResolutionFn)(this);
+        // Published before the config read that scales it: a trip there answers the game with its
+        // own resolution, unscaled, instead of a (0, 0) one. `Vector2Int_t` has no `Copy`, so the
+        // copy that goes in the barrier's cell is written out field by field rather than moved.
+        answer.publish(Vector2Int_t { x: res.x, y: res.y });
+        let mult = Hachimi::instance().config.load().virtual_res_mult;
+        if mult != 1.0 {
+            res *= mult;
+        }
+        res
     }
-    res
 }
 
 type GetVirtualResolution3DFn = extern "C" fn(this: *mut Il2CppObject, is_forced_wide_aspect: bool) -> Vector2Int_t;
-extern "C" fn GetVirtualResolution3D(this: *mut Il2CppObject, is_forced_wide_aspect: bool) -> Vector2Int_t {
-    let mut res = get_orig_fn!(GetVirtualResolution3D, GetVirtualResolution3DFn)(this, is_forced_wide_aspect);
-    let mult = Hachimi::instance().config.load().virtual_res_mult;
-    if mult != 1.0 &&
-        !SingleModeStartResultCharaViewer::setting_up_image_effect() &&
-        !LowResolutionCamera::creating_render_texture()
-    {
-        res *= mult;
+def_detour! {
+    GetVirtualResolution3D(this: *mut Il2CppObject, is_forced_wide_aspect: bool) answer -> Vector2Int_t {
+            let mut res = get_orig_fn!(GetVirtualResolution3D, GetVirtualResolution3DFn)(this, is_forced_wide_aspect);
+        answer.publish(Vector2Int_t { x: res.x, y: res.y });
+        let mult = Hachimi::instance().config.load().virtual_res_mult;
+        if mult != 1.0 &&
+            !SingleModeStartResultCharaViewer::setting_up_image_effect() &&
+            !LowResolutionCamera::creating_render_texture()
+        {
+            res *= mult;
+        }
+        res
     }
-    res
 }
 
 type GetVirtualResolutionWidth3DFn = extern "C" fn(this: *mut Il2CppObject) -> i32;
-extern "C" fn GetVirtualResolutionWidth3D(this: *mut Il2CppObject) -> i32 {
-    let mut width = get_orig_fn!(GetVirtualResolutionWidth3D, GetVirtualResolutionWidth3DFn)(this);
-    let mult = Hachimi::instance().config.load().virtual_res_mult;
-    if mult != 1.0 {
-        width = (width as f32 * mult) as i32;
+def_detour! {
+    GetVirtualResolutionWidth3D(this: *mut Il2CppObject) answer -> i32 {
+            let mut width = get_orig_fn!(GetVirtualResolutionWidth3D, GetVirtualResolutionWidth3DFn)(this);
+        // Published before the config read that scales it: a trip in that read answers the game
+        // with its own width - unscaled, which is the neutral answer - rather than 0, a virtual
+        // resolution of nothing.
+        answer.publish(width);
+        let mult = Hachimi::instance().config.load().virtual_res_mult;
+        if mult != 1.0 {
+            width = (width as f32 * mult) as i32;
+        }
+        width
     }
-    width
 }
 
 #[cfg(target_os = "windows")]
@@ -86,53 +101,76 @@ pub enum MsaaQuality {
 def_field_value_accessors!(set set__isMSAA, ISMSAA_FIELD, bool);
 
 type get_IsMSAAFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
-pub extern "C" fn get_IsMSAA(this: *mut Il2CppObject) -> bool {
-    if Hachimi::instance().config.load().msaa != MsaaQuality::Disabled {
-        set__isMSAA(this, true);
-        return true;
+def_detour! {
+    pub get_IsMSAA(this: *mut Il2CppObject) -> bool {
+            if Hachimi::instance().config.load().msaa != MsaaQuality::Disabled {
+            set__isMSAA(this, true);
+            return true;
+        }
+        get_orig_fn!(get_IsMSAA, get_IsMSAAFn)(this)
     }
-    get_orig_fn!(get_IsMSAA, get_IsMSAAFn)(this)
 }
 
 type set_ResolutionScaleFn = extern "C" fn(this: *mut Il2CppObject, value: f32);
-extern "C" fn set_ResolutionScale(this: *mut Il2CppObject, value: f32) {
-    let render_scale = Hachimi::instance().config.load().render_scale;
-    let target_value = if render_scale != 1.0 { render_scale } else { value };
-    get_orig_fn!(set_ResolutionScale, set_ResolutionScaleFn)(this, target_value);
+def_detour! {
+    set_ResolutionScale(this: *mut Il2CppObject, value: f32) {
+            let render_scale = Hachimi::instance().config.load().render_scale;
+        let target_value = if render_scale != 1.0 { render_scale } else { value };
+        get_orig_fn!(set_ResolutionScale, set_ResolutionScaleFn)(this, target_value);
+    }
 }
 
 type set_ResolutionScale2DFn = extern "C" fn(this: *mut Il2CppObject, value: f32);
-pub extern "C" fn set_ResolutionScale2D(this: *mut Il2CppObject, value: f32) {
-    let render_scale = Hachimi::instance().config.load().render_scale;
-    let target_value = if render_scale != 1.0 { render_scale } else { value };
-    get_orig_fn!(set_ResolutionScale2D, set_ResolutionScale2DFn)(this, target_value);
+def_detour! {
+    pub set_ResolutionScale2D(this: *mut Il2CppObject, value: f32) {
+            let render_scale = Hachimi::instance().config.load().render_scale;
+        let target_value = if render_scale != 1.0 { render_scale } else { value };
+        get_orig_fn!(set_ResolutionScale2D, set_ResolutionScale2DFn)(this, target_value);
+    }
 }
 
 type Get3DAntiAliasingLevelFn = extern "C" fn(this: *mut Il2CppObject, allowMSAA: bool) -> i32;
-extern "C" fn Get3DAntiAliasingLevel(this: *mut Il2CppObject, allowMSAA: bool) -> i32 {
-    let msaa = Hachimi::instance().config.load().msaa;
-    if allowMSAA && msaa != MsaaQuality::Disabled {
-        return msaa as i32;
+def_detour! {
+    Get3DAntiAliasingLevel(this: *mut Il2CppObject, allowMSAA: bool) -> i32 {
+            let msaa = Hachimi::instance().config.load().msaa;
+        if allowMSAA && msaa != MsaaQuality::Disabled {
+            return msaa as i32;
+        }
+        get_orig_fn!(Get3DAntiAliasingLevel, Get3DAntiAliasingLevelFn)(this, allowMSAA)
     }
-    get_orig_fn!(Get3DAntiAliasingLevel, Get3DAntiAliasingLevelFn)(this, allowMSAA)
+    // The mod's half runs before the game is asked anything, so on a trip the call the game would
+    // have got with no mod installed is still ahead, and answering with it is not a replay of
+    // anything that already faulted.
+    bail {
+                get_orig_fn!(Get3DAntiAliasingLevel, Get3DAntiAliasingLevelFn)(this, allowMSAA)
+    }
 }
 
 type ApplyGraphicsQualityFn = extern "C" fn(this: *mut Il2CppObject, quality: GraphicsQuality, force: bool);
-extern "C" fn ApplyGraphicsQuality(this: *mut Il2CppObject, quality: GraphicsQuality, force: bool) {
-    let custom_quality = Hachimi::instance().config.load().graphics_quality;
-    if custom_quality != GraphicsQuality::Default {
-        return get_orig_fn!(ApplyGraphicsQuality, ApplyGraphicsQualityFn)(this, custom_quality, true);
-    }
+def_detour! {
+    ApplyGraphicsQuality(this: *mut Il2CppObject, quality: GraphicsQuality, force: bool) {
+            let custom_quality = Hachimi::instance().config.load().graphics_quality;
+        if custom_quality != GraphicsQuality::Default {
+            return get_orig_fn!(ApplyGraphicsQuality, ApplyGraphicsQualityFn)(this, custom_quality, true);
+        }
 
-    get_orig_fn!(ApplyGraphicsQuality, ApplyGraphicsQualityFn)(this, quality, force);
+        get_orig_fn!(ApplyGraphicsQuality, ApplyGraphicsQualityFn)(this, quality, force);
+    }
 }
 
 type GetModelShadowTypeFn = extern "C" fn(this: *mut Il2CppObject) -> ModelShadowType;
-extern "C" fn GetModelShadowType(this: *mut Il2CppObject) -> ModelShadowType {
-    if Hachimi::instance().config.load().force_chara_shadows {
-        return ModelShadowType::Normal;
+def_detour! {
+    GetModelShadowType(this: *mut Il2CppObject) -> ModelShadowType {
+            if Hachimi::instance().config.load().force_chara_shadows {
+            return ModelShadowType::Normal;
+        }
+        get_orig_fn!(GetModelShadowType, GetModelShadowTypeFn)(this)
     }
-    get_orig_fn!(GetModelShadowType, GetModelShadowTypeFn)(this)
+    // `ModelShadowType` is a `repr(i32)` enum: a zeroed one is not a shadow type the game has a
+    // name for. The game's own answer is, and the mod's half that can trip runs before it is asked.
+    bail {
+                get_orig_fn!(GetModelShadowType, GetModelShadowTypeFn)(this)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

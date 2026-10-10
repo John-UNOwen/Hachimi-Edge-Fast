@@ -32,15 +32,17 @@ impl_addr_wrapper_fn!(SetAnisoLevel, SETANISOLEVEL_ADDR, (), this: *mut Il2CppOb
 
 #[allow(non_camel_case_types)]
 type set_filterModeFn = extern "C" fn(this: *mut Il2CppObject, filterMode: FilterMode);
-extern "C" fn set_filterMode(this: *mut Il2CppObject, filterMode: FilterMode) {
-    let level = Hachimi::instance().config.load().aniso_level;
-    if level == AnisoLevel::Default {
-        return get_orig_fn!(set_filterMode, set_filterModeFn)(this, filterMode);
-    }
+def_detour! {
+    set_filterMode(this: *mut Il2CppObject, filterMode: FilterMode) moves {
+            let level = Hachimi::instance().config.load().aniso_level;
+        if level == AnisoLevel::Default {
+            return get_orig_fn!(set_filterMode, set_filterModeFn)(this, filterMode);
+        }
 
-    // Unity sets Trilinear by default when anisotropic is enabled
-    get_orig_fn!(set_filterMode, set_filterModeFn)(this, FilterMode::Trilinear);
-    SetAnisoLevel(this, level);
+        // Unity sets Trilinear by default when anisotropic is enabled
+        get_orig_fn!(set_filterMode, set_filterModeFn)(this, FilterMode::Trilinear);
+        SetAnisoLevel(this, level);
+    }
 }
 
 pub fn init(_UnityEngine_CoreModule: *const Il2CppImage) {

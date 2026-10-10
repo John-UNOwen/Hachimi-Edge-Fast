@@ -54,15 +54,33 @@ pub fn apply_ui_scale() {
         }
     }
 
+    // C9: the singleton is the game's, and a `get_Instance` that has nothing to answer hands back
+    // null. There is no scaler list to read off it, and asking the game for one on a null `this`
+    // is a crash inside the game rather than a UI scale that did not apply.
     let ui_manager = instance();
+    if ui_manager.is_null() {
+        return;
+    }
+
     let canvas_scaler_list = GetCanvasScalerList(ui_manager);
     for scaler in unsafe { canvas_scaler_list.as_slice().iter() } {
+        // C9: the list is the game's array of scalers; a slot nobody filled is not a scaler.
+        if scaler.is_null() {
+            continue;
+        }
+
         #[cfg(target_os = "android")]
         {
             let res = CanvasScaler::get_m_ReferenceResolution(*scaler);
-            unsafe {
-                (*res).x /= scale;
-                (*res).y /= scale;
+
+            // C9: this hands back the address of a slot in the game's object - null when the field
+            // name is not in this client, which the getter already logs - and there is nothing to
+            // divide at that address.
+            if !res.is_null() {
+                unsafe {
+                    (*res).x /= scale;
+                    (*res).y /= scale;
+                }
             }
         }
         
@@ -72,45 +90,57 @@ pub fn apply_ui_scale() {
 }
 
 type SetHeaderTitleTextFn = extern "C" fn(this: *mut Il2CppObject, text: *mut Il2CppString, guide_id: i32);
-extern "C" fn SetHeaderTitleText(this: *mut Il2CppObject, text_: *mut Il2CppString, guide_id: i32) {
-    let text = unsafe { (*text_).as_utf16str() };
+def_detour! {
+    SetHeaderTitleText(this: *mut Il2CppObject, text_: *mut Il2CppString, guide_id: i32) {
+            // C9: `text_` is what the game is about to write into the header title, and clearing a
+            // title is done by handing it null. There is no string to look for a template in, and
+            // the original call is what the game wanted to make anyway.
+            let text_utf16 = if text_.is_null() {
+                return get_orig_fn!(SetHeaderTitleText, SetHeaderTitleTextFn)(this, text_, guide_id);
+            }
+            else {
+                unsafe { (*text_).as_utf16str() }
+            };
 
-    // The title text (aka the purple ribbon on the top left of the screen) doesn't run
-    // through TextGenerator, so we have to evaluate templates here (by emptying any filter exprs)
-    let new_text = if text.as_slice().contains(&36) { // 36 = dollar sign ($)
-        Hachimi::instance().template_parser
-            .remove_filters(&text.to_string())
-            .to_il2cpp_string()
+        // The title text (aka the purple ribbon on the top left of the screen) doesn't run
+        // through TextGenerator, so we have to evaluate templates here (by emptying any filter exprs)
+        let new_text = if text_utf16.as_slice().contains(&36) { // 36 = dollar sign ($)
+            Hachimi::instance().template_parser
+                .remove_filters(&text_utf16.to_string())
+                .to_il2cpp_string()
+        }
+        else {
+            text_
+        };
+
+        get_orig_fn!(SetHeaderTitleText, SetHeaderTitleTextFn)(this, new_text, guide_id)
     }
-    else {
-        text_
-    };
-
-    get_orig_fn!(SetHeaderTitleText, SetHeaderTitleTextFn)(this, new_text, guide_id)
 }
 
 #[cfg(target_os = "windows")]
 type ChangeResizeUIForPCFn = extern "C" fn(this: *mut Il2CppObject, width: i32, height: i32);
-#[cfg(target_os = "windows")]
-extern "C" fn ChangeResizeUIForPC(this: *mut Il2CppObject, width: i32, height: i32) {
-    use super::GraphicSettings;
+def_detour! {
+    #[cfg(target_os = "windows")]
+    ChangeResizeUIForPC(this: *mut Il2CppObject, width: i32, height: i32) {
+            use super::GraphicSettings;
 
-    let windows_config = &Hachimi::instance().config.load().windows;
-    if !windows_config.freeform_window {
-        get_orig_fn!(ChangeResizeUIForPC, ChangeResizeUIForPCFn)(this, width, height);
-    }
-
-    // Recreate the render texture so it scales with the resolution
-    if windows_config.freeform_window ||
-        windows_config.resolution_scaling.is_not_default()
-    {
-        CreateRenderTextureFromScreen(this);
-        let graphic_settings = GraphicSettings::instance();
-        if !graphic_settings.is_null() {
-            GraphicSettings::Update3DRenderTexture(graphic_settings);
+        let windows_config = &Hachimi::instance().config.load().windows;
+        if !windows_config.freeform_window {
+            get_orig_fn!(ChangeResizeUIForPC, ChangeResizeUIForPCFn)(this, width, height);
         }
+
+        // Recreate the render texture so it scales with the resolution
+        if windows_config.freeform_window ||
+            windows_config.resolution_scaling.is_not_default()
+        {
+            CreateRenderTextureFromScreen(this);
+            let graphic_settings = GraphicSettings::instance();
+            if !graphic_settings.is_null() {
+                GraphicSettings::Update3DRenderTexture(graphic_settings);
+            }
+        }
+        apply_ui_scale();
     }
-    apply_ui_scale();
 }
 
 #[cfg(target_os = "windows")]
@@ -138,28 +168,36 @@ pub fn refresh_after_window_resize(width: i32, height: i32) {
     TapEffectController::RefreshAll(tap_effect_controller);
 }
 
-#[cfg(target_os = "android")]
-extern "C" fn WaitBootSetup_MoveNext(enumerator: *mut Il2CppObject) -> bool {
-    use crate::il2cpp::symbols::MoveNextFn;
-    let moved = get_orig_fn!(WaitBootSetup_MoveNext, MoveNextFn)(enumerator);
-    if !moved {
-        apply_ui_scale();
+def_detour! {
+    #[cfg(target_os = "android")]
+    WaitBootSetup_MoveNext(enumerator: *mut Il2CppObject) coroutine answer -> bool {
+            use crate::il2cpp::symbols::MoveNextFn;
+        let moved = get_orig_fn!(WaitBootSetup_MoveNext, MoveNextFn)(enumerator);
+        // Published before `apply_ui_scale`: the boot coroutine's own step is the answer a trip in
+        // the scale half owes the game.
+        answer.publish(moved);
+        if !moved {
+            apply_ui_scale();
+        }
+        moved
     }
-    moved
 }
 
 #[cfg(target_os = "android")]
 type WaitBootSetupFn = extern "C" fn(this: *mut Il2CppObject) -> crate::il2cpp::symbols::IEnumerator;
-#[cfg(target_os = "android")]
-extern "C" fn WaitBootSetup(this: *mut Il2CppObject) -> crate::il2cpp::symbols::IEnumerator {
-    let enumerator = get_orig_fn!(WaitBootSetup, WaitBootSetupFn)(this);
-    if Hachimi::instance().config.load().ui_scale == 1.0 { return enumerator; }
+def_detour! {
+    #[cfg(target_os = "android")]
+    WaitBootSetup(this: *mut Il2CppObject) answer -> crate::il2cpp::symbols::IEnumerator {
+            let enumerator = get_orig_fn!(WaitBootSetup, WaitBootSetupFn)(this);
+        answer.publish(crate::il2cpp::symbols::IEnumerator::from(enumerator.this));
+        if Hachimi::instance().config.load().ui_scale == 1.0 { return enumerator; }
 
-    if let Err(e) = enumerator.hook_move_next(WaitBootSetup_MoveNext) {
-        error!("Failed to hook enumerator: {}", e);
+        if let Err(e) = enumerator.hook_move_next(WaitBootSetup_MoveNext) {
+            error!("Failed to hook enumerator: {}", e);
+        }
+
+        enumerator
     }
-
-    enumerator
 }
 
 #[cfg(target_os = "windows")]

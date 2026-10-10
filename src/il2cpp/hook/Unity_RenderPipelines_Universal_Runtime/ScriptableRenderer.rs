@@ -8,13 +8,17 @@ use crate::{
 
 // el magico
 type GetRenderTextureDescriptorFn = extern "C" fn(cameraData: *mut isize,  renderPass: *mut Il2CppObject, targetRT: *mut RenderTextureDescriptor);
-extern "C" fn GetRenderTextureDescriptor(cameraData: *mut isize, renderPass: *mut Il2CppObject, targetRT: *mut RenderTextureDescriptor) {
-    get_orig_fn!(GetRenderTextureDescriptor, GetRenderTextureDescriptorFn)(cameraData, renderPass, targetRT);
+def_detour! {
+    GetRenderTextureDescriptor(cameraData: *mut isize, renderPass: *mut Il2CppObject, targetRT: *mut RenderTextureDescriptor) {
+            get_orig_fn!(GetRenderTextureDescriptor, GetRenderTextureDescriptorFn)(cameraData, renderPass, targetRT);
 
-    let msaa = Hachimi::instance().config.load().msaa;
-    if msaa != MsaaQuality::Disabled {
-        unsafe {
-            (*targetRT).msaaSamples = msaa as i32;
+        let msaa = Hachimi::instance().config.load().msaa;
+        // C9: `targetRT` is the descriptor the game owns and fills in; a call that hands over none
+        // has no sample count to change, and writing at address 0 is not how that is found out.
+        if msaa != MsaaQuality::Disabled && !targetRT.is_null() {
+            unsafe {
+                (*targetRT).msaaSamples = msaa as i32;
+            }
         }
     }
 }

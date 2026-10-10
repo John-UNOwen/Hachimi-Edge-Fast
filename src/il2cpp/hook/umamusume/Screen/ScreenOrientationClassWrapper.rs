@@ -8,19 +8,21 @@ impl_addr_wrapper_fn!(get_Orientation, GET_ORIENTATION_ADDR, ScreenOrientation, 
 
 #[cfg(target_os = "android")]
 type set_OrientationHookFn = extern "C" fn(this: *mut Il2CppObject, value: i32);
-#[cfg(target_os = "android")]
-extern "C" fn set_OrientationHook(this: *mut Il2CppObject, value: i32) {
-    use crate::{
-        core::Hachimi,
-        il2cpp::hook::umamusume::Screen::should_force_orientation
-    };
+def_detour! {
+    #[cfg(target_os = "android")]
+    set_OrientationHook(this: *mut Il2CppObject, value: i32) {
+            use crate::{
+            core::Hachimi,
+            il2cpp::hook::umamusume::Screen::should_force_orientation
+        };
 
-    if should_force_orientation() {
-        let force_orientation = Hachimi::instance().config.load().android.force_orientation_mode;
-        get_orig_fn!(set_OrientationHook, set_OrientationHookFn)(this, force_orientation);
-    } else {
-        get_orig_fn!(set_OrientationHook, set_OrientationHookFn)(this, value);
-    };
+        if should_force_orientation() {
+            let force_orientation = Hachimi::instance().config.load().android.force_orientation_mode;
+            get_orig_fn!(set_OrientationHook, set_OrientationHookFn)(this, force_orientation);
+        } else {
+            get_orig_fn!(set_OrientationHook, set_OrientationHookFn)(this, value);
+        };
+    }
 }
 
 pub fn init(Screen: *mut Il2CppClass) {

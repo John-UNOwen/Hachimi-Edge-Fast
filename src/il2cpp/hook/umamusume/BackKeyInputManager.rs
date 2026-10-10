@@ -16,22 +16,26 @@ fn preserve_hook_identity(identity: &AtomicU8) {
 }
 
 type IsTriggeredBackKeyFn = extern "C" fn() -> bool;
-extern "C" fn IsTriggeredBackKey() -> bool {
-    preserve_hook_identity(&BACK_KEY_TRIGGER_HOOK_ID);
-    if free_camera::is_game_input_capture_active() {
-        false
-    } else {
-        get_orig_fn!(IsTriggeredBackKey, IsTriggeredBackKeyFn)()
+def_detour! {
+    IsTriggeredBackKey() -> bool {
+            preserve_hook_identity(&BACK_KEY_TRIGGER_HOOK_ID);
+        if free_camera::is_game_input_capture_active() {
+            false
+        } else {
+            get_orig_fn!(IsTriggeredBackKey, IsTriggeredBackKeyFn)()
+        }
     }
 }
 
 type BackMouseTriggeredFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
-extern "C" fn get_IsRightMouseButtonPressedForBack(this: *mut Il2CppObject) -> bool {
-    preserve_hook_identity(&BACK_MOUSE_TRIGGER_HOOK_ID);
-    if free_camera::is_game_input_capture_active() {
-        false
-    } else {
-        get_orig_fn!(get_IsRightMouseButtonPressedForBack, BackMouseTriggeredFn)(this)
+def_detour! {
+    get_IsRightMouseButtonPressedForBack(this: *mut Il2CppObject) -> bool {
+            preserve_hook_identity(&BACK_MOUSE_TRIGGER_HOOK_ID);
+        if free_camera::is_game_input_capture_active() {
+            false
+        } else {
+            get_orig_fn!(get_IsRightMouseButtonPressedForBack, BackMouseTriggeredFn)(this)
+        }
     }
 }
 

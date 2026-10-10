@@ -7,21 +7,23 @@ use crate::{
 use super::{ButtonCommon, CharacterNoteTopView, TextCommon, ViewControllerBase};
 
 type InitializeViewFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObject;
-extern "C" fn InitializeView(this: *mut Il2CppObject) -> *mut Il2CppObject {
-    let view = ViewControllerBase::GetView(this);
-    let config = &Hachimi::instance().localized_data.load().config;
+def_detour! {
+    InitializeView(this: *mut Il2CppObject) -> *mut Il2CppObject {
+            let view = ViewControllerBase::GetView(this);
+        let config = &Hachimi::instance().localized_data.load().config;
 
-    if let Some(config) = config.character_note_top_gallery_button.as_ref() {
-        let gallery_button = CharacterNoteTopView::get_ButtonGallery(view);
-        apply_gallery_button_config(gallery_button, config);
+        if let Some(config) = config.character_note_top_gallery_button.as_ref() {
+            let gallery_button = CharacterNoteTopView::get_ButtonGallery(view);
+            apply_gallery_button_config(gallery_button, config);
+        }
+
+        if let Some(config) = config.character_note_top_talk_gallery_button.as_ref() {
+            let talk_gallery_button = CharacterNoteTopView::get_ButtonTalkGallery(view);
+            apply_gallery_button_config(talk_gallery_button, config);
+        }
+
+        get_orig_fn!(InitializeView, InitializeViewFn)(this)
     }
-
-    if let Some(config) = config.character_note_top_talk_gallery_button.as_ref() {
-        let talk_gallery_button = CharacterNoteTopView::get_ButtonTalkGallery(view);
-        apply_gallery_button_config(talk_gallery_button, config);
-    }
-
-    get_orig_fn!(InitializeView, InitializeViewFn)(this)
 }
 
 fn apply_gallery_button_config(button: *mut Il2CppObject, config: &UITextConfig) {

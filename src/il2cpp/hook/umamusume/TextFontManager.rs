@@ -3,26 +3,30 @@ use crate::{core::{game::Region, Hachimi}, il2cpp::{ext::LocalizedDataExt, symbo
 use super::TextFormat;
 
 type GetChineseFontFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObject;
-extern "C" fn GetChineseFont(this: *mut Il2CppObject) -> *mut Il2CppObject {
-    let font = Hachimi::instance().localized_data.load().load_replacement_font();
-    if !font.is_null() {
-        return font;
+def_detour! {
+    GetChineseFont(this: *mut Il2CppObject) -> *mut Il2CppObject {
+            let font = Hachimi::instance().localized_data.load().load_replacement_font();
+        if !font.is_null() {
+            return font;
+        }
+        get_orig_fn!(GetChineseFont, GetChineseFontFn)(this)
     }
-    get_orig_fn!(GetChineseFont, GetChineseFontFn)(this)
 }
 
 type LoadResourcesFolderFontFn = extern "C" fn(this: *mut Il2CppObject, font_type: TextFormat::Font) -> *mut Il2CppObject;
-extern "C" fn LoadResourcesFolderFont(this: *mut Il2CppObject, font_type: TextFormat::Font) -> *mut Il2CppObject {
-    match font_type {
-        TextFormat::Font::Dynamic01 | TextFormat::Font::Chinese_Font01 => {
-            let font = Hachimi::instance().localized_data.load().load_replacement_font();
-            if !font.is_null() {
-                return font;
+def_detour! {
+    LoadResourcesFolderFont(this: *mut Il2CppObject, font_type: TextFormat::Font) moves -> *mut Il2CppObject {
+            match font_type {
+            TextFormat::Font::Dynamic01 | TextFormat::Font::Chinese_Font01 => {
+                let font = Hachimi::instance().localized_data.load().load_replacement_font();
+                if !font.is_null() {
+                    return font;
+                }
             }
+            _ => ()
         }
-        _ => ()
+        get_orig_fn!(LoadResourcesFolderFont, LoadResourcesFolderFontFn)(this, font_type)
     }
-    get_orig_fn!(LoadResourcesFolderFont, LoadResourcesFolderFontFn)(this, font_type)
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

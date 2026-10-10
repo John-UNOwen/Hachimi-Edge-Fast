@@ -246,70 +246,101 @@ fn close_story_run(door: usize) {
 type CutInPlayFn = extern "C" fn(this: *mut Il2CppObject, timeline: *mut Il2CppObject, parent: *mut Il2CppObject);
 // Dumped: `Play/2 -> void(string<System.String>, class<UnityEngine.Transform>)`. Both arguments are
 // references, held as addresses and passed straight back.
-extern "C" fn CutInHelper_Play(this: *mut Il2CppObject, timeline: *mut Il2CppObject, parent: *mut Il2CppObject) {
-    CUT_IN_PLAY.count();
-    open_story_run(0);
+def_detour! {
+    CutInHelper_Play(this: *mut Il2CppObject, timeline: *mut Il2CppObject, parent: *mut Il2CppObject) {
+            CUT_IN_PLAY.count();
+        open_story_run(0);
 
-    get_orig_fn!(CutInHelper_Play, CutInPlayFn)(this, timeline, parent);
+        get_orig_fn!(CutInHelper_Play, CutInPlayFn)(this, timeline, parent);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_Play, CutInPlayFn)(this, timeline, parent)
+    }
 }
 
-extern "C" fn CutInHelper_OnPlayCutIn(this: *mut Il2CppObject, timeline: *mut Il2CppObject, parent: *mut Il2CppObject) {
-    CUT_IN_ON_PLAY_CUT_IN.count();
+def_detour! {
+    CutInHelper_OnPlayCutIn(this: *mut Il2CppObject, timeline: *mut Il2CppObject, parent: *mut Il2CppObject) {
+            CUT_IN_ON_PLAY_CUT_IN.count();
 
-    get_orig_fn!(CutInHelper_OnPlayCutIn, CutInPlayFn)(this, timeline, parent);
+        get_orig_fn!(CutInHelper_OnPlayCutIn, CutInPlayFn)(this, timeline, parent);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_OnPlayCutIn, CutInPlayFn)(this, timeline, parent)
+    }
 }
 
 type CutInBoolFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
-extern "C" fn CutInHelper_IsPlaying(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(CutInHelper_IsPlaying, CutInBoolFn)(this);
-    CUT_IN_IS_PLAYING.sample(flag_bit(value));
+def_detour! {
+    CutInHelper_IsPlaying(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(CutInHelper_IsPlaying, CutInBoolFn)(this);
+        CUT_IN_IS_PLAYING.sample(flag_bit(value));
 
-    value
+        value
+    }
 }
 
 type CutInFloatFn = extern "C" fn(this: *mut Il2CppObject) -> f32;
 // `GetTotalTime/0 -> float()`: the length the cut-in timeline reports for itself. This is the number a
 // story event speed option would have to be judged against, and nothing else in the fork measures it.
-extern "C" fn CutInHelper_GetTotalTime(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(CutInHelper_GetTotalTime, CutInFloatFn)(this);
-    CUT_IN_GET_TOTAL_TIME.sample(value);
+def_detour! {
+    CutInHelper_GetTotalTime(this: *mut Il2CppObject) -> f32 {
+            let value = get_orig_fn!(CutInHelper_GetTotalTime, CutInFloatFn)(this);
+        CUT_IN_GET_TOTAL_TIME.sample(value);
 
-    value
+        value
+    }
 }
 
-extern "C" fn CutInHelper_GetTargetSpeed(this: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(CutInHelper_GetTargetSpeed, CutInFloatFn)(this);
-    CUT_IN_GET_TARGET_SPEED.sample(value);
+def_detour! {
+    CutInHelper_GetTargetSpeed(this: *mut Il2CppObject) -> f32 {
+            let value = get_orig_fn!(CutInHelper_GetTargetSpeed, CutInFloatFn)(this);
+        CUT_IN_GET_TARGET_SPEED.sample(value);
 
-    value
+        value
+    }
 }
 
 type CutInRateFn = extern "C" fn(this: *mut Il2CppObject, rate: f32);
 // `FixedUpdateForHighSpeed/1 -> void(float)`: the game's own high speed driving of a cut-in, with the
 // rate it is driving at. Sampling the argument is what tells the fork whether a story cut-in already has a
 // fast path, which is the question item 41 has to answer before anything is scaled.
-extern "C" fn CutInHelper_FixedUpdateForHighSpeed(this: *mut Il2CppObject, rate: f32) {
-    CUT_IN_FIXED_UPDATE_HIGH_SPEED.observe_peak(&[rate as f64], rate);
+def_detour! {
+    CutInHelper_FixedUpdateForHighSpeed(this: *mut Il2CppObject, rate: f32) {
+            CUT_IN_FIXED_UPDATE_HIGH_SPEED.observe_peak(&[rate as f64], rate);
 
-    get_orig_fn!(CutInHelper_FixedUpdateForHighSpeed, CutInRateFn)(this, rate);
+        get_orig_fn!(CutInHelper_FixedUpdateForHighSpeed, CutInRateFn)(this, rate);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_FixedUpdateForHighSpeed, CutInRateFn)(this, rate)
+    }
 }
 
 type CutInFrameFn = extern "C" fn(this: *mut Il2CppObject, frame: i32);
 // `SetCurrentFrame/1 -> void(int)`: whether the game jumps a cut-in forward on its own. The frame index
 // is sampled as a peak and written back untouched.
-extern "C" fn CutInHelper_SetCurrentFrame(this: *mut Il2CppObject, frame: i32) {
-    CUT_IN_SET_CURRENT_FRAME.observe(&[frame as f64]);
-    CUT_IN_SET_CURRENT_FRAME.sample(frame as f32);
+def_detour! {
+    CutInHelper_SetCurrentFrame(this: *mut Il2CppObject, frame: i32) {
+            CUT_IN_SET_CURRENT_FRAME.observe(&[frame as f64]);
+        CUT_IN_SET_CURRENT_FRAME.sample(frame as f32);
 
-    get_orig_fn!(CutInHelper_SetCurrentFrame, CutInFrameFn)(this, frame);
+        get_orig_fn!(CutInHelper_SetCurrentFrame, CutInFrameFn)(this, frame);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_SetCurrentFrame, CutInFrameFn)(this, frame)
+    }
 }
 
 type CutInVoidFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn CutInHelper_CleanupPlaying(this: *mut Il2CppObject) {
-    CUT_IN_CLEANUP_PLAYING.count();
-    close_story_run(0);
+def_detour! {
+    CutInHelper_CleanupPlaying(this: *mut Il2CppObject) {
+            CUT_IN_CLEANUP_PLAYING.count();
+        close_story_run(0);
 
-    get_orig_fn!(CutInHelper_CleanupPlaying, CutInVoidFn)(this);
+        get_orig_fn!(CutInHelper_CleanupPlaying, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_CleanupPlaying, CutInVoidFn)(this)
+    }
 }
 
 // Dumped on `Gallop.CutInHelper`: `OnStart/0 -> void()` (L26462), `OnEnd/0 -> void()` (L26463),
@@ -317,57 +348,89 @@ extern "C" fn CutInHelper_CleanupPlaying(this: *mut Il2CppObject) {
 // These are the lifecycle the base helper runs around a cut-in and no hook has ever asked for them. Which
 // of them this client actually walks through, next to `Play` and `CleanupPlaying`, is what C50 needs to know
 // before anything on this screen is paired or scaled.
-extern "C" fn CutInHelper_OnStart(this: *mut Il2CppObject) {
-    CUT_IN_ON_START.count();
-    open_story_run(1);
+def_detour! {
+    CutInHelper_OnStart(this: *mut Il2CppObject) {
+            CUT_IN_ON_START.count();
+        open_story_run(1);
 
-    get_orig_fn!(CutInHelper_OnStart, CutInVoidFn)(this);
+        get_orig_fn!(CutInHelper_OnStart, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_OnStart, CutInVoidFn)(this)
+    }
 }
 
-extern "C" fn CutInHelper_OnEnd(this: *mut Il2CppObject) {
-    CUT_IN_ON_END.count();
-    close_story_run(1);
+def_detour! {
+    CutInHelper_OnEnd(this: *mut Il2CppObject) {
+            CUT_IN_ON_END.count();
+        close_story_run(1);
 
-    get_orig_fn!(CutInHelper_OnEnd, CutInVoidFn)(this);
+        get_orig_fn!(CutInHelper_OnEnd, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_OnEnd, CutInVoidFn)(this)
+    }
 }
 
-extern "C" fn CutInHelper_OnEndCutIn(this: *mut Il2CppObject) {
-    CUT_IN_ON_END_CUT_IN.count();
-    close_story_run(2);
+def_detour! {
+    CutInHelper_OnEndCutIn(this: *mut Il2CppObject) {
+            CUT_IN_ON_END_CUT_IN.count();
+        close_story_run(2);
 
-    get_orig_fn!(CutInHelper_OnEndCutIn, CutInVoidFn)(this);
+        get_orig_fn!(CutInHelper_OnEndCutIn, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_OnEndCutIn, CutInVoidFn)(this)
+    }
 }
 
-extern "C" fn CutInHelper_OnRestart(this: *mut Il2CppObject) {
-    CUT_IN_ON_RESTART.count();
-    open_story_run(4);
+def_detour! {
+    CutInHelper_OnRestart(this: *mut Il2CppObject) {
+            CUT_IN_ON_RESTART.count();
+        open_story_run(4);
 
-    get_orig_fn!(CutInHelper_OnRestart, CutInVoidFn)(this);
+        get_orig_fn!(CutInHelper_OnRestart, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_OnRestart, CutInVoidFn)(this)
+    }
 }
 
 // `StopRequest/0 -> void()`: the game asking its own cut-in to end. Counted only. A cut-in that the game is
 // already ending is the one place a speed option would be free, so the count comes before the idea.
-extern "C" fn CutInHelper_StopRequest(this: *mut Il2CppObject) {
-    CUT_IN_STOP_REQUEST.count();
+def_detour! {
+    CutInHelper_StopRequest(this: *mut Il2CppObject) {
+            CUT_IN_STOP_REQUEST.count();
 
-    get_orig_fn!(CutInHelper_StopRequest, CutInVoidFn)(this);
+        get_orig_fn!(CutInHelper_StopRequest, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_StopRequest, CutInVoidFn)(this)
+    }
 }
 
 type CutInPauseFn = extern "C" fn(this: *mut Il2CppObject, play: bool, second: bool);
 // Dumped: `Pause/2 -> void(bool, bool)` (L26430) with `IsPause/0 -> bool()` (L26431). The game's own pause
 // door for a cut-in. Both booleans are handed back exactly as they arrived and neither is read here, so the
 // only thing this detour can change is nothing (C50, item 41).
-extern "C" fn CutInHelper_Pause(this: *mut Il2CppObject, play: bool, second: bool) {
-    CUT_IN_PAUSE.count();
+def_detour! {
+    CutInHelper_Pause(this: *mut Il2CppObject, play: bool, second: bool) {
+            CUT_IN_PAUSE.count();
 
-    get_orig_fn!(CutInHelper_Pause, CutInPauseFn)(this, play, second);
+        get_orig_fn!(CutInHelper_Pause, CutInPauseFn)(this, play, second);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_Pause, CutInPauseFn)(this, play, second)
+    }
 }
 
-extern "C" fn CutInHelper_IsPause(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(CutInHelper_IsPause, CutInBoolFn)(this);
-    CUT_IN_IS_PAUSE.sample(flag_bit(value));
+def_detour! {
+    CutInHelper_IsPause(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(CutInHelper_IsPause, CutInBoolFn)(this);
+        CUT_IN_IS_PAUSE.sample(flag_bit(value));
 
-    value
+        value
+    }
 }
 
 type CutInStatusFn = extern "C" fn(this: *mut Il2CppObject, status: u32);
@@ -375,130 +438,199 @@ type CutInStatusFn = extern "C" fn(this: *mut Il2CppObject, status: u32);
 // proven to travel in a general purpose register (A5), so the wrapper declares it as one word, passes it
 // back untouched, and samples the value it was given. That turns the cut-in's own state machine into a set
 // of numbers this fork can read instead of guess.
-extern "C" fn CutInHelper_SetStatus(this: *mut Il2CppObject, status: u32) {
-    CUT_IN_SET_STATUS.sample(status as f32);
+def_detour! {
+    CutInHelper_SetStatus(this: *mut Il2CppObject, status: u32) {
+            CUT_IN_SET_STATUS.sample(status as f32);
 
-    get_orig_fn!(CutInHelper_SetStatus, CutInStatusFn)(this, status);
+        get_orig_fn!(CutInHelper_SetStatus, CutInStatusFn)(this, status);
+    }
+    bail {
+                get_orig_fn!(CutInHelper_SetStatus, CutInStatusFn)(this, status)
+    }
 }
 
 type CutInControllerFn = extern "C" fn(this: *mut Il2CppObject, controller: *mut Il2CppObject);
 // Dumped on `Gallop.SingleModeTrainingCutInHelper`: `OnTerminateRuntime/1 -> void(class<
 // Gallop.CutIn.Cutt.CutInTimelineController>)` (L26595). The controller is held as an address and returned
 // to the original untouched.
-extern "C" fn TrainingCutInHelper_OnTerminateRuntime(this: *mut Il2CppObject, controller: *mut Il2CppObject) {
-    TRAINING_CUT_IN_ON_TERMINATE_RUNTIME.count();
-    close_story_run(5);
+def_detour! {
+    TrainingCutInHelper_OnTerminateRuntime(this: *mut Il2CppObject, controller: *mut Il2CppObject) {
+            TRAINING_CUT_IN_ON_TERMINATE_RUNTIME.count();
+        close_story_run(5);
 
-    get_orig_fn!(TrainingCutInHelper_OnTerminateRuntime, CutInControllerFn)(this, controller);
+        get_orig_fn!(TrainingCutInHelper_OnTerminateRuntime, CutInControllerFn)(this, controller);
+    }
+    bail {
+                get_orig_fn!(TrainingCutInHelper_OnTerminateRuntime, CutInControllerFn)(this, controller)
+    }
 }
 
 // `OnTimelineUpdatePost/1 -> void(float)` (L26607): the per frame post update a training cut-in runs, with
 // the time value it is stepped by. The argument is sampled as a peak and written back untouched.
-extern "C" fn TrainingCutInHelper_OnTimelineUpdatePost(this: *mut Il2CppObject, time: f32) {
-    TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.observe_peak(&[time as f64], time);
+def_detour! {
+    TrainingCutInHelper_OnTimelineUpdatePost(this: *mut Il2CppObject, time: f32) {
+            TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.observe_peak(&[time as f64], time);
 
-    // The stamp is not measurement. It is what `cut_in_engine_driving` answers from, and it is the
-    // reason the high speed option writes hold off while a cut-in runtime is being stepped.
-    CUT_IN_TICK_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+        // The stamp is not measurement. It is what `cut_in_engine_driving` answers from, and it is the
+        // reason the high speed option writes hold off while a cut-in runtime is being stepped.
+        CUT_IN_TICK_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
 
-    get_orig_fn!(TrainingCutInHelper_OnTimelineUpdatePost, CutInRateFn)(this, time);
+        get_orig_fn!(TrainingCutInHelper_OnTimelineUpdatePost, CutInRateFn)(this, time);
+    }
+    bail {
+                get_orig_fn!(TrainingCutInHelper_OnTimelineUpdatePost, CutInRateFn)(this, time)
+    }
 }
 
 // The entry set the derived helper declares for itself (dump L26598 to L26604). The base `Play/2` stayed
 // silent through a whole career because this is the door the training cut-in comes through (C50).
-extern "C" fn TrainingCutInHelper_Play(this: *mut Il2CppObject) {
-    TRAINING_CUT_IN_PLAY.count();
-    open_story_run(2);
+def_detour! {
+    TrainingCutInHelper_Play(this: *mut Il2CppObject) {
+            TRAINING_CUT_IN_PLAY.count();
+        open_story_run(2);
 
-    get_orig_fn!(TrainingCutInHelper_Play, CutInVoidFn)(this);
+        get_orig_fn!(TrainingCutInHelper_Play, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutInHelper_Play, CutInVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutInHelper_OnPlayCutIn(this: *mut Il2CppObject) {
-    TRAINING_CUT_IN_ON_PLAY_CUT_IN.count();
-    open_story_run(3);
+def_detour! {
+    TrainingCutInHelper_OnPlayCutIn(this: *mut Il2CppObject) {
+            TRAINING_CUT_IN_ON_PLAY_CUT_IN.count();
+        open_story_run(3);
 
-    get_orig_fn!(TrainingCutInHelper_OnPlayCutIn, CutInVoidFn)(this);
+        get_orig_fn!(TrainingCutInHelper_OnPlayCutIn, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutInHelper_OnPlayCutIn, CutInVoidFn)(this)
+    }
 }
 
 // `OnStartCutIn/0 -> bool()` (L26600): the game's own answer to whether the cut-in may start at all. Read,
 // reported as a peak of 1.0 when it ever said yes, and returned untouched.
-extern "C" fn TrainingCutInHelper_OnStartCutIn(this: *mut Il2CppObject) -> bool {
-    let value = get_orig_fn!(TrainingCutInHelper_OnStartCutIn, CutInBoolFn)(this);
-    TRAINING_CUT_IN_ON_START_CUT_IN.sample(flag_bit(value));
+def_detour! {
+    TrainingCutInHelper_OnStartCutIn(this: *mut Il2CppObject) -> bool {
+            let value = get_orig_fn!(TrainingCutInHelper_OnStartCutIn, CutInBoolFn)(this);
+        TRAINING_CUT_IN_ON_START_CUT_IN.sample(flag_bit(value));
 
-    value
+        value
+    }
 }
 
-extern "C" fn TrainingCutInHelper_OnPlayMainCutIn(this: *mut Il2CppObject) {
-    TRAINING_CUT_IN_ON_PLAY_MAIN.count();
+def_detour! {
+    TrainingCutInHelper_OnPlayMainCutIn(this: *mut Il2CppObject) {
+            TRAINING_CUT_IN_ON_PLAY_MAIN.count();
 
-    get_orig_fn!(TrainingCutInHelper_OnPlayMainCutIn, CutInVoidFn)(this);
+        get_orig_fn!(TrainingCutInHelper_OnPlayMainCutIn, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutInHelper_OnPlayMainCutIn, CutInVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutInHelper_OnEndCutIn(this: *mut Il2CppObject) {
-    TRAINING_CUT_IN_ON_END_CUT_IN.count();
-    close_story_run(3);
-    // The training cut-in finishing is the near end of the wall a slow training turn spends. The far end
-    // is the status panel playing out, a door `TrainingCuttProbe` owns, so the mark is handed over rather
-    // than measured twice.
-    note_cut_in_end();
+def_detour! {
+    TrainingCutInHelper_OnEndCutIn(this: *mut Il2CppObject) {
+            TRAINING_CUT_IN_ON_END_CUT_IN.count();
+        close_story_run(3);
+        // The training cut-in finishing is the near end of the wall a slow training turn spends. The far end
+        // is the status panel playing out, a door `TrainingCuttProbe` owns, so the mark is handed over rather
+        // than measured twice.
+        note_cut_in_end();
 
-    get_orig_fn!(TrainingCutInHelper_OnEndCutIn, CutInVoidFn)(this);
+        get_orig_fn!(TrainingCutInHelper_OnEndCutIn, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutInHelper_OnEndCutIn, CutInVoidFn)(this)
+    }
 }
 
-extern "C" fn TrainingCutInHelper_CleanupPlaying(this: *mut Il2CppObject) {
-    TRAINING_CUT_IN_CLEANUP_PLAYING.count();
-    close_story_run(4);
+def_detour! {
+    TrainingCutInHelper_CleanupPlaying(this: *mut Il2CppObject) {
+            TRAINING_CUT_IN_CLEANUP_PLAYING.count();
+        close_story_run(4);
 
-    get_orig_fn!(TrainingCutInHelper_CleanupPlaying, CutInVoidFn)(this);
+        get_orig_fn!(TrainingCutInHelper_CleanupPlaying, CutInVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutInHelper_CleanupPlaying, CutInVoidFn)(this)
+    }
 }
 
 type ContextListFn = extern "C" fn(helpers: *mut Il2CppObject);
 // Dumped: `SkipRuntimeAll/1 -> static void(generic<IList<SingleModeTrainingCutInHelper>>)`. A static
 // target has no hidden `this`, so the wrapper declares only the dumped argument (A3), and the argument is
 // a generic instantiation held as an address (C48).
-extern "C" fn ContextExtension_SkipRuntimeAll(helpers: *mut Il2CppObject) {
-    CONTEXT_SKIP_RUNTIME_ALL.count();
+def_detour! {
+    ContextExtension_SkipRuntimeAll(helpers: *mut Il2CppObject) {
+            CONTEXT_SKIP_RUNTIME_ALL.count();
 
-    get_orig_fn!(ContextExtension_SkipRuntimeAll, ContextListFn)(helpers);
+        get_orig_fn!(ContextExtension_SkipRuntimeAll, ContextListFn)(helpers);
+    }
+    bail {
+                get_orig_fn!(ContextExtension_SkipRuntimeAll, ContextListFn)(helpers)
+    }
 }
 
-extern "C" fn ContextExtension_SkipPause(helpers: *mut Il2CppObject) {
-    CONTEXT_SKIP_PAUSE.count();
+def_detour! {
+    ContextExtension_SkipPause(helpers: *mut Il2CppObject) {
+            CONTEXT_SKIP_PAUSE.count();
 
-    get_orig_fn!(ContextExtension_SkipPause, ContextListFn)(helpers);
+        get_orig_fn!(ContextExtension_SkipPause, ContextListFn)(helpers);
+    }
+    bail {
+                get_orig_fn!(ContextExtension_SkipPause, ContextListFn)(helpers)
+    }
 }
 
-extern "C" fn ContextExtension_FixedUpdateForHighSpeed(helpers: *mut Il2CppObject) {
-    CONTEXT_FIXED_UPDATE_HIGH_SPEED.count();
+def_detour! {
+    ContextExtension_FixedUpdateForHighSpeed(helpers: *mut Il2CppObject) {
+            CONTEXT_FIXED_UPDATE_HIGH_SPEED.count();
 
-    get_orig_fn!(ContextExtension_FixedUpdateForHighSpeed, ContextListFn)(helpers);
+        get_orig_fn!(ContextExtension_FixedUpdateForHighSpeed, ContextListFn)(helpers);
+    }
+    bail {
+                get_orig_fn!(ContextExtension_FixedUpdateForHighSpeed, ContextListFn)(helpers)
+    }
 }
 
 type ContextListValueFn = extern "C" fn(helpers: *mut Il2CppObject, value: f32);
 // `SetTimeAll/2 -> static void(generic<IList<...>>, float)` and
 // `FixedUpdateForHighSpeed/2 -> static void(generic<IList<...>>, float)`. The float is the second slot in
 // the mixed calling convention and is only read, never written.
-extern "C" fn ContextExtension_SetTimeAll(helpers: *mut Il2CppObject, time: f32) {
-    CONTEXT_SET_TIME_ALL.observe_peak(&[time as f64], time);
+def_detour! {
+    ContextExtension_SetTimeAll(helpers: *mut Il2CppObject, time: f32) {
+            CONTEXT_SET_TIME_ALL.observe_peak(&[time as f64], time);
 
-    get_orig_fn!(ContextExtension_SetTimeAll, ContextListValueFn)(helpers, time);
+        get_orig_fn!(ContextExtension_SetTimeAll, ContextListValueFn)(helpers, time);
+    }
+    bail {
+                get_orig_fn!(ContextExtension_SetTimeAll, ContextListValueFn)(helpers, time)
+    }
 }
 
-extern "C" fn ContextExtension_FixedUpdateForHighSpeedRate(helpers: *mut Il2CppObject, rate: f32) {
-    CONTEXT_FIXED_UPDATE_HIGH_SPEED_RATE.observe_peak(&[rate as f64], rate);
+def_detour! {
+    ContextExtension_FixedUpdateForHighSpeedRate(helpers: *mut Il2CppObject, rate: f32) {
+            CONTEXT_FIXED_UPDATE_HIGH_SPEED_RATE.observe_peak(&[rate as f64], rate);
 
-    get_orig_fn!(ContextExtension_FixedUpdateForHighSpeedRate, ContextListValueFn)(helpers, rate);
+        get_orig_fn!(ContextExtension_FixedUpdateForHighSpeedRate, ContextListValueFn)(helpers, rate);
+    }
+    bail {
+                get_orig_fn!(ContextExtension_FixedUpdateForHighSpeedRate, ContextListValueFn)(helpers, rate)
+    }
 }
 
 type ContextGetTimeFn = extern "C" fn(helpers: *mut Il2CppObject) -> f32;
 // `GetCurrentTime/1 -> static float(generic<IEnumerable<...>>)`: how far the set of cut-ins has got,
 // reported by the game.
-extern "C" fn ContextExtension_GetCurrentTime(helpers: *mut Il2CppObject) -> f32 {
-    let value = get_orig_fn!(ContextExtension_GetCurrentTime, ContextGetTimeFn)(helpers);
-    CONTEXT_GET_CURRENT_TIME.sample(value);
+def_detour! {
+    ContextExtension_GetCurrentTime(helpers: *mut Il2CppObject) -> f32 {
+            let value = get_orig_fn!(ContextExtension_GetCurrentTime, ContextGetTimeFn)(helpers);
+        CONTEXT_GET_CURRENT_TIME.sample(value);
 
-    value
+        value
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

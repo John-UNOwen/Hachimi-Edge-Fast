@@ -17,7 +17,8 @@ type SetupFn = extern "C" fn(
     imageCommon: *mut *mut Il2CppObject,
     canvasGroup: *mut *mut Il2CppObject,
 );
-extern "C" fn Setup(
+def_detour! {
+    Setup(
     this: *mut Il2CppObject,
     labelObject: *mut Il2CppString,
     textLabel: *mut Il2CppString,
@@ -27,24 +28,25 @@ extern "C" fn Setup(
     imageCommon: *mut *mut Il2CppObject,
     canvasGroup: *mut *mut Il2CppObject,
 ) {
-    // Called at the start of a story for each of the 6 possible buttons.
-    get_orig_fn!(Setup, SetupFn)(this, labelObject, textLabel, imageObjectName, anObject, anText, imageCommon, canvasGroup);
+            // Called at the start of a story for each of the 6 possible buttons.
+        get_orig_fn!(Setup, SetupFn)(this, labelObject, textLabel, imageObjectName, anObject, anText, imageCommon, canvasGroup);
 
-    if anText.is_null() {
-        return;
-    }
-    let an_text = unsafe { *anText };
+        if anText.is_null() {
+            return;
+        }
+        let an_text = unsafe { *anText };
 
-    AnText::SetTextAnchor(an_text, TextAnchor::MiddleLeft);
-    AnText::SetTextWrap(an_text, true);
-    // Wrap and fit don't work together by default and I can't find how to set the max height or lines.
-    // With nice wrap, tl is unlikely to need more than 2 lines though and RichText can still be used.
-    // AnText::SetTextFit(anText, true);
+        AnText::SetTextAnchor(an_text, TextAnchor::MiddleLeft);
+        AnText::SetTextWrap(an_text, true);
+        // Wrap and fit don't work together by default and I can't find how to set the max height or lines.
+        // With nice wrap, tl is unlikely to need more than 2 lines though and RichText can still be used.
+        // AnText::SetTextFit(anText, true);
 
-    let config = &Hachimi::instance().localized_data.load().config;
-    if let Some(mult) = config.choice_btn_line_spacing_multiplier {
-        let line_spacing = AnText::get_lineSpace(an_text);
-        AnText::SetTextLinespace(an_text, line_spacing * mult);
+        let config = &Hachimi::instance().localized_data.load().config;
+        if let Some(mult) = config.choice_btn_line_spacing_multiplier {
+            let line_spacing = AnText::get_lineSpace(an_text);
+            AnText::SetTextLinespace(an_text, line_spacing * mult);
+        }
     }
 }
 

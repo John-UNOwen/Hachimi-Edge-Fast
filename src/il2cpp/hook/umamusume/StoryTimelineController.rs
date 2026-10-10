@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::{
-    core::Hachimi,
+    core::{hachimi::recover_lock, Hachimi},
     il2cpp::{
         hook::umamusume::{AnimationSpeed, HighSpeedSetting, StoryEventProbe},
         symbols::{get_method_addr, GCHandle},
@@ -25,17 +25,26 @@ pub fn last_block_id() -> i32 {
 }
 
 type GotoBlockFn = extern "C" fn(this: *mut Il2CppObject, block_id: i32, weaken_cy_spring: bool, is_update: bool, is_choice: bool);
-pub extern "C" fn GotoBlock(this: *mut Il2CppObject, block_id: i32, weaken_cy_spring: bool, is_update: bool, is_choice: bool) {
-    if Hachimi::instance().config.load().enable_ipc {
-        let mut guard = CURRENT.lock().unwrap();
+def_detour! {
+    pub GotoBlock(this: *mut Il2CppObject, block_id: i32, weaken_cy_spring: bool, is_update: bool, is_choice: bool) {
+            if Hachimi::instance().config.load().enable_ipc {
+            let mut guard = recover_lock(&CURRENT);
 
-        if !(*guard).as_ref().is_none_or(|h| h.target() == this) {
-            *guard = Some(GCHandle::new_weak_ref(this, false));
+            if !(*guard).as_ref().is_none_or(|h| h.target() == this) {
+                *guard = Some(GCHandle::new_weak_ref(this, false));
+            }
+            LAST_BLOCK_ID.store(block_id, atomic::Ordering::Relaxed);
         }
-        LAST_BLOCK_ID.store(block_id, atomic::Ordering::Relaxed);
-    }
 
-    get_orig_fn!(GotoBlock, GotoBlockFn)(this, block_id, weaken_cy_spring, is_update, is_choice);
+        // `core::ipc.rs` jumps the story straight into this wrapper from the IPC plane, so this
+        // body is reached from more than its own trampoline. If `init` resolved no `GotoBlock`, the
+        // story stays on its current block instead of a call through 0 on the IPC thread (C1).
+        let Some(goto_block) = get_orig_fn_guarded!(GotoBlock, GotoBlockFn) else {
+            return;
+        };
+
+        goto_block(this, block_id, weaken_cy_spring, is_update, is_choice);
+    }
 }
 
 // The story timeline advances by `deltaTime * TimeScale`. `get_TimeScale` and
@@ -76,19 +85,27 @@ fn log_scale(calls: &AtomicUsize, name: &'static str, flag: bool, value: f32) {
 // disable the upstream story speed hook, and both `[DISABLED]` log lines read the same. The game's
 // own method name is unchanged in the resolution string and in the log label.
 type StoryTimelineController_GetTimeScaleByHighSpeedTypeFn = extern "C" fn(is_high_speed: bool) -> f32;
-extern "C" fn StoryTimelineController_GetTimeScaleByHighSpeedType(is_high_speed: bool) -> f32 {
-    let value = get_orig_fn!(StoryTimelineController_GetTimeScaleByHighSpeedType, StoryTimelineController_GetTimeScaleByHighSpeedTypeFn)(is_high_speed);
-    log_scale(&HIGH_SPEED_SCALE_CALLS, "StoryTimelineController::GetTimeScaleByHighSpeedType", is_high_speed, value);
+def_detour! {
+    StoryTimelineController_GetTimeScaleByHighSpeedType(is_high_speed: bool) answer -> f32 {
+            let value = get_orig_fn!(StoryTimelineController_GetTimeScaleByHighSpeedType, StoryTimelineController_GetTimeScaleByHighSpeedTypeFn)(is_high_speed);
+        // The scale is published before the logging half: a 0 time scale stops the story timeline,
+        // and a trip in the mod's own logging is not the mod's decision to freeze it.
+        answer.publish(value);
+        log_scale(&HIGH_SPEED_SCALE_CALLS, "StoryTimelineController::GetTimeScaleByHighSpeedType", is_high_speed, value);
 
-    value
+        value
+    }
 }
 
 type GetTimeScaleHighSpeedFn = extern "C" fn(is_high_speed: bool) -> f32;
-extern "C" fn GetTimeScaleHighSpeed(is_high_speed: bool) -> f32 {
-    let value = get_orig_fn!(GetTimeScaleHighSpeed, GetTimeScaleHighSpeedFn)(is_high_speed);
-    log_scale(&PLAIN_SCALE_CALLS, "StoryTimelineController::GetTimeScaleHighSpeed", is_high_speed, value);
+def_detour! {
+    GetTimeScaleHighSpeed(is_high_speed: bool) answer -> f32 {
+            let value = get_orig_fn!(GetTimeScaleHighSpeed, GetTimeScaleHighSpeedFn)(is_high_speed);
+        answer.publish(value);
+        log_scale(&PLAIN_SCALE_CALLS, "StoryTimelineController::GetTimeScaleHighSpeed", is_high_speed, value);
 
-    value
+        value
+    }
 }
 
 // Pass through, counted. The int this setter receives is frame count state on the same path the
@@ -102,11 +119,16 @@ extern "C" fn GetTimeScaleHighSpeed(is_high_speed: bool) -> f32 {
 // SkipFrameCount and SkipMotionFrame below: count the calls, log the value the game passed, and
 // hand it on untouched.
 type SetHighSpeedFrameCountFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
-extern "C" fn SetHighSpeedFrameCount(this: *mut Il2CppObject, frames: i32) {
-    mark_story_activity();
-    log_step(&SET_HIGH_SPEED_FRAMES_CALLS, "StoryTimelineController::SetHighSpeedFrameCount", frames);
+def_detour! {
+    SetHighSpeedFrameCount(this: *mut Il2CppObject, frames: i32) {
+            mark_story_activity();
+        log_step(&SET_HIGH_SPEED_FRAMES_CALLS, "StoryTimelineController::SetHighSpeedFrameCount", frames);
 
-    get_orig_fn!(SetHighSpeedFrameCount, SetHighSpeedFrameCountFn)(this, frames);
+        get_orig_fn!(SetHighSpeedFrameCount, SetHighSpeedFrameCountFn)(this, frames);
+    }
+    bail {
+                get_orig_fn!(SetHighSpeedFrameCount, SetHighSpeedFrameCountFn)(this, frames)
+    }
 }
 
 // The high speed story path reports its next step through two reference parameters, so both
@@ -127,29 +149,31 @@ static REF_LOGGED: AtomicUsize = AtomicUsize::new(0);
 static NULL_REF_WARNED: AtomicBool = AtomicBool::new(false);
 
 type GetNextFrameCountHighSpeedFn = extern "C" fn(this: *mut Il2CppObject, frames: *mut f32, count: *mut i32);
-extern "C" fn GetNextFrameCount_HighSpeed(this: *mut Il2CppObject, frames: *mut f32, count: *mut i32) {
-    count_step(&NEXT_FRAME_CALLS, "StoryTimelineController::GetNextFrameCount_HighSpeed");
+def_detour! {
+    GetNextFrameCount_HighSpeed(this: *mut Il2CppObject, frames: *mut f32, count: *mut i32) {
+            count_step(&NEXT_FRAME_CALLS, "StoryTimelineController::GetNextFrameCount_HighSpeed");
 
-    get_orig_fn!(GetNextFrameCount_HighSpeed, GetNextFrameCountHighSpeedFn)(this, frames, count);
+        get_orig_fn!(GetNextFrameCount_HighSpeed, GetNextFrameCountHighSpeedFn)(this, frames, count);
 
-    if frames.is_null() || count.is_null() {
-        if !NULL_REF_WARNED.swap(true, atomic::Ordering::AcqRel) {
-            warn!("StoryTimelineController::GetNextFrameCount_HighSpeed returned a null reference, leaving the path alone");
+        if frames.is_null() || count.is_null() {
+            if !NULL_REF_WARNED.swap(true, atomic::Ordering::AcqRel) {
+                warn!("StoryTimelineController::GetNextFrameCount_HighSpeed returned a null reference, leaving the path alone");
+            }
+
+            return;
         }
 
-        return;
-    }
+        // Read only: the caller's storage keeps whatever the game put in it.
+        let (raw_frames, raw_count) = unsafe { (*frames, *count) };
 
-    // Read only: the caller's storage keeps whatever the game put in it.
-    let (raw_frames, raw_count) = unsafe { (*frames, *count) };
+        let seen = REF_LOGGED.fetch_add(1, atomic::Ordering::Relaxed);
 
-    let seen = REF_LOGGED.fetch_add(1, atomic::Ordering::Relaxed);
-
-    if seen < REF_LOG_LIMIT {
-        debug!(
-            "StoryTimelineController::GetNextFrameCount_HighSpeed frames {raw_frames}, count {raw_count} (story x{}, both passed through)",
-            AnimationSpeed::factor(STORY)
-        );
+        if seen < REF_LOG_LIMIT {
+            debug!(
+                "StoryTimelineController::GetNextFrameCount_HighSpeed frames {raw_frames}, count {raw_count} (story x{}, both passed through)",
+                AnimationSpeed::factor(STORY)
+            );
+        }
     }
 }
 
@@ -193,19 +217,29 @@ fn log_step(calls: &AtomicUsize, name: &'static str, value: i32) {
 // (133, 243, 161, 263, 691, 163) read like frame targets inside the timeline rather than wait
 // lengths, so there is no multiplier here that is safe. Every argument is passed through untouched.
 type SkipFrameCountFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, flag1: bool, flag2: bool);
-extern "C" fn SkipFrameCount(this: *mut Il2CppObject, frames: i32, flag1: bool, flag2: bool) {
-    mark_story_activity();
-    log_step(&SKIP_FRAME_CALLS, "StoryTimelineController::SkipFrameCount", frames);
+def_detour! {
+    SkipFrameCount(this: *mut Il2CppObject, frames: i32, flag1: bool, flag2: bool) {
+            mark_story_activity();
+        log_step(&SKIP_FRAME_CALLS, "StoryTimelineController::SkipFrameCount", frames);
 
-    get_orig_fn!(SkipFrameCount, SkipFrameCountFn)(this, frames, flag1, flag2);
+        get_orig_fn!(SkipFrameCount, SkipFrameCountFn)(this, frames, flag1, flag2);
+    }
+    bail {
+                get_orig_fn!(SkipFrameCount, SkipFrameCountFn)(this, frames, flag1, flag2)
+    }
 }
 
 type SkipMotionFrameFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
-extern "C" fn SkipMotionFrame(this: *mut Il2CppObject, frames: i32) {
-    mark_story_activity();
-    log_step(&SKIP_MOTION_CALLS, "StoryTimelineController::SkipMotionFrame", frames);
+def_detour! {
+    SkipMotionFrame(this: *mut Il2CppObject, frames: i32) {
+            mark_story_activity();
+        log_step(&SKIP_MOTION_CALLS, "StoryTimelineController::SkipMotionFrame", frames);
 
-    get_orig_fn!(SkipMotionFrame, SkipMotionFrameFn)(this, frames);
+        get_orig_fn!(SkipMotionFrame, SkipMotionFrameFn)(this, frames);
+    }
+    bail {
+                get_orig_fn!(SkipMotionFrame, SkipMotionFrameFn)(this, frames)
+    }
 }
 
 // The game holds its story high speed mode in a static field of StoryTimelineController and
@@ -283,13 +317,15 @@ static HIGH_SPEED_WAS_SET: AtomicBool = AtomicBool::new(false);
 // path compares its applied marker against. Without this detour no version ever moves and the
 // engage path writes once, which is what a session that turned the option on after install gets.
 type SetHighSpeedTypeFn = extern "C" fn(high_speed_type: i32);
-extern "C" fn SetHighSpeedType(high_speed_type: i32) {
-    if !HIGH_SPEED_OUR_WRITE.load(atomic::Ordering::Relaxed) {
-        GAME_HIGH_SPEED_TYPE.store(high_speed_type, atomic::Ordering::Relaxed);
-        GAME_HIGH_SPEED_GENERATION.fetch_add(1, atomic::Ordering::Relaxed);
-    }
+def_detour! {
+    SetHighSpeedType(high_speed_type: i32) {
+            if !HIGH_SPEED_OUR_WRITE.load(atomic::Ordering::Relaxed) {
+            GAME_HIGH_SPEED_TYPE.store(high_speed_type, atomic::Ordering::Relaxed);
+            GAME_HIGH_SPEED_GENERATION.fetch_add(1, atomic::Ordering::Relaxed);
+        }
 
-    get_orig_fn!(SetHighSpeedType, SetHighSpeedTypeFn)(high_speed_type);
+        get_orig_fn!(SetHighSpeedType, SetHighSpeedTypeFn)(high_speed_type);
+    }
 }
 
 // The only path that writes the static. It marks the write so the recorder above keeps the

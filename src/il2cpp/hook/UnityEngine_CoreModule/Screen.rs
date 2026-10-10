@@ -42,7 +42,15 @@ pub fn apply_auto_full_screen(mut width: i32, mut height: i32) -> bool {
         numerator: preferred_res.refresh_rate as u32,
         denominator: 1
     };
-    get_orig_fn!(SetResolution_Injected, SetResolutionInjectedFn)(width, height, full_screen_mode, &preferred_refresh_rate);
+
+    // `windows/hachimi_impl.rs` calls this helper from its own path, not through this hook's
+    // trampoline, so an unresolved icall is reachable here (C1). Answering false is what both
+    // callers already handle: the window is left as it is.
+    let Some(set_resolution) = get_orig_fn_guarded!(SetResolution_Injected, SetResolutionInjectedFn) else {
+        return false;
+    };
+
+    set_resolution(width, height, full_screen_mode, &preferred_refresh_rate);
 
     true
 }
@@ -51,35 +59,45 @@ pub fn apply_auto_full_screen(mut width: i32, mut height: i32) -> bool {
 type SetResolutionInjectedFn = extern "C" fn(width: i32, height: i32, fullscreen_mode: i32, preferred_refresh_rate: *const RefreshRate);
 #[cfg(target_os = "windows")]
 pub fn set_resolution_direct(width: i32, height: i32, fullscreen_mode: i32, preferred_refresh_rate: *const RefreshRate) {
-    get_orig_fn!(SetResolution_Injected, SetResolutionInjectedFn)(width, height, fullscreen_mode, preferred_refresh_rate);
+    // Called from a window message in `windows/wnd_hook.rs`. Nothing is armed for this icall
+    // until `init` resolves it, and a window procedure has no barrier under it.
+    let Some(set_resolution) = get_orig_fn_guarded!(SetResolution_Injected, SetResolutionInjectedFn) else {
+        return;
+    };
+
+    set_resolution(width, height, fullscreen_mode, preferred_refresh_rate);
 }
 
-#[cfg(target_os = "windows")]
-extern "C" fn SetResolution_Injected(width: i32, height: i32, full_screen_mode: i32, preferred_refresh_rate: *const RefreshRate) {
-    let windows_config = &Hachimi::instance().config.load().windows;
-    if windows_config.freeform_window {
-        crate::il2cpp::hook::umamusume::StandaloneWindowResize::set_is_prevent_reshape(true);
-        return;
-    }
-
-    if windows_config.auto_full_screen {
-        if apply_auto_full_screen(width, height) {
+def_detour! {
+    #[cfg(target_os = "windows")]
+    SetResolution_Injected(width: i32, height: i32, full_screen_mode: i32, preferred_refresh_rate: *const RefreshRate) {
+            let windows_config = &Hachimi::instance().config.load().windows;
+        if windows_config.freeform_window {
+            crate::il2cpp::hook::umamusume::StandaloneWindowResize::set_is_prevent_reshape(true);
             return;
         }
-    }
 
-    get_orig_fn!(SetResolution_Injected, SetResolutionInjectedFn)(width, height, full_screen_mode, preferred_refresh_rate);
+        if windows_config.auto_full_screen {
+            if apply_auto_full_screen(width, height) {
+                return;
+            }
+        }
+
+        get_orig_fn!(SetResolution_Injected, SetResolutionInjectedFn)(width, height, full_screen_mode, preferred_refresh_rate);
+    }
 }
 
 #[cfg(target_os = "windows")]
 type RequestOrientationFn = extern "C" fn(orientation: ScreenOrientation);
-#[cfg(target_os = "windows")]
-extern "C" fn RequestOrientation(orientation: ScreenOrientation) {
-    if Hachimi::instance().config.load().windows.freeform_window {
-        return;
-    }
+def_detour! {
+    #[cfg(target_os = "windows")]
+    RequestOrientation(orientation: ScreenOrientation) {
+            if Hachimi::instance().config.load().windows.freeform_window {
+            return;
+        }
 
-    get_orig_fn!(RequestOrientation, RequestOrientationFn)(orientation);
+        get_orig_fn!(RequestOrientation, RequestOrientationFn)(orientation);
+    }
 }
 
 pub fn init(UnityEngine_CoreModule: *const Il2CppImage) {

@@ -33,10 +33,12 @@ pub fn raise_shadow_distance_to_floor(value: f32, floor: f32) -> f32 {
 }
 
 type SetMaxShadowDistanceFn = extern "C" fn(this: *mut Il2CppObject, value: f32);
-extern "C" fn set_MaxShadowDistance(this: *mut Il2CppObject, value: f32) {
-    let floor = Hachimi::instance().config.load().shadow_distance;
-    let value = raise_shadow_distance_to_floor(value, floor);
-    get_orig_fn!(set_MaxShadowDistance, SetMaxShadowDistanceFn)(this, value)
+def_detour! {
+    set_MaxShadowDistance(this: *mut Il2CppObject, value: f32) {
+            let floor = Hachimi::instance().config.load().shadow_distance;
+        let value = raise_shadow_distance_to_floor(value, floor);
+        get_orig_fn!(set_MaxShadowDistance, SetMaxShadowDistanceFn)(this, value)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

@@ -42,23 +42,27 @@ pub fn quick_open(dialog_title: &str, url: &str) {
 }
 
 type GetUrlFn = extern "C" fn(this: *mut Il2CppObject, url_type: i32) -> *mut Il2CppString;
-extern "C" fn GetUrl(this: *mut Il2CppObject, url_type: i32) -> *mut Il2CppString {
-    if url_type == WebViewDefine::Url_Update {
-        if let Some(news_url) = &Hachimi::instance().localized_data.load().config.news_url {
-            return news_url.to_il2cpp_string();
+def_detour! {
+    GetUrl(this: *mut Il2CppObject, url_type: i32) -> *mut Il2CppString {
+            if url_type == WebViewDefine::Url_Update {
+            if let Some(news_url) = &Hachimi::instance().localized_data.load().config.news_url {
+                return news_url.to_il2cpp_string();
+            }
         }
-    }
 
-    get_orig_fn!(GetUrl, GetUrlFn)(this, url_type)
+        get_orig_fn!(GetUrl, GetUrlFn)(this, url_type)
+    }
 }
 
 #[cfg(target_os = "windows")]
 type GetGachaUrlFn = extern "C" fn(gacha_id: i32, stepup_id: i32) -> *mut Il2CppString;
-#[cfg(target_os = "windows")]
-extern "C" fn GetGachaUrl(gacha_id: i32, stepup_id: i32) -> *mut Il2CppString {
-    let url = get_orig_fn!(GetGachaUrl, GetGachaUrlFn)(gacha_id, stepup_id);
-    crate::windows::webview::add_gacha_url(url, gacha_id);
-    url
+def_detour! {
+    #[cfg(target_os = "windows")]
+    GetGachaUrl(gacha_id: i32, stepup_id: i32) -> *mut Il2CppString {
+            let url = get_orig_fn!(GetGachaUrl, GetGachaUrlFn)(gacha_id, stepup_id);
+        crate::windows::webview::add_gacha_url(url, gacha_id);
+        url
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

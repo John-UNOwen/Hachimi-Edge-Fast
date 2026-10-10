@@ -90,46 +90,52 @@ fn UpdateItemCommon(this: *mut Il2CppObject, _skill_info: *mut Il2CppObject, ori
 }
 
 type UpdateItemJpFn = extern "C" fn(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, is_plate_effect_enable: bool, adjuster_data: *mut Il2CppObject, resource_hash: i32, on_click_button: *mut Il2CppObject);
-extern "C" fn UpdateItemJp(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, is_plate_effect_enable: bool, adjuster_data: *mut Il2CppObject, resource_hash: i32, on_click_button: *mut Il2CppObject) {
-    let effective_on_click = if Hachimi::instance().config.load().skill_info_dialog && !skill_info.is_null() {
-        let on_click_fn: fn() = unsafe { std::mem::transmute(on_click_skill_button as *const ()) };
-        create_delegate(unsafe { ACTION_INT_CLASS }, 1, on_click_fn).unwrap() as *mut Il2CppObject
-    } else {
-        on_click_button
-    };
+def_detour! {
+    UpdateItemJp(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, is_plate_effect_enable: bool, adjuster_data: *mut Il2CppObject, resource_hash: i32, on_click_button: *mut Il2CppObject) {
+            let effective_on_click = if Hachimi::instance().config.load().skill_info_dialog && !skill_info.is_null() {
+            let on_click_fn: fn() = unsafe { std::mem::transmute(on_click_skill_button as *const ()) };
+            create_delegate(unsafe { ACTION_INT_CLASS }, 1, on_click_fn).unwrap() as *mut Il2CppObject
+        } else {
+            on_click_button
+        };
 
-    UpdateItemCommon(this, skill_info, || {
-        get_orig_fn!(UpdateItemJp, UpdateItemJpFn)(this, skill_info, is_plate_effect_enable, adjuster_data, resource_hash, effective_on_click);
-    });
+        UpdateItemCommon(this, skill_info, || {
+            get_orig_fn!(UpdateItemJp, UpdateItemJpFn)(this, skill_info, is_plate_effect_enable, adjuster_data, resource_hash, effective_on_click);
+        });
+    }
 }
 
 // Action<int>
-extern "C" fn on_click_skill_button(_ptr: usize, skill_id: i32) {
-    info!("on_click_skill_button skill_id {}", skill_id);
-    let to_s = |opt_ptr: Option<*mut Il2CppString>| unsafe {
-        opt_ptr.and_then(|p| p.as_ref()).map(|s| s.as_utf16str().to_string())
-    };
+def_detour! {
+    on_click_skill_button(_ptr: usize, skill_id: i32) {
+            info!("on_click_skill_button skill_id {}", skill_id);
+        let to_s = |opt_ptr: Option<*mut Il2CppString>| unsafe {
+            opt_ptr.and_then(|p| p.as_ref()).map(|s| s.as_utf16str().to_string())
+        };
 
-    let skill_name = to_s(TextDataQuery::get_skill_name(skill_id)).unwrap_or_else(|| to_s(Some(MasterDataUtil::GetSkillName(skill_id))).unwrap());
-    let skill_desc = to_s(TextDataQuery::get_skill_desc(skill_id)).unwrap_or_else(|| to_s(
-        Some(Hachimi::instance().skill_info.load().get_desc(skill_id).to_il2cpp_string())
-    ).unwrap());
+        let skill_name = to_s(TextDataQuery::get_skill_name(skill_id)).unwrap_or_else(|| to_s(Some(MasterDataUtil::GetSkillName(skill_id))).unwrap());
+        let skill_desc = to_s(TextDataQuery::get_skill_desc(skill_id)).unwrap_or_else(|| to_s(
+            Some(Hachimi::instance().skill_info.load().get_desc(skill_id).to_il2cpp_string())
+        ).unwrap());
 
-    let typ = if str_visual_len(skill_desc.as_str()) <= 250 {
-        DialogCommon::FormType::SMALL_ONE_BUTTON
-    } else if str_visual_len(skill_desc.as_str()) <= 490 {
-        DialogCommon::FormType::MIDDLE_ONE_BUTTON
-    } else {
-        DialogCommon::FormType::BIG_ONE_BUTTON
-    };
-    DialogManager::single_button_message(&skill_name, &skill_desc.replace("\\n", "\n"), typ);
+        let typ = if str_visual_len(skill_desc.as_str()) <= 250 {
+            DialogCommon::FormType::SMALL_ONE_BUTTON
+        } else if str_visual_len(skill_desc.as_str()) <= 490 {
+            DialogCommon::FormType::MIDDLE_ONE_BUTTON
+        } else {
+            DialogCommon::FormType::BIG_ONE_BUTTON
+        };
+        DialogManager::single_button_message(&skill_name, &skill_desc.replace("\\n", "\n"), typ);
+    }
 }
 
 type UpdateItemGlobalTwFn = extern "C" fn(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, is_plate_effect_enable: bool, resource_hash: i32);
-extern "C" fn UpdateItemGlobalTw(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, is_plate_effect_enable: bool, resource_hash: i32) {
-    UpdateItemCommon(this, skill_info, || {
-        get_orig_fn!(UpdateItemGlobalTw, UpdateItemGlobalTwFn)(this, skill_info, is_plate_effect_enable, resource_hash);
-    });
+def_detour! {
+    UpdateItemGlobalTw(this: *mut Il2CppObject, skill_info: *mut Il2CppObject, is_plate_effect_enable: bool, resource_hash: i32) {
+            UpdateItemCommon(this, skill_info, || {
+            get_orig_fn!(UpdateItemGlobalTw, UpdateItemGlobalTwFn)(this, skill_info, is_plate_effect_enable, resource_hash);
+        });
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {
@@ -150,7 +156,13 @@ pub fn init(umamusume: *const Il2CppImage) {
     unsafe {
         if Hachimi::instance().game.region == Region::Japan {
             _ONCLICKBUTTON_FIELD = get_field_from_name(PartsSingleModeSkillListItem, c"_onClickButton");
-            ACTION_INT_CLASS = il2cpp_class_from_il2cpp_type((*_ONCLICKBUTTON_FIELD).type_);
+
+            // C9: a handle `get_field_from_name` could not find has no `type_` to read - asking the
+            // game for one is a load from address 8 inside `init`. The class stays null, which is
+            // what every user of it already treats as "no Action<int> here".
+            if !_ONCLICKBUTTON_FIELD.is_null() {
+                ACTION_INT_CLASS = il2cpp_class_from_il2cpp_type((*_ONCLICKBUTTON_FIELD).type_);
+            }
         }
 
         // PartsSingleModeSkillListItem

@@ -34,24 +34,30 @@ impl_addr_wrapper_fn!(Pause, PAUSE_ADDR, (), this: *mut Il2CppObject, sw: bool);
 
 // public Void Stop()
 type StopHookFn = extern "C" fn(this: *mut Il2CppObject);
-pub extern "C" fn StopHook(this: *mut Il2CppObject) {
-    get_orig_fn!(StopHook, StopHookFn)(this);
-    captions::Captions::cleanup();
+def_detour! {
+    pub StopHook(this: *mut Il2CppObject) {
+            get_orig_fn!(StopHook, StopHookFn)(this);
+        captions::Captions::cleanup();
+    }
 }
 
 // public void StopWithoutReleaseTime()
 pub type StopWithoutReleaseTimeHookFn = extern "C" fn(this: *mut Il2CppObject);
-pub extern "C" fn StopWithoutReleaseTimeHook(this: *mut Il2CppObject) {
-    get_orig_fn!(StopWithoutReleaseTimeHook, StopWithoutReleaseTimeHookFn)(this);
-    captions::Captions::cleanup();
+def_detour! {
+    pub StopWithoutReleaseTimeHook(this: *mut Il2CppObject) {
+            get_orig_fn!(StopWithoutReleaseTimeHook, StopWithoutReleaseTimeHookFn)(this);
+        captions::Captions::cleanup();
+    }
 }
 
 // public Void Pause() { }
 type PauseHookFn = extern "C" fn(this: *mut Il2CppObject, sw: bool);
-pub extern "C" fn PauseHook(this: *mut Il2CppObject, sw: bool) {
-    get_orig_fn!(PauseHook, PauseHookFn)(this, sw);
-    if !sw {
-        captions::Captions::cleanup();
+def_detour! {
+    pub PauseHook(this: *mut Il2CppObject, sw: bool) {
+            get_orig_fn!(PauseHook, PauseHookFn)(this, sw);
+        if !sw {
+            captions::Captions::cleanup();
+        }
     }
 }
 

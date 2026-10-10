@@ -22,22 +22,24 @@ const SKILL_TEXT_MAX_HEIGHT: f32 = 65.0;
 
 type SetUpCharacterLimitBreakSkillFn =
     extern "C" fn(this: *mut Il2CppObject, cardRairtyData: *mut Il2CppObject, nextCardRairtyData: *mut Il2CppObject, atlas: *mut Il2CppObject);
-extern "C" fn SetUpCharacterLimitBreakSkill(
+def_detour! {
+    SetUpCharacterLimitBreakSkill(
     this: *mut Il2CppObject,
     cardRairtyData: *mut Il2CppObject,
     nextCardRairtyData: *mut Il2CppObject,
     atlas: *mut Il2CppObject,
 ) {
-    get_orig_fn!(SetUpCharacterLimitBreakSkill, SetUpCharacterLimitBreakSkillFn)(this, cardRairtyData, nextCardRairtyData, atlas);
+            get_orig_fn!(SetUpCharacterLimitBreakSkill, SetUpCharacterLimitBreakSkillFn)(this, cardRairtyData, nextCardRairtyData, atlas);
 
-    let text = get_nameText(this);
-    if !text.is_null() {
-        let fitter = get_nameContentsSizeFitter(this);
-        if !fitter.is_null() {
-            Behaviour::set_enabled(fitter, false);
+        let text = get_nameText(this);
+        if !text.is_null() {
+            let fitter = get_nameContentsSizeFitter(this);
+            if !fitter.is_null() {
+                Behaviour::set_enabled(fitter, false);
+            }
+            utils::adjust_transform_size(text, SKILL_TEXT_MAX_WIDTH, SKILL_TEXT_MAX_HEIGHT);
+            Text::set_best_fit_downscale(text);
         }
-        utils::adjust_transform_size(text, SKILL_TEXT_MAX_WIDTH, SKILL_TEXT_MAX_HEIGHT);
-        Text::set_best_fit_downscale(text);
     }
 }
 

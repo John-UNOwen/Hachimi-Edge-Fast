@@ -37,42 +37,50 @@ fn freeform_enabled() -> bool {
 }
 
 type GetLimitSizeFn = extern "C" fn() -> Vector2_t;
-extern "C" fn GetLimitSize() -> Vector2_t {
-    preserve_hook_identity(&GET_LIMIT_SIZE_HOOK_ID);
-    if freeform_enabled() {
-        return Vector2_t { x: f32::MAX, y: f32::MAX };
-    }
+def_detour! {
+    GetLimitSize() -> Vector2_t {
+            preserve_hook_identity(&GET_LIMIT_SIZE_HOOK_ID);
+        if freeform_enabled() {
+            return Vector2_t { x: f32::MAX, y: f32::MAX };
+        }
 
-    get_orig_fn!(GetLimitSize, GetLimitSizeFn)()
+        get_orig_fn!(GetLimitSize, GetLimitSizeFn)()
+    }
 }
 
 type NoArgsFn = extern "C" fn();
-extern "C" fn DisableMaximizebox() {
-    preserve_hook_identity(&DISABLE_MAXIMIZEBOX_HOOK_ID);
-    if freeform_enabled() {
-        crate::windows::wnd_hook::apply_freeform_window_style();
-        return;
-    }
+def_detour! {
+    DisableMaximizebox() {
+            preserve_hook_identity(&DISABLE_MAXIMIZEBOX_HOOK_ID);
+        if freeform_enabled() {
+            crate::windows::wnd_hook::apply_freeform_window_style();
+            return;
+        }
 
-    get_orig_fn!(DisableMaximizebox, NoArgsFn)();
+        get_orig_fn!(DisableMaximizebox, NoArgsFn)();
+    }
 }
 
 type ResizeFn = extern "C" fn(width: f32, height: f32);
-extern "C" fn ReshapeAspectRatio(width: f32, height: f32) {
-    preserve_hook_identity(&RESHAPE_ASPECT_RATIO_HOOK_ID);
-    if !freeform_enabled() {
-        get_orig_fn!(ReshapeAspectRatio, ResizeFn)(width, height);
+def_detour! {
+    ReshapeAspectRatio(width: f32, height: f32) {
+            preserve_hook_identity(&RESHAPE_ASPECT_RATIO_HOOK_ID);
+        if !freeform_enabled() {
+            get_orig_fn!(ReshapeAspectRatio, ResizeFn)(width, height);
+        }
     }
 }
 
-extern "C" fn KeepAspectRatio(width: f32, height: f32) {
-    preserve_hook_identity(&KEEP_ASPECT_RATIO_HOOK_ID);
-    if freeform_enabled() {
-        crate::windows::wnd_hook::apply_freeform_window_style();
-        return;
-    }
+def_detour! {
+    KeepAspectRatio(width: f32, height: f32) {
+            preserve_hook_identity(&KEEP_ASPECT_RATIO_HOOK_ID);
+        if freeform_enabled() {
+            crate::windows::wnd_hook::apply_freeform_window_style();
+            return;
+        }
 
-    get_orig_fn!(KeepAspectRatio, ResizeFn)(width, height);
+        get_orig_fn!(KeepAspectRatio, ResizeFn)(width, height);
+    }
 }
 
 pub fn update_window_state(client_width: i32, client_height: i32, window_width: i32, window_height: i32) {

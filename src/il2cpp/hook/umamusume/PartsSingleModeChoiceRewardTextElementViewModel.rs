@@ -10,16 +10,26 @@ use crate::{
 
 type GetParameterValueTextFn =
     extern "C" fn(this: *mut Il2CppObject, param: i32) -> *mut Il2CppString;
-extern "C" fn GetParameterValueText(this: *mut Il2CppObject, param: i32) -> *mut Il2CppString {
-    let mut text = get_orig_fn!(GetParameterValueText, GetParameterValueTextFn)(this, param);
-    let utf_str = unsafe { (*text).as_utf16str() };
-    if utf_str.as_slice().contains(&36) {
-        text = Hachimi::instance()
-            .template_parser
-            .eval_with_context(&utf_str.to_string(), &mut IgnoreTGFiltersContext())
-            .to_il2cpp_string();
+def_detour! {
+    GetParameterValueText(this: *mut Il2CppObject, param: i32) -> *mut Il2CppString {
+            let mut text = get_orig_fn!(GetParameterValueText, GetParameterValueTextFn)(this, param);
+
+        // C9: the value is whatever the game's own parameter getter answered, and a parameter with
+        // no text is a legitimate null answer. There is no string to look for a template in, and the
+        // game's own value is what the caller is owed.
+        if text.is_null() {
+            return text;
+        }
+
+        let utf_str = unsafe { (*text).as_utf16str() };
+        if utf_str.as_slice().contains(&36) {
+            text = Hachimi::instance()
+                .template_parser
+                .eval_with_context(&utf_str.to_string(), &mut IgnoreTGFiltersContext())
+                .to_il2cpp_string();
+        }
+        text
     }
-    text
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

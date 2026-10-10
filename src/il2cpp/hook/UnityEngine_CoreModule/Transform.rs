@@ -98,58 +98,79 @@ type TransformLookAtFn = extern "C" fn(
 #[cfg(target_os = "windows")]
 type TransformSetQuaternionFn = extern "C" fn(this: *mut Il2CppObject, value: *mut Quaternion_t);
 
-#[cfg(target_os = "windows")]
-extern "C" fn Transform_set_position_Injected(this: *mut Il2CppObject, value: *mut Vector3_t) {
-    if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) &&
-        free_camera::is_scene_enabled(CameraScene::Race) &&
-        !value.is_null()
-    {
-        unsafe { *value = free_camera::race_camera_pos(*value); }
+def_detour! {
+    #[cfg(target_os = "windows")]
+    Transform_set_position_Injected(this: *mut Il2CppObject, value: *mut Vector3_t) {
+            if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) &&
+            free_camera::is_scene_enabled(CameraScene::Race) &&
+            !value.is_null()
+        {
+            unsafe { *value = free_camera::race_camera_pos(*value); }
+        }
+        get_orig_fn!(Transform_set_position_Injected, TransformSetVectorFn)(this, value);
     }
-    get_orig_fn!(Transform_set_position_Injected, TransformSetVectorFn)(this, value);
 }
 
-#[cfg(target_os = "windows")]
-extern "C" fn Transform_set_localPosition_Injected(this: *mut Il2CppObject, value: *mut Vector3_t) {
-    if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) &&
-        free_camera::is_scene_enabled(CameraScene::Race) &&
-        !value.is_null()
-    {
-        unsafe { *value = free_camera::race_camera_pos(*value); }
+def_detour! {
+    #[cfg(target_os = "windows")]
+    Transform_set_localPosition_Injected(this: *mut Il2CppObject, value: *mut Vector3_t) {
+            if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) &&
+            free_camera::is_scene_enabled(CameraScene::Race) &&
+            !value.is_null()
+        {
+            unsafe { *value = free_camera::race_camera_pos(*value); }
+        }
+        get_orig_fn!(Transform_set_localPosition_Injected, TransformSetVectorFn)(this, value);
     }
-    get_orig_fn!(Transform_set_localPosition_Injected, TransformSetVectorFn)(this, value);
 }
 
-#[cfg(target_os = "windows")]
-extern "C" fn Transform_Internal_LookAt_Injected(
+def_detour! {
+    #[cfg(target_os = "windows")]
+    Transform_Internal_LookAt_Injected(
     this: *mut Il2CppObject,
     world_position: *mut Vector3_t,
     world_up: *mut Vector3_t,
 ) {
-    if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) && free_camera::is_scene_enabled(CameraScene::Race) {
-        if let Some(mut rot) = free_camera::camera_rotation() {
-            get_orig_fn!(Transform_set_rotation_Injected, TransformSetQuaternionFn)(this, &mut rot);
+            if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) && free_camera::is_scene_enabled(CameraScene::Race) {
+            if let Some(mut rot) = free_camera::camera_rotation() {
+                // A second hook's trampoline, read from this hook's body. `set_rotation_Injected`
+                // is its own icall and `init` arms it only if it resolves, while this hook can be
+                // armed and running on every LookAt in a race scene - so the two are not in step,
+                // and 0 here would be a jump on the transform path (C1). With no rotation target
+                // to write, fall through and let the game aim the transform by the position this
+                // body already rewrote above.
+                if let Some(set_rotation) = get_orig_fn_guarded!(Transform_set_rotation_Injected, TransformSetQuaternionFn) {
+                    set_rotation(this, &mut rot);
+                    return;
+                }
+            }
+
+            if !world_position.is_null() {
+                unsafe { *world_position = free_camera::camera_look_at(); }
+            }
+        }
+        get_orig_fn!(Transform_Internal_LookAt_Injected, TransformLookAtFn)(this, world_position, world_up);
+    }
+}
+
+def_detour! {
+    #[cfg(target_os = "windows")]
+    Transform_set_rotation_Injected(this: *mut Il2CppObject, value: *mut Quaternion_t) {
+            get_orig_fn!(Transform_set_rotation_Injected, TransformSetQuaternionFn)(this, value);
+    }
+    bail {
+                get_orig_fn!(Transform_set_rotation_Injected, TransformSetQuaternionFn)(this, value)
+    }
+}
+
+def_detour! {
+    #[cfg(target_os = "windows")]
+    Transform_set_localRotation_Injected(this: *mut Il2CppObject, value: *mut Quaternion_t) {
+            if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) && free_camera::is_scene_enabled(CameraScene::Race) {
             return;
         }
-
-        if !world_position.is_null() {
-            unsafe { *world_position = free_camera::camera_look_at(); }
-        }
+        get_orig_fn!(Transform_set_localRotation_Injected, TransformSetQuaternionFn)(this, value);
     }
-    get_orig_fn!(Transform_Internal_LookAt_Injected, TransformLookAtFn)(this, world_position, world_up);
-}
-
-#[cfg(target_os = "windows")]
-extern "C" fn Transform_set_rotation_Injected(this: *mut Il2CppObject, value: *mut Quaternion_t) {
-    get_orig_fn!(Transform_set_rotation_Injected, TransformSetQuaternionFn)(this, value);
-}
-
-#[cfg(target_os = "windows")]
-extern "C" fn Transform_set_localRotation_Injected(this: *mut Il2CppObject, value: *mut Quaternion_t) {
-    if UPDATE_RACE_CAMERA.load(Ordering::Relaxed) && free_camera::is_scene_enabled(CameraScene::Race) {
-        return;
-    }
-    get_orig_fn!(Transform_set_localRotation_Injected, TransformSetQuaternionFn)(this, value);
 }
 
 pub fn init(UnityEngine_CoreModule: *const Il2CppImage) {

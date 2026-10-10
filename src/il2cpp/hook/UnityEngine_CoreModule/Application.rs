@@ -3,23 +3,32 @@ use std::sync::{atomic};
 use crate::{core::Hachimi, il2cpp::{api::il2cpp_resolve_icall, symbols::get_method_addr, types::*}};
 
 type SetTargetFrameRateFn = extern "C" fn(value: i32);
-pub extern "C" fn set_targetFrameRate(mut value: i32) {
-    #[cfg(target_os = "windows")]
-    LAST_GAME_FPS.store(value, atomic::Ordering::Relaxed);
+def_detour! {
+    pub set_targetFrameRate(mut value: i32) {
+            #[cfg(target_os = "windows")]
+        LAST_GAME_FPS.store(value, atomic::Ordering::Relaxed);
 
-    let hachimi = Hachimi::instance();
-    let target_fps = hachimi.target_fps.load(atomic::Ordering::Relaxed);
-    if target_fps != -1 {
-        value = target_fps;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let unfocused_fps = hachimi.target_fps_unfocused.load(atomic::Ordering::Relaxed);
-        if unfocused_fps != -1 && crate::windows::wnd_hook::window_unfocused() {
-            value = unfocused_fps;
+        let hachimi = Hachimi::instance();
+        let target_fps = hachimi.target_fps.load(atomic::Ordering::Relaxed);
+        if target_fps != -1 {
+            value = target_fps;
         }
+        #[cfg(target_os = "windows")]
+        {
+            let unfocused_fps = hachimi.target_fps_unfocused.load(atomic::Ordering::Relaxed);
+            if unfocused_fps != -1 && crate::windows::wnd_hook::window_unfocused() {
+                value = unfocused_fps;
+            }
+        }
+        // `poke_target_frame_rate` - the GUI's frame-rate knob - calls this wrapper from the
+        // overlay thread, so the body runs outside its own trampoline. When the icall never
+        // resolved there is nothing to aim at, and the game keeps the frame rate it chose (C1).
+        let Some(set_target_frame_rate) = get_orig_fn_guarded!(set_targetFrameRate, SetTargetFrameRateFn) else {
+            return;
+        };
+
+        set_target_frame_rate(value);
     }
-    get_orig_fn!(set_targetFrameRate, SetTargetFrameRateFn)(value);
 }
 
 #[cfg(target_os = "windows")]
@@ -47,10 +56,20 @@ pub fn poke_target_frame_rate() {
 
 #[cfg(target_os = "windows")]
 type OpenURLFn = extern "C" fn(il2cpp_url:*mut Il2CppString);
-#[cfg(target_os = "windows")]
-pub extern "C" fn OpenURL(url: *mut Il2CppString){
-    if !crate::windows::webview::open(url){
-        get_orig_fn!(OpenURL, OpenURLFn)(url);
+def_detour! {
+    #[cfg(target_os = "windows")]
+    pub OpenURL(url: *mut Il2CppString) {
+            if !crate::windows::webview::open(url){
+            // Half the calls into this wrapper come from the GUI's own link buttons
+            // (`core::gui.rs`, the updater's deep link), not from this hook's trampoline. With the
+            // target unresolved there is no game opener to fall back to: the click does nothing,
+            // rather than jumping to 0 off the overlay thread (C1).
+            let Some(open_url) = get_orig_fn_guarded!(OpenURL, OpenURLFn) else {
+                return;
+            };
+
+            open_url(url);
+        }
     }
 }
 

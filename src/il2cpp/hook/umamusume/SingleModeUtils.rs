@@ -3,39 +3,46 @@ use crate::{core::{template, Hachimi}, il2cpp::{ext::{Il2CppStringExt, StringExt
 use super::{Localize, MasterSingleModeTurn::SingleModeTurn, TextId};
 
 type GetMonthTextByTurnFn = extern "C" fn(turn_set_id: i32, turn: i32) -> *mut Il2CppString;
-extern "C" fn GetMonthTextByTurn(turn_set_id: i32, turn: i32) -> *mut Il2CppString {
-    if let Some(format) = &Hachimi::instance().localized_data.load().config.month_text_format {
-        struct Context {
-            turn: *mut Il2CppObject
-        }
+def_detour! {
+    GetMonthTextByTurn(turn_set_id: i32, turn: i32) -> *mut Il2CppString {
+            if let Some(format) = &Hachimi::instance().localized_data.load().config.month_text_format {
+            struct Context {
+                turn: *mut Il2CppObject
+            }
 
-        impl template::Context for Context {
-            fn on_filter_eval(&mut self, _name: &str, args: &[template::Token]) -> Option<String> {
-                if args.len() != 0 { return None; }
-                match _name {
-                    "month" => {
-                        let text = GetMonthText(SingleModeTurn::get_Month(self.turn));
-                        Some(unsafe { (*text).as_utf16str().to_string() })
-                    },
-                    "half" => {
-                        let half = SingleModeTurn::get_Half(self.turn);
-                        let text = Localize::Get(TextId::from_name(
-                            if half == 1 { "SingleMode0237" } else { "SingleMode0238" }
-                        ));
-                        Some(unsafe { (*text).as_utf16str().to_string() })
-                    },
-                    _ => None
+            impl template::Context for Context {
+                fn on_filter_eval(&mut self, _name: &str, args: &[template::Token]) -> Option<String> {
+                    if args.len() != 0 { return None; }
+                    match _name {
+                        "month" => {
+                            let text = GetMonthText(SingleModeTurn::get_Month(self.turn));
+                            // Both arms read a string this function's own wrapper can hand back as
+                            // null when its target never resolved, and `Localize::Get` answers null
+                            // for a hook `init` did not install (C1). A template that cannot name
+                            // the month reports the filter as unresolved instead of dereferencing
+                            // nothing.
+                            unsafe { text.as_ref() }.map(|s| s.as_utf16str().to_string())
+                        },
+                        "half" => {
+                            let half = SingleModeTurn::get_Half(self.turn);
+                            let text = Localize::Get(TextId::from_name(
+                                if half == 1 { "SingleMode0237" } else { "SingleMode0238" }
+                            ));
+                            unsafe { text.as_ref() }.map(|s| s.as_utf16str().to_string())
+                        },
+                        _ => None
+                    }
                 }
             }
+
+            let turn = GetMasterTurn(turn_set_id, turn);
+            return Hachimi::instance().template_parser
+                .eval_with_context(format, &mut Context { turn })
+                .to_il2cpp_string()
         }
 
-        let turn = GetMasterTurn(turn_set_id, turn);
-        return Hachimi::instance().template_parser
-            .eval_with_context(format, &mut Context { turn })
-            .to_il2cpp_string()
+        get_orig_fn!(GetMonthTextByTurn, GetMonthTextByTurnFn)(turn_set_id, turn)
     }
-
-    get_orig_fn!(GetMonthTextByTurn, GetMonthTextByTurnFn)(turn_set_id, turn)
 }
 
 // MasterSingleModeTurn.SingleModeTurn

@@ -10,18 +10,20 @@ fn get__descText(this: *mut Il2CppObject) -> *mut Il2CppObject {
 }
 
 type UpdateCurrentFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn UpdateCurrent(this: *mut Il2CppObject) {
-    let name = get__nameText(this);
-    let desc = get__descText(this);
+def_detour! {
+    UpdateCurrent(this: *mut Il2CppObject) {
+            let name = get__nameText(this);
+        let desc = get__descText(this);
 
-    if !name.is_null() {
-        Text::set_best_fit_downscale(name);
-    }
-    if !desc.is_null() {
-        Text::set_best_fit_downscale(desc);
-    }
+        if !name.is_null() {
+            Text::set_best_fit_downscale(name);
+        }
+        if !desc.is_null() {
+            Text::set_best_fit_downscale(desc);
+        }
 
-    GallopUtil::without_text_wrap(|| get_orig_fn!(UpdateCurrent, UpdateCurrentFn)(this) );
+        GallopUtil::without_text_wrap(|| get_orig_fn!(UpdateCurrent, UpdateCurrentFn)(this) );
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

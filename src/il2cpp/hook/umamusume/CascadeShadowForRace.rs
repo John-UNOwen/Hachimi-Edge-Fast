@@ -5,9 +5,14 @@ use crate::{
 use super::CascadeShadow;
 
 type CascadeShadowForRace_GetShadowResolutionFn = extern "C" fn(this: *mut Il2CppObject, default_shadow_map_width: i32) -> i32;
-extern "C" fn CascadeShadowForRace_GetShadowResolution(this: *mut Il2CppObject, default_shadow_map_width: i32) -> i32 {
-    let orig = get_orig_fn!(CascadeShadowForRace_GetShadowResolution, CascadeShadowForRace_GetShadowResolutionFn)(this, default_shadow_map_width);
-    CascadeShadow::shadow_resolution(orig)
+def_detour! {
+    CascadeShadowForRace_GetShadowResolution(this: *mut Il2CppObject, default_shadow_map_width: i32) answer -> i32 {
+            let orig = get_orig_fn!(CascadeShadowForRace_GetShadowResolution, CascadeShadowForRace_GetShadowResolutionFn)(this, default_shadow_map_width);
+        // Published before the config read, for the same reason as `CascadeShadow`: 0 is not a
+        // shadow map width, and the game's own answer is available before the half that can trip.
+        answer.publish(orig);
+        CascadeShadow::shadow_resolution(orig)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

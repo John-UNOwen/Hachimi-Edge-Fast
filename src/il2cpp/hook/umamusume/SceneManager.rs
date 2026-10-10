@@ -57,9 +57,11 @@ impl_addr_wrapper_fn!(GetCurrentSceneId, GETCURRENTSCENEID_ADDR, SceneId, this: 
 static SCENE_ID_CACHE: atomic::AtomicI32 = atomic::AtomicI32::new(0);
 
 type AlterUpdateFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn AlterUpdate(this: *mut Il2CppObject) {
-    get_orig_fn!(AlterUpdate, AlterUpdateFn)(this);
-    SCENE_ID_CACHE.store(GetCurrentSceneId(this) as i32, atomic::Ordering::Release);
+def_detour! {
+    AlterUpdate(this: *mut Il2CppObject) {
+            get_orig_fn!(AlterUpdate, AlterUpdateFn)(this);
+        SCENE_ID_CACHE.store(GetCurrentSceneId(this) as i32, atomic::Ordering::Release);
+    }
 }
 
 pub fn current_scene_id() -> SceneId {
@@ -123,22 +125,24 @@ type ChangeViewJpfn = extern "C" fn(
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool, is_fast_destroy: bool, fade_in_duration: f32
 );
-extern "C" fn ChangeViewJp(
+def_detour! {
+    ChangeViewJp(
     this: *mut Il2CppObject, next_view_id: i32, view_info: *mut Il2CppObject,
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool, is_fast_destroy: bool, fade_in_duration: f32
 ) {
-    // The one speed apply of this view change, and it has to sit before the original call:
-    // the game reads its fade constants while ChangeView runs, so a change saved in Config
-    // Editor has to be in place first. `ChangeViewCommon` does not apply it a second time.
-    crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
+            // The one speed apply of this view change, and it has to sit before the original call:
+        // the game reads its fade constants while ChangeView runs, so a change saved in Config
+        // Editor has to be in place first. `ChangeViewCommon` does not apply it a second time.
+        crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
 
-    get_orig_fn!(ChangeViewJp, ChangeViewJpfn)(
-        this, next_view_id, view_info, callback_on_change_view_cancel,
-        callback_on_change_view_accept, force_change, is_fast_destroy,
-        fade_in_duration
-    );
-    ChangeViewCommon(next_view_id);
+        get_orig_fn!(ChangeViewJp, ChangeViewJpfn)(
+            this, next_view_id, view_info, callback_on_change_view_cancel,
+            callback_on_change_view_accept, force_change, is_fast_destroy,
+            fade_in_duration
+        );
+        ChangeViewCommon(next_view_id);
+    }
 }
 
 type ChangeViewOtherfn = extern "C" fn(
@@ -146,21 +150,23 @@ type ChangeViewOtherfn = extern "C" fn(
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool
 );
-extern "C" fn ChangeViewOther(
+def_detour! {
+    ChangeViewOther(
     this: *mut Il2CppObject, next_view_id: i32, view_info: *mut Il2CppObject,
     callback_on_change_view_cancel: *mut Il2CppObject, callback_on_change_view_accept: *mut Il2CppObject,
     force_change: bool
 ) {
-    // The one speed apply of a view change on this client, before the original call, for the
-    // same reason as the Japan path: Gallop reads this transition's fade constants inside
-    // ChangeView, and `ChangeViewCommon` does not apply it a second time.
-    crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
+            // The one speed apply of a view change on this client, before the original call, for the
+        // same reason as the Japan path: Gallop reads this transition's fade constants inside
+        // ChangeView, and `ChangeViewCommon` does not apply it a second time.
+        crate::il2cpp::hook::umamusume::AnimationSpeed::apply();
 
-    get_orig_fn!(ChangeViewOther, ChangeViewOtherfn)(
-        this, next_view_id, view_info, callback_on_change_view_cancel,
-        callback_on_change_view_accept, force_change
-    );
-    ChangeViewCommon(next_view_id);
+        get_orig_fn!(ChangeViewOther, ChangeViewOtherfn)(
+            this, next_view_id, view_info, callback_on_change_view_cancel,
+            callback_on_change_view_accept, force_change
+        );
+        ChangeViewCommon(next_view_id);
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

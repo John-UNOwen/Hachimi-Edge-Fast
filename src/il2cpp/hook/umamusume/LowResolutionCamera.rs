@@ -17,17 +17,21 @@ fn with_creating_render_texture(callback: impl FnOnce()) {
 }
 
 type InitializeFn = extern "C" fn(this: *mut Il2CppObject, bg_path: *mut Il2CppObject);
-extern "C" fn Initialize(this: *mut Il2CppObject, view: *mut Il2CppObject) {
-    with_creating_render_texture(|| {
-        get_orig_fn!(Initialize, InitializeFn)(this, view);
-    });
+def_detour! {
+    Initialize(this: *mut Il2CppObject, view: *mut Il2CppObject) {
+            with_creating_render_texture(|| {
+            get_orig_fn!(Initialize, InitializeFn)(this, view);
+        });
+    }
 }
 
 type RemakeRendererTextureFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn RemakeRendererTexture(this: *mut Il2CppObject) {
-    with_creating_render_texture(|| {
-        get_orig_fn!(RemakeRendererTexture, RemakeRendererTextureFn)(this);
-    });
+def_detour! {
+    RemakeRendererTexture(this: *mut Il2CppObject) {
+            with_creating_render_texture(|| {
+            get_orig_fn!(RemakeRendererTexture, RemakeRendererTextureFn)(this);
+        });
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

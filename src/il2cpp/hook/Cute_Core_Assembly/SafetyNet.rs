@@ -4,11 +4,16 @@ type GetSafetyNetStatusFn = extern "C" fn(
     api_key: *mut Il2CppString, nonce: *mut Il2CppString,
     on_success: *mut Il2CppDelegate, on_error: *mut Il2CppDelegate
 );
-pub extern "C" fn GetSafetyNetStatus(
+def_detour! {
+    pub GetSafetyNetStatus(
     api_key: *mut Il2CppString, nonce: *mut Il2CppString,
     on_success: *mut Il2CppDelegate, _on_error: *mut Il2CppDelegate
 ) {
-    get_orig_fn!(GetSafetyNetStatus, GetSafetyNetStatusFn)(api_key, nonce, on_success, on_success);
+            get_orig_fn!(GetSafetyNetStatus, GetSafetyNetStatusFn)(api_key, nonce, on_success, on_success);
+    }
+    bail {
+                get_orig_fn!(GetSafetyNetStatus, GetSafetyNetStatusFn)(api_key, nonce, on_success, on_success)
+    }
 }
 
 pub fn init(Cute_Core_Assembly: *const Il2CppImage) {

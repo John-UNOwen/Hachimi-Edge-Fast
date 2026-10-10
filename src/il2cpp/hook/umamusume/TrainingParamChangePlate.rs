@@ -16,19 +16,23 @@ fn PlayTypeWriteCommon(mut message: *mut Il2CppString) -> *mut Il2CppString {
 }
 
 type PlayTypeWriteJpFn = extern "C" fn(this: *mut Il2CppObject, message: *mut Il2CppString, skip_add_system_log: bool);
-extern "C" fn PlayTypeWriteJp(this: *mut Il2CppObject, mut message: *mut Il2CppString, skip_add_system_log: bool) {
-    if !message.is_null() {
-        message = PlayTypeWriteCommon(message);
+def_detour! {
+    PlayTypeWriteJp(this: *mut Il2CppObject, mut message: *mut Il2CppString, skip_add_system_log: bool) {
+            if !message.is_null() {
+            message = PlayTypeWriteCommon(message);
+        }
+        get_orig_fn!(PlayTypeWriteJp, PlayTypeWriteJpFn)(this, message, skip_add_system_log)
     }
-    get_orig_fn!(PlayTypeWriteJp, PlayTypeWriteJpFn)(this, message, skip_add_system_log)
 }
 
 type PlayTypeWriteOtherFn = extern "C" fn(this: *mut Il2CppObject, message: *mut Il2CppString);
-extern "C" fn PlayTypeWriteOther(this: *mut Il2CppObject, mut message: *mut Il2CppString) {
-    if !message.is_null() {
-        message = PlayTypeWriteCommon(message);
+def_detour! {
+    PlayTypeWriteOther(this: *mut Il2CppObject, mut message: *mut Il2CppString) {
+            if !message.is_null() {
+            message = PlayTypeWriteCommon(message);
+        }
+        get_orig_fn!(PlayTypeWriteOther, PlayTypeWriteOtherFn)(this, message)
     }
-    get_orig_fn!(PlayTypeWriteOther, PlayTypeWriteOtherFn)(this, message)
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

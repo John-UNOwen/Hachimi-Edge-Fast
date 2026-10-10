@@ -7,9 +7,11 @@ use crate::{
 };
 
 type DisposeFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Dispose(this: *mut Il2CppObject) {
-    get_orig_fn!(Dispose, DisposeFn)(this);
-    captions::Captions::cleanup();
+def_detour! {
+    Dispose(this: *mut Il2CppObject) {
+            get_orig_fn!(Dispose, DisposeFn)(this);
+        captions::Captions::cleanup();
+    }
 }
 
 pub fn init(CriMw_CriWare_Runtime: *const Il2CppImage) {

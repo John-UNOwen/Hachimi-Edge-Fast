@@ -183,59 +183,61 @@ pub enum SoundGroup {
 type PlayInternalFn = extern "C" fn(this: *mut Il2CppObject, group: SoundGroup,
     cue_info: *mut RequestCueInfo, play_param: *mut Il2CppObject, stop_type: i32
 ) -> AudioPlayback_t;
-extern "C" fn PlayInternal(this: *mut Il2CppObject, group: SoundGroup,
+def_detour! {
+    PlayInternal(this: *mut Il2CppObject, group: SoundGroup,
     cue_info: *mut RequestCueInfo, play_param: *mut Il2CppObject, stop_type: i32
 ) -> AudioPlayback_t {
-    let result = get_orig_fn!(PlayInternal, PlayInternalFn)(this, group, cue_info, play_param, stop_type);
+            let result = get_orig_fn!(PlayInternal, PlayInternalFn)(this, group, cue_info, play_param, stop_type);
 
-    if group == SoundGroup::Voice && !cue_info.is_null() && Hachimi::instance().config.load().caption.caption_enable {
-        let cue_sheet_ptr = unsafe { *cue_info }.CueSheetName;
-        if !cue_sheet_ptr.is_null() {
+        if group == SoundGroup::Voice && !cue_info.is_null() && Hachimi::instance().config.load().caption.caption_enable {
             let cue_sheet_ptr = unsafe { *cue_info }.CueSheetName;
-            let cue_sheet = if !cue_sheet_ptr.is_null() {
-                unsafe { &*cue_sheet_ptr }.as_utf16str().to_string()
-            } else {
-                String::new()
-            };
+            if !cue_sheet_ptr.is_null() {
+                let cue_sheet_ptr = unsafe { *cue_info }.CueSheetName;
+                let cue_sheet = if !cue_sheet_ptr.is_null() {
+                    unsafe { &*cue_sheet_ptr }.as_utf16str().to_string()
+                } else {
+                    String::new()
+                };
 
-            let cue_name_ptr = unsafe { *cue_info }.CueName;
-            let cue_name = if !cue_name_ptr.is_null() {
-                unsafe { &*cue_name_ptr }.as_utf16str().to_string()
-            } else {
-                String::new()
-            };
+                let cue_name_ptr = unsafe { *cue_info }.CueName;
+                let cue_name = if !cue_name_ptr.is_null() {
+                    unsafe { &*cue_name_ptr }.as_utf16str().to_string()
+                } else {
+                    String::new()
+                };
 
-            let cue_id = unsafe { *cue_info }.CueId;
+                let cue_id = unsafe { *cue_info }.CueId;
 
-            debug!("[captions] PlayInternal Voice: cue_sheet={}, name='{}', id={}", cue_sheet, cue_name, cue_id);
+                debug!("[captions] PlayInternal Voice: cue_sheet={}, name='{}', id={}", cue_sheet, cue_name, cue_id);
 
-            if let Some(last) = cue_sheet.rsplit('_').next() {
-                if last.len() >= 6 {
-                    if let Ok(chara_id) = last[..4].parse::<i32>() {
-                        let caption_data = captions::CaptionData {
-                            text: String::new(), 
-                            cue_sheet: cue_sheet.clone(),
-                            cue_id,
-                            character_id: chara_id,
-                            voice_id: 0,
-                        };
+                if let Some(last) = cue_sheet.rsplit('_').next() {
+                    if last.len() >= 6 {
+                        if let Ok(chara_id) = last[..4].parse::<i32>() {
+                            let caption_data = captions::CaptionData {
+                                text: String::new(), 
+                                cue_sheet: cue_sheet.clone(),
+                                cue_id,
+                                character_id: chara_id,
+                                voice_id: 0,
+                            };
 
-                        match captions::CAPTION_REQUEST.lock() {
-                            Ok(mut slot) => *slot = Some(caption_data),
-                            Err(poisoned) => {
-                                warn!("[captions] CAPTION_REQUEST mutex poisoned, recovering...");
-                                *poisoned.into_inner() = Some(caption_data);
+                            match captions::CAPTION_REQUEST.lock() {
+                                Ok(mut slot) => *slot = Some(caption_data),
+                                Err(poisoned) => {
+                                    warn!("[captions] CAPTION_REQUEST mutex poisoned, recovering...");
+                                    *poisoned.into_inner() = Some(caption_data);
+                                }
                             }
-                        }
 
-                        Thread::main_thread().schedule(captions::process_caption_request);
+                            Thread::main_thread().schedule(captions::process_caption_request);
+                        }
                     }
                 }
             }
         }
-    }
 
-    result
+        result
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

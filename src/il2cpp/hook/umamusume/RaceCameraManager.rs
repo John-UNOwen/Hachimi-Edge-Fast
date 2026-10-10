@@ -8,22 +8,26 @@ use crate::{
 };
 
 type NoArgsFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn RaceCameraManager_AlterLateUpdate(this: *mut Il2CppObject) {
-    free_camera::set_race_active();
-    free_camera::tick();
+def_detour! {
+    RaceCameraManager_AlterLateUpdate(this: *mut Il2CppObject) {
+            free_camera::set_race_active();
+        free_camera::tick();
 
-    let active = free_camera::is_scene_enabled(CameraScene::Race);
-    Transform::set_update_race_camera(active);
-    get_orig_fn!(RaceCameraManager_AlterLateUpdate, NoArgsFn)(this);
-    Transform::set_update_race_camera(false);
+        let active = free_camera::is_scene_enabled(CameraScene::Race);
+        Transform::set_update_race_camera(active);
+        get_orig_fn!(RaceCameraManager_AlterLateUpdate, NoArgsFn)(this);
+        Transform::set_update_race_camera(false);
+    }
 }
 
 type RaceChangeCameraModeFn = extern "C" fn(this: *mut Il2CppObject, mode: i32, is_skip: bool);
-extern "C" fn RaceCameraManager_ChangeCameraMode(this: *mut Il2CppObject, mode: i32, is_skip: bool) {
-    if free_camera::is_scene_enabled(CameraScene::Race) {
-        return;
+def_detour! {
+    RaceCameraManager_ChangeCameraMode(this: *mut Il2CppObject, mode: i32, is_skip: bool) {
+            if free_camera::is_scene_enabled(CameraScene::Race) {
+            return;
+        }
+        get_orig_fn!(RaceCameraManager_ChangeCameraMode, RaceChangeCameraModeFn)(this, mode, is_skip);
     }
-    get_orig_fn!(RaceCameraManager_ChangeCameraMode, RaceChangeCameraModeFn)(this, mode, is_skip);
 }
 
 // public bool PlayEventCamera(int targetHorseIndex, int[] rivalHorseIndexArray, int cameraId, bool isForceInPlaying = False, bool isForceUnPlayableArea = False) { }
@@ -35,7 +39,8 @@ type RacePlayEventCameraFn = extern "C" fn(
     isForceInPlaying: bool,
     isForceUnPlayableArea: bool,
 ) -> bool;
-extern "C" fn RaceCameraManager_PlayEventCamera(
+def_detour! {
+    RaceCameraManager_PlayEventCamera(
     this: *mut Il2CppObject,
     targetHorseIndex: i32,
     rivalHorseIndexArray: *mut Il2CppArray,
@@ -43,10 +48,11 @@ extern "C" fn RaceCameraManager_PlayEventCamera(
     isForceInPlaying: bool,
     isForceUnPlayableArea: bool,
 ) -> bool {
-    if free_camera::is_scene_enabled(CameraScene::Race) {
-        return false;
+            if free_camera::is_scene_enabled(CameraScene::Race) {
+            return false;
+        }
+        get_orig_fn!(RaceCameraManager_PlayEventCamera, RacePlayEventCameraFn)(this, targetHorseIndex, rivalHorseIndexArray, cameraId, isForceInPlaying, isForceUnPlayableArea)
     }
-    get_orig_fn!(RaceCameraManager_PlayEventCamera, RacePlayEventCameraFn)(this, targetHorseIndex, rivalHorseIndexArray, cameraId, isForceInPlaying, isForceUnPlayableArea)
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

@@ -105,81 +105,129 @@ static PROBES: [&FrameProbe; 12] = [
 ];
 
 type SetFrameCountForWaitingFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
-extern "C" fn SetFrameCountForWaiting(this: *mut Il2CppObject, frames: i32) {
-    SET_FRAME_COUNT_FOR_WAITING.observe(&[frames as f64]);
+def_detour! {
+    SetFrameCountForWaiting(this: *mut Il2CppObject, frames: i32) {
+            SET_FRAME_COUNT_FOR_WAITING.observe(&[frames as f64]);
 
-    get_orig_fn!(SetFrameCountForWaiting, SetFrameCountForWaitingFn)(this, frames);
+        get_orig_fn!(SetFrameCountForWaiting, SetFrameCountForWaitingFn)(this, frames);
+    }
+    bail {
+                get_orig_fn!(SetFrameCountForWaiting, SetFrameCountForWaitingFn)(this, frames)
+    }
 }
 
 type GetWaitFrameCountUntilNextBlockFn = extern "C" fn(this: *mut Il2CppObject) -> i32;
-extern "C" fn get_WaitFrameCountUntilNextBlock(this: *mut Il2CppObject) -> i32 {
-    let value = get_orig_fn!(get_WaitFrameCountUntilNextBlock, GetWaitFrameCountUntilNextBlockFn)(this);
-    WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK.observe(&[value as f64]);
+def_detour! {
+    get_WaitFrameCountUntilNextBlock(this: *mut Il2CppObject) answer -> i32 {
+            let value = get_orig_fn!(get_WaitFrameCountUntilNextBlock, GetWaitFrameCountUntilNextBlockFn)(this);
+        // Published before the probe reads it: the probe half is the part that can trip, and the
+        // answer it owes the story stepping is the game's own frame count - a 0 here is a wait the
+        // game was told to skip (AGENTS section 5: frame counts stay >= 1).
+        answer.publish(value);
+        WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK.observe(&[value as f64]);
 
-    value
+        value
+    }
 }
 
 type GetWaitFrameUntilNextBlockFn = extern "C" fn(this: *mut Il2CppObject) -> i32;
-extern "C" fn get_WaitFrameUntilNextBlock(this: *mut Il2CppObject) -> i32 {
-    let value = get_orig_fn!(get_WaitFrameUntilNextBlock, GetWaitFrameUntilNextBlockFn)(this);
-    WAIT_FRAME_UNTIL_NEXT_BLOCK.observe(&[value as f64]);
+def_detour! {
+    get_WaitFrameUntilNextBlock(this: *mut Il2CppObject) answer -> i32 {
+            let value = get_orig_fn!(get_WaitFrameUntilNextBlock, GetWaitFrameUntilNextBlockFn)(this);
+        answer.publish(value);
+        WAIT_FRAME_UNTIL_NEXT_BLOCK.observe(&[value as f64]);
 
-    value
+        value
+    }
 }
 
 type SetWaitFrameCountUntilNextBlockFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
-extern "C" fn set_WaitFrameCountUntilNextBlock(this: *mut Il2CppObject, frames: i32) {
-    SET_WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK.observe(&[frames as f64]);
+def_detour! {
+    set_WaitFrameCountUntilNextBlock(this: *mut Il2CppObject, frames: i32) {
+            SET_WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK.observe(&[frames as f64]);
 
-    get_orig_fn!(set_WaitFrameCountUntilNextBlock, SetWaitFrameCountUntilNextBlockFn)(this, frames);
+        get_orig_fn!(set_WaitFrameCountUntilNextBlock, SetWaitFrameCountUntilNextBlockFn)(this, frames);
+    }
+    bail {
+                get_orig_fn!(set_WaitFrameCountUntilNextBlock, SetWaitFrameCountUntilNextBlockFn)(this, frames)
+    }
 }
 
 type SetWaitFrameUntilNextBlockFn = extern "C" fn(this: *mut Il2CppObject, frames: i32);
-extern "C" fn set_WaitFrameUntilNextBlock(this: *mut Il2CppObject, frames: i32) {
-    SET_WAIT_FRAME_UNTIL_NEXT_BLOCK.observe(&[frames as f64]);
+def_detour! {
+    set_WaitFrameUntilNextBlock(this: *mut Il2CppObject, frames: i32) {
+            SET_WAIT_FRAME_UNTIL_NEXT_BLOCK.observe(&[frames as f64]);
 
-    get_orig_fn!(set_WaitFrameUntilNextBlock, SetWaitFrameUntilNextBlockFn)(this, frames);
+        get_orig_fn!(set_WaitFrameUntilNextBlock, SetWaitFrameUntilNextBlockFn)(this, frames);
+    }
+    bail {
+                get_orig_fn!(set_WaitFrameUntilNextBlock, SetWaitFrameUntilNextBlockFn)(this, frames)
+    }
 }
 
 type GetWaitingFrameCountFn = extern "C" fn(this: *mut Il2CppObject) -> i32;
-extern "C" fn get_WaitingFrameCount(this: *mut Il2CppObject) -> i32 {
-    let value = get_orig_fn!(get_WaitingFrameCount, GetWaitingFrameCountFn)(this);
-    WAITING_FRAME_COUNT.observe(&[value as f64]);
+def_detour! {
+    get_WaitingFrameCount(this: *mut Il2CppObject) answer -> i32 {
+            let value = get_orig_fn!(get_WaitingFrameCount, GetWaitingFrameCountFn)(this);
+        // A wait the game is sitting in: 0 is a promise that the wait is over.
+        answer.publish(value);
+        WAITING_FRAME_COUNT.observe(&[value as f64]);
 
-    value
+        value
+    }
 }
 
 type UpdateTimeScaleByHispeedTypeFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn UpdateTimeScaleByHispeedType(this: *mut Il2CppObject) {
-    UPDATE_TIME_SCALE_BY_HIGHSPEED.observe(&[]);
+def_detour! {
+    UpdateTimeScaleByHispeedType(this: *mut Il2CppObject) {
+            UPDATE_TIME_SCALE_BY_HIGHSPEED.observe(&[]);
 
-    get_orig_fn!(UpdateTimeScaleByHispeedType, UpdateTimeScaleByHispeedTypeFn)(this);
+        get_orig_fn!(UpdateTimeScaleByHispeedType, UpdateTimeScaleByHispeedTypeFn)(this);
+    }
+    bail {
+                get_orig_fn!(UpdateTimeScaleByHispeedType, UpdateTimeScaleByHispeedTypeFn)(this)
+    }
 }
 
 // Both are dumped as static: `get_TimeScale/0 -> static float()` and
 // `set_TimeScale/1 -> static void(float)`, so the class scale is shared state rather than per
 // instance state, and these two counters say who is reading and writing it.
 type GetTimeScaleFn = extern "C" fn() -> f32;
-extern "C" fn get_TimeScale() -> f32 {
-    let value = get_orig_fn!(get_TimeScale, GetTimeScaleFn)();
-    GET_TIME_SCALE.observe(&[value as f64]);
+def_detour! {
+    get_TimeScale() answer -> f32 {
+            let value = get_orig_fn!(get_TimeScale, GetTimeScaleFn)();
+        // A time scale of 0 is a frozen game, which is not an answer this probe is entitled to give
+        // when its own counter is what tripped.
+        answer.publish(value);
+        GET_TIME_SCALE.observe(&[value as f64]);
 
-    value
+        value
+    }
 }
 
 type SetTimeScaleFn = extern "C" fn(scale: f32);
-extern "C" fn set_TimeScale(scale: f32) {
-    SET_TIME_SCALE.observe(&[scale as f64]);
+def_detour! {
+    set_TimeScale(scale: f32) {
+            SET_TIME_SCALE.observe(&[scale as f64]);
 
-    get_orig_fn!(set_TimeScale, SetTimeScaleFn)(scale);
+        get_orig_fn!(set_TimeScale, SetTimeScaleFn)(scale);
+    }
+    bail {
+                get_orig_fn!(set_TimeScale, SetTimeScaleFn)(scale)
+    }
 }
 
 type IsSkipToTextClipFn = extern "C" fn(this: *mut Il2CppObject, skip_text: bool, skip_block: bool) -> bool;
-extern "C" fn IsSkipToTextClip(this: *mut Il2CppObject, skip_text: bool, skip_block: bool) -> bool {
-    let value = get_orig_fn!(IsSkipToTextClip, IsSkipToTextClipFn)(this, skip_text, skip_block);
-    IS_SKIP_TO_TEXT_CLIP.observe(&[bit(skip_text), bit(skip_block), bit(value)]);
+def_detour! {
+    IsSkipToTextClip(this: *mut Il2CppObject, skip_text: bool, skip_block: bool) answer -> bool {
+            let value = get_orig_fn!(IsSkipToTextClip, IsSkipToTextClipFn)(this, skip_text, skip_block);
+        // Published before the counter: the answer decides whether story text is skipped, and a
+        // trip in the probe half is not the mod's decision to make.
+        answer.publish(value);
+        IS_SKIP_TO_TEXT_CLIP.observe(&[bit(skip_text), bit(skip_block), bit(value)]);
 
-    value
+        value
+    }
 }
 
 // `IsHighSpeedMode()` is not probed. The game polls it about 130 times a second while a scene is
@@ -194,26 +242,32 @@ type StoryEndFrameSkippedFn = extern "C" fn(
     frame: i32,
     next_frame: i32,
 ) -> bool;
-extern "C" fn IsStoryEndFrameOrGrandLiveWaitFrameSkipped(
+def_detour! {
+    IsStoryEndFrameOrGrandLiveWaitFrameSkipped(
     controller: *mut Il2CppObject,
     block_data: *mut Il2CppObject,
     frame: i32,
     next_frame: i32,
-) -> bool {
-    let value = get_orig_fn!(IsStoryEndFrameOrGrandLiveWaitFrameSkipped, StoryEndFrameSkippedFn)(
-        controller, block_data, frame, next_frame,
-    );
-    STORY_END_FRAME_SKIPPED.observe(&[frame as f64, next_frame as f64, bit(value)]);
+) answer -> bool {
+            let value = get_orig_fn!(IsStoryEndFrameOrGrandLiveWaitFrameSkipped, StoryEndFrameSkippedFn)(
+            controller, block_data, frame, next_frame,
+        );
+        answer.publish(value);
+        STORY_END_FRAME_SKIPPED.observe(&[frame as f64, next_frame as f64, bit(value)]);
 
-    value
+        value
+    }
 }
 
 type GetWaitFrameUntilNextBlockLocalizeFn = extern "C" fn(this: *mut Il2CppObject) -> i32;
-extern "C" fn GetWaitFrameUntilNextBlockLocalize(this: *mut Il2CppObject) -> i32 {
-    let value = get_orig_fn!(GetWaitFrameUntilNextBlockLocalize, GetWaitFrameUntilNextBlockLocalizeFn)(this);
-    TEXT_CLIP_WAIT_FRAME.observe(&[value as f64]);
+def_detour! {
+    GetWaitFrameUntilNextBlockLocalize(this: *mut Il2CppObject) answer -> i32 {
+            let value = get_orig_fn!(GetWaitFrameUntilNextBlockLocalize, GetWaitFrameUntilNextBlockLocalizeFn)(this);
+        answer.publish(value);
+        TEXT_CLIP_WAIT_FRAME.observe(&[value as f64]);
 
-    value
+        value
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

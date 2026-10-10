@@ -68,52 +68,54 @@ pub static ACTIVE_TEXT_COMPONENTS: Lazy<Mutex<FnvHashMap<usize, StringInfo>>> = 
 });
 
 type SetTextFn = extern "C" fn(this: *mut Il2CppObject, value: *mut Il2CppString);
-pub extern "C" fn set_text_hook(this: *mut Il2CppObject, value: *mut Il2CppString) {
-    if value.is_null() {
-        return get_orig_fn!(set_text_hook, SetTextFn)(this, value);
+def_detour! {
+    pub set_text_hook(this: *mut Il2CppObject, value: *mut Il2CppString) {
+            if value.is_null() {
+            return get_orig_fn!(set_text_hook, SetTextFn)(this, value);
+        }
+
+        let config = crate::core::Hachimi::instance().config.load();
+        if !config.auto_translate_localize && !config.auto_translate_stories {
+            return get_orig_fn!(set_text_hook, SetTextFn)(this, value);
+        }
+
+        let orig_str = unsafe { (*value).as_utf16str().to_string() };
+        let str_info = StringInfo {
+            str_handle: GCHandle::new_weak_ref(this, false),
+            str: orig_str.clone()
+        };
+
+        // C2: a poisoned registry answers instead of panicking inside this `extern "C"` frame.
+        ACTIVE_TEXT_COMPONENTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(this as usize, str_info);
+
+        if let Some(trans) = SugoiClient::instance().get_cached(&orig_str) {
+            return get_orig_fn!(set_text_hook, SetTextFn)(this, trans.to_il2cpp_string());
+        }
+
+        get_orig_fn!(set_text_hook, SetTextFn)(this, value);
     }
-
-    let config = crate::core::Hachimi::instance().config.load();
-    if !config.auto_translate_localize && !config.auto_translate_stories {
-        return get_orig_fn!(set_text_hook, SetTextFn)(this, value);
-    }
-
-    let orig_str = unsafe { (*value).as_utf16str().to_string() };
-    let str_info = StringInfo {
-        str_handle: GCHandle::new_weak_ref(this, false),
-        str: orig_str.clone()
-    };
-
-    ACTIVE_TEXT_COMPONENTS.lock().unwrap().insert(this as usize, str_info);
-
-    if let Some(trans) = SugoiClient::instance().get_cached(&orig_str) {
-        return get_orig_fn!(set_text_hook, SetTextFn)(this, trans.to_il2cpp_string());
-    }
-
-    get_orig_fn!(set_text_hook, SetTextFn)(this, value);
 }
 
 pub fn apply_translations(completed: &[(String, String)]) {
-    let mut updates_to_apply = Vec::new();
-    {
-        let mut tracker = ACTIVE_TEXT_COMPONENTS.lock().unwrap();
+    // The translation pass pushing a finished string into every live Text component: mod code
+    // reaching `set_text_hook` from outside the hook, once per component on the game thread.
+    //
+    // Nothing it calls with is something it collected before the walk (C11). The component is
+    // derived from the entry's own weak handle for that one write; the translated string travels in
+    // a strong handle, so the GC cannot take it away across a write that runs game code and
+    // allocates; and the trampoline is taken from this wrapper's copy per write, which is a cache
+    // hit against a cross-FFI call. With the hook not installed the pass has nothing to write (C1).
+    crate::core::sugoi_client::apply_translation_pass(
+        &ACTIVE_TEXT_COMPONENTS,
+        completed,
+        |translated| GCHandle::new(translated.to_il2cpp_string() as *mut Il2CppObject, false),
+        |component: *mut Il2CppObject, text: &GCHandle| {
+            let Some(set_text) = get_orig_fn_guarded!(set_text_hook, SetTextFn) else { return };
 
-        tracker.retain(|_, info| !info.object().is_null());
-
-        for (orig, trans) in completed {
-            let unity_string = trans.to_il2cpp_string();
-
-            for (&ptr, saved_orig) in tracker.iter() {
-                if &saved_orig.str == orig {
-                    updates_to_apply.push((ptr, unity_string));
-                }
-            }
+            set_text(component, text.target() as *mut Il2CppString);
         }
-    }
-
-    for (ptr, unity_string) in updates_to_apply {
-        get_orig_fn!(set_text_hook, SetTextFn)(ptr as *mut Il2CppObject, unity_string);
-    }
+    );
 }
 
 pub fn init(UnityEngine_UI: *const Il2CppImage) {

@@ -46,6 +46,13 @@ pub fn get_text_clip(this: *mut Il2CppObject) -> Option<*mut Il2CppObject> {
     // There should be a single text clip per track
     let clip_data = clip_list.get(0)?;
 
+    // C9: the clip list is the game's, and a list of references has slots nobody filled. A null
+    // first slot says "this track has no clip", which is the same answer the class check below
+    // gives; reading a class off address 0 is not an answer.
+    if clip_data.is_null() {
+        return None;
+    }
+
     let class = unsafe { (*clip_data).klass() };
     if class != StoryTimelineTextClipData::class() {
         return None;

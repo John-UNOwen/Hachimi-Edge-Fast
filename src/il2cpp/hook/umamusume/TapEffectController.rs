@@ -22,11 +22,13 @@ static mut REFRESH_ALL_ADDR: usize = 0;
 impl_addr_wrapper_fn!(RefreshAll, REFRESH_ALL_ADDR, (), this: *mut Il2CppObject);
 
 type UpdateFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Update(this: *mut Il2CppObject) {
-    if Hachimi::instance().config.load().disable_tap_effect {
-        return;
+def_detour! {
+    Update(this: *mut Il2CppObject) {
+            if Hachimi::instance().config.load().disable_tap_effect {
+            return;
+        }
+        get_orig_fn!(Update, UpdateFn)(this);
     }
-    get_orig_fn!(Update, UpdateFn)(this);
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

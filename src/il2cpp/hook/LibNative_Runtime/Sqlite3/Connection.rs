@@ -9,6 +9,7 @@ use sqlparser::{
     parser::Parser
 };
 
+use crate::core::hachimi::recover_lock;
 use crate::il2cpp::{
     api::{il2cpp_object_new, il2cpp_runtime_object_init},
     ext::Il2CppStringExt,
@@ -23,16 +24,36 @@ pub fn class() -> *mut Il2CppClass {
 }
 
 pub fn new() -> *mut Il2CppObject {
+    // C9: the class is this hook's own (null when the client has no `LibNative.Sqlite3.Connection`)
+    // and the object is the game's allocation, which the game may refuse. Neither has anything to
+    // initialise, and every caller of `new` already copes with a null connection.
+    if class().is_null() {
+        return std::ptr::null_mut();
+    }
+
     let object = il2cpp_object_new(class());
+    if object.is_null() {
+        return std::ptr::null_mut();
+    }
+
     il2cpp_runtime_object_init(object);
     object
 }
 
+// C2: `recover_lock` is the shape AGENTS section 6 asks for in a detour: a lock poisoned by an
+// earlier panic keeps handing out its data instead of panicking across the FFI boundary on
+// every later game query.
 pub static SELECT_QUERIES: Lazy<Mutex<FnvHashMap<usize, Box<dyn sql::SelectQueryState + Send + Sync>>>> =
     Lazy::new(|| Mutex::new(FnvHashMap::default()));
 
 #[inline(never)]
 fn parse_query(query: *mut Il2CppObject, sql: *const Il2CppString) {
+    // C9: `sql` is the string the game handed its own `Query`/`PreparedQuery`, and a call that
+    // carries none is a statement this hook has nothing to read a table name out of.
+    if sql.is_null() {
+        return;
+    }
+
     let sql_str = unsafe { (*sql).as_utf16str() }.to_string();
 
     // quick escape!!!11
@@ -94,24 +115,36 @@ fn parse_query(query: *mut Il2CppObject, sql: *const Il2CppString) {
         }
 
         // Add query state
-        SELECT_QUERIES.lock().unwrap().insert(query as usize, query_state);
+        recover_lock(&SELECT_QUERIES).insert(query as usize, query_state);
     }
 }
 
 type QueryFn = extern "C" fn(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject;
-pub extern "C" fn Query(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject {
-    trace!("Query");
-    let query = get_orig_fn!(Query, QueryFn)(this, sql);
-    parse_query(query, sql);
-    query
+def_detour! {
+    pub Query(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject {
+            trace!("Query");
+        // Every reader in `il2cpp::sql.rs` opens its query through this wrapper rather than
+        // through the game's own call, and each of them already tests the pointer it gets back.
+        // A null query is therefore the inert answer when `init` resolved no `Query`: no rows,
+        // `Dispose` is not reached, `CloseDB` still runs (C1).
+        let Some(query_orig) = get_orig_fn_guarded!(Query, QueryFn) else {
+            return std::ptr::null_mut();
+        };
+
+        let query = query_orig(this, sql);
+        parse_query(query, sql);
+        query
+    }
 }
 
 type PreparedQueryFn = extern "C" fn(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject;
-extern "C" fn PreparedQuery(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject {
-    trace!("PreparedQuery");
-    let query = get_orig_fn!(PreparedQuery, PreparedQueryFn)(this, sql);
-    parse_query(query, sql);
-    query
+def_detour! {
+    PreparedQuery(this: *mut Il2CppObject, sql: *const Il2CppString) -> *mut Il2CppObject {
+            trace!("PreparedQuery");
+        let query = get_orig_fn!(PreparedQuery, PreparedQueryFn)(this, sql);
+        parse_query(query, sql);
+        query
+    }
 }
 
 static mut OPEN_ADDR: usize = 0;

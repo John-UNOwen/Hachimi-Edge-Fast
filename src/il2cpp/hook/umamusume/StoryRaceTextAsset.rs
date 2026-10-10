@@ -23,6 +23,13 @@ fn get_textData(this: *mut Il2CppObject) -> Array {
 static mut KEY_TEXT_FIELD: *mut FieldInfo = null_mut();
 fn Key_set_text(key: *mut Il2CppObject, value: *mut Il2CppString) {
     unsafe {
+        // C9: `key` is one slot of the game's own `textData` array. A reference array has slots
+        // nobody filled, and a null there is the array saying "no key here" rather than something
+        // this hook is owed, so it is skipped rather than having its class read off address 0.
+        if key.is_null() {
+            return;
+        }
+
         if KEY_TEXT_FIELD.is_null() {
             KEY_TEXT_FIELD = get_field_from_name((*key).klass(), c"text");
         }

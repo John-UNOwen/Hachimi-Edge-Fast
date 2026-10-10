@@ -1,4 +1,4 @@
-use crate::il2cpp::{symbols::get_method_addr, types::*};
+use crate::{core::hachimi::recover_lock, il2cpp::{symbols::get_method_addr, types::*}};
 
 use super::Connection::SELECT_QUERIES;
 
@@ -8,11 +8,13 @@ use super::Connection::SELECT_QUERIES;
  * idx starts from 1
  */
 type BindIntFn = extern "C" fn(this: *mut Il2CppObject, idx: i32, value: i32) -> bool;
-extern "C" fn BindInt(this: *mut Il2CppObject, idx: i32, value: i32) -> bool {
-    if let Some(query) = SELECT_QUERIES.lock().unwrap().get_mut(&(this as usize)) {
-        query.bind_int(idx, value);
+def_detour! {
+    BindInt(this: *mut Il2CppObject, idx: i32, value: i32) -> bool {
+            if let Some(query) = recover_lock(&SELECT_QUERIES).get_mut(&(this as usize)) {
+            query.bind_int(idx, value);
+        }
+        get_orig_fn!(BindInt, BindIntFn)(this, idx, value)
     }
-    get_orig_fn!(BindInt, BindIntFn)(this, idx, value)
 }
 
 pub fn init(LibNative_Runtime: *const Il2CppImage) {

@@ -7,25 +7,27 @@ use super::{
 
 // public static BgSeason GetSeasonForHome(DateTime dateTime) { }
 type GetSeasonForHomeFn = extern "C" fn(dateTime: *mut Il2CppObject) -> BgSeason;
-extern "C" fn GetSeasonForHome(dateTime: *mut Il2CppObject) -> BgSeason {
-    let orig = get_orig_fn!(GetSeasonForHome, GetSeasonForHomeFn)(dateTime);
-    let bg_season = Hachimi::instance().config.load().homescreen_bgseason;
-    let master_mgr = MasterDataManager::instance();
+def_detour! {
+    GetSeasonForHome(dateTime: *mut Il2CppObject) -> BgSeason {
+            let orig = get_orig_fn!(GetSeasonForHome, GetSeasonForHomeFn)(dateTime);
+        let bg_season = Hachimi::instance().config.load().homescreen_bgseason;
+        let master_mgr = MasterDataManager::instance();
 
-    if master_mgr.is_null() || bg_season == BgSeason::None {
-        return orig;
-    }
+        if master_mgr.is_null() || bg_season == BgSeason::None {
+            return orig;
+        }
 
-    let master_itex_top = MasterDataManager::get_masterItemExchangeTop(master_mgr);
-    if master_itex_top.is_null() { return orig; }
+        let master_itex_top = MasterDataManager::get_masterItemExchangeTop(master_mgr);
+        if master_itex_top.is_null() { return orig; }
 
-    // Overriding BgSeason during anniversary & half anniversary breaks the game so this has to be gated
-    let in_term_anniv_shop = MasterItemExchangeTop::get_IsInTermAnyAnnivShop(master_itex_top);
-    debug!("in_term_anniv_shop {}", in_term_anniv_shop);
-    if !in_term_anniv_shop && bg_season > BgSeason::None && bg_season <= BgSeason::CherryBlossom {
-        bg_season
-    } else {
-        orig
+        // Overriding BgSeason during anniversary & half anniversary breaks the game so this has to be gated
+        let in_term_anniv_shop = MasterItemExchangeTop::get_IsInTermAnyAnnivShop(master_itex_top);
+        debug!("in_term_anniv_shop {}", in_term_anniv_shop);
+        if !in_term_anniv_shop && bg_season > BgSeason::None && bg_season <= BgSeason::CherryBlossom {
+            bg_season
+        } else {
+            orig
+        }
     }
 }
 

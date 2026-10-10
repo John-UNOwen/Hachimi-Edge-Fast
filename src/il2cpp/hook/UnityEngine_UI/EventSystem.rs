@@ -1,4 +1,4 @@
-use crate::core::sugoi_client;
+use crate::core::{hachimi::recover_lock, sugoi_client};
 use crate::il2cpp::{symbols::{get_method_addr}, types::*};
 
 static mut GET_CURRENT_ADDR: usize = 0;
@@ -8,41 +8,43 @@ static mut GET_CURRENTSELECTEDGAMEOBJECT_ADDR: usize = 0;
 impl_addr_wrapper_fn!(get_currentSelectedGameObject, GET_CURRENTSELECTEDGAMEOBJECT_ADDR, *mut Il2CppObject, this: *mut Il2CppObject);
 
 type UpdateFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Update(this: *mut Il2CppObject) {
-    get_orig_fn!(Update, UpdateFn)(this);
+def_detour! {
+    Update(this: *mut Il2CppObject) {
+            get_orig_fn!(Update, UpdateFn)(this);
 
-    let mut completed = Vec::new();
-    {
-        let rx = sugoi_client::TRANSLATION_QUEUE.1.lock().unwrap();
-        while let Ok(msg) = rx.try_recv() {
-            completed.push(msg);
+        let mut completed = Vec::new();
+        {
+            let rx = recover_lock(&sugoi_client::TRANSLATION_QUEUE.1);
+            while let Ok(msg) = rx.try_recv() {
+                completed.push(msg);
+            }
         }
-    }
 
-    if completed.is_empty() {
+        if completed.is_empty() {
+            #[cfg(target_os = "windows")]
+            {
+                if microseh::try_seh(|| crate::windows::smtc::on_update()).is_err() {
+                    error!("[smtc] SEH exception in on_update!");
+                }
+            }
+            return;
+        }
+
+        {
+            let mut cache = recover_lock(&sugoi_client::TRANSLATION_CACHE);
+            for (orig, trans) in &completed {
+                cache.insert(orig.clone(), trans.clone());
+            }
+        }
+
+        crate::il2cpp::hook::UnityEngine_UI::Text::apply_translations(&completed);
+        crate::il2cpp::hook::UnityEngine_TextRenderingModule::TextMesh::apply_translations(&completed);
+
         #[cfg(target_os = "windows")]
         {
             if microseh::try_seh(|| crate::windows::smtc::on_update()).is_err() {
                 error!("[smtc] SEH exception in on_update!");
             }
-        }
-        return;
-    }
-
-    {
-        let mut cache = sugoi_client::TRANSLATION_CACHE.lock().unwrap();
-        for (orig, trans) in &completed {
-            cache.insert(orig.clone(), trans.clone());
-        }
-    }
-
-    crate::il2cpp::hook::UnityEngine_UI::Text::apply_translations(&completed);
-    crate::il2cpp::hook::UnityEngine_TextRenderingModule::TextMesh::apply_translations(&completed);
-
-    #[cfg(target_os = "windows")]
-    {
-        if microseh::try_seh(|| crate::windows::smtc::on_update()).is_err() {
-            error!("[smtc] SEH exception in on_update!");
         }
     }
 }

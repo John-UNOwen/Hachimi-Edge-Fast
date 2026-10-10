@@ -22,21 +22,23 @@ type RaceUpdateCameraDistanceBlendRateFn = extern "C" fn(
     p2: *mut Il2CppObject,
     p3: *mut Il2CppObject,
 );
-extern "C" fn RaceModelController_UpdateCameraDistanceBlendRate(
+def_detour! {
+    RaceModelController_UpdateCameraDistanceBlendRate(
     this: *mut Il2CppObject,
     p1: *mut Il2CppObject,
     p2: *mut Il2CppObject,
     p3: *mut Il2CppObject,
 ) {
-    if free_camera::is_scene_enabled(CameraScene::Race) {
-        return;
+            if free_camera::is_scene_enabled(CameraScene::Race) {
+            return;
+        }
+        get_orig_fn!(RaceModelController_UpdateCameraDistanceBlendRate, RaceUpdateCameraDistanceBlendRateFn)(
+            this,
+            p1,
+            p2,
+            p3,
+        );
     }
-    get_orig_fn!(RaceModelController_UpdateCameraDistanceBlendRate, RaceUpdateCameraDistanceBlendRateFn)(
-        this,
-        p1,
-        p2,
-        p3,
-    );
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

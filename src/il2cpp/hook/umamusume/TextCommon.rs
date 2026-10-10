@@ -24,35 +24,37 @@ static mut REBUILDOUTLINE_ADDR: usize = 0;
 impl_addr_wrapper_fn!(RebuildOutline, REBUILDOUTLINE_ADDR, (), this: *mut Il2CppObject);
 
 type AwakeFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Awake(this: *mut Il2CppObject) {
-    get_orig_fn!(Awake, AwakeFn)(this);
+def_detour! {
+    Awake(this: *mut Il2CppObject) {
+            get_orig_fn!(Awake, AwakeFn)(this);
 
-    let localized_data = Hachimi::instance().localized_data.load();
-    let config = Hachimi::instance().config.load();
+        let localized_data = Hachimi::instance().localized_data.load();
+        let config = Hachimi::instance().config.load();
 
-    if config.replace_to_builtin_font {
-        Text::AssignDefaultFont(this);
-    }
-
-    let font = localized_data.load_replacement_font();
-    if !font.is_null() {
-        Text::set_font(this, font);
-    }
-
-    if localized_data.config.text_common_allow_overflow {
-        Text::set_horizontalOverflow(this, 1);
-        Text::set_verticalOverflow(this, 1);
-    }
-
-    if localized_data.config.text_common_best_fit {
-        // Do not touch game-set instances as they likely use special values.
-        if Text::get_best_fit(this) {
-            return;
+        if config.replace_to_builtin_font {
+            Text::AssignDefaultFont(this);
         }
-        let cur_size = Text::get_fontSize(this);
-        Text::set_best_fit_min_size(this, cur_size.min(10));
-        Text::set_best_fit_max_size(this, cur_size);
-        Text::set_best_fit(this, true);
+
+        let font = localized_data.load_replacement_font();
+        if !font.is_null() {
+            Text::set_font(this, font);
+        }
+
+        if localized_data.config.text_common_allow_overflow {
+            Text::set_horizontalOverflow(this, 1);
+            Text::set_verticalOverflow(this, 1);
+        }
+
+        if localized_data.config.text_common_best_fit {
+            // Do not touch game-set instances as they likely use special values.
+            if Text::get_best_fit(this) {
+                return;
+            }
+            let cur_size = Text::get_fontSize(this);
+            Text::set_best_fit_min_size(this, cur_size.min(10));
+            Text::set_best_fit_max_size(this, cur_size);
+            Text::set_best_fit(this, true);
+        }
     }
 }
 
@@ -62,33 +64,35 @@ extern "C" fn Awake(this: *mut Il2CppObject) {
 // object adjustments, which is exactly what we'll do here and take over wrapping.
 
 type SetSystemTextWithLineHeadWrapFn = extern "C" fn(this: *mut Il2CppObject, system_text: *mut CharacterSystemText, maxCharacter: i32);
-extern "C" fn SetSystemTextWithLineHeadWrap(this: *mut Il2CppObject, system_text: *mut CharacterSystemText, max_character: i32) {
-    let ld = &Hachimi::instance().localized_data.load();
-    let systext = unsafe {&*system_text};
+def_detour! {
+    SetSystemTextWithLineHeadWrap(this: *mut Il2CppObject, system_text: *mut CharacterSystemText, max_character: i32) {
+            let ld = &Hachimi::instance().localized_data.load();
+        let systext = unsafe {&*system_text};
 
-    // Only process localized text so as to not possibly fuck up formatting of non-custom text.
-    if ld.character_system_text_dict.get(&systext.characterId).and_then(|c| c.get(&systext.voiceId)).is_none() {
-        return get_orig_fn!(SetSystemTextWithLineHeadWrap, SetSystemTextWithLineHeadWrapFn)(this, system_text, max_character);
+        // Only process localized text so as to not possibly fuck up formatting of non-custom text.
+        if ld.character_system_text_dict.get(&systext.characterId).and_then(|c| c.get(&systext.voiceId)).is_none() {
+            return get_orig_fn!(SetSystemTextWithLineHeadWrap, SetSystemTextWithLineHeadWrapFn)(this, system_text, max_character);
+        }
+
+        let cue_sheet = unsafe{(*systext.cueSheet).as_utf16str()}.to_string();
+        let cue_type = cue_sheet.split('_').nth(2).unwrap_or_default();
+        let font_size = Text::get_fontSize(this);
+        debug!("Cue sheet: {}, Font size: {}", cue_type, font_size);
+
+        let max_lines = *ld.config.systext_cue_lines.get(cue_type).unwrap_or_else(||
+            ld.config.systext_cue_lines.get("default").unwrap_or(&4)
+        );
+
+        // Always fit systext if using wrapper.
+        if let Some(wrapped_text) = wrap_fit_text_il2cpp(systext.text, max_character, max_lines, font_size) {
+            // Allow wrapper to dictate display.
+            Text::set_horizontalOverflow(this, 1);
+            Text::set_verticalOverflow(this, 1);
+            return Text::set_text(this, wrapped_text);
+        }
+
+        get_orig_fn!(SetSystemTextWithLineHeadWrap, SetSystemTextWithLineHeadWrapFn)(this, system_text, max_character);
     }
-
-    let cue_sheet = unsafe{(*systext.cueSheet).as_utf16str()}.to_string();
-    let cue_type = cue_sheet.split('_').nth(2).unwrap_or_default();
-    let font_size = Text::get_fontSize(this);
-    debug!("Cue sheet: {}, Font size: {}", cue_type, font_size);
-
-    let max_lines = *ld.config.systext_cue_lines.get(cue_type).unwrap_or_else(||
-        ld.config.systext_cue_lines.get("default").unwrap_or(&4)
-    );
-
-    // Always fit systext if using wrapper.
-    if let Some(wrapped_text) = wrap_fit_text_il2cpp(systext.text, max_character, max_lines, font_size) {
-        // Allow wrapper to dictate display.
-        Text::set_horizontalOverflow(this, 1);
-        Text::set_verticalOverflow(this, 1);
-        return Text::set_text(this, wrapped_text);
-    }
-
-    get_orig_fn!(SetSystemTextWithLineHeadWrap, SetSystemTextWithLineHeadWrapFn)(this, system_text, max_character);
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

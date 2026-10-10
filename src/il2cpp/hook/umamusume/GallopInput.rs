@@ -10,13 +10,15 @@ use crate::{
 use super::WindowsGamepadControl;
 
 type MousePositionFn = extern "C" fn() -> Vector3_t;
-extern "C" fn mousePosition() -> Vector3_t {
-    if !Hachimi::instance().config.load().windows.freeform_window {
-        return get_orig_fn!(mousePosition, MousePositionFn)();
-    }
+def_detour! {
+    mousePosition() -> Vector3_t {
+            if !Hachimi::instance().config.load().windows.freeform_window {
+            return get_orig_fn!(mousePosition, MousePositionFn)();
+        }
 
-    WindowsGamepadControl::UpdateInputControls(WindowsGamepadControl::instance());
-    Input::get_mousePosition()
+        WindowsGamepadControl::UpdateInputControls(WindowsGamepadControl::instance());
+        Input::get_mousePosition()
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

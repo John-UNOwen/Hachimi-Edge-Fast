@@ -1,15 +1,25 @@
 use crate::{core::taskbar::{self, TBPF_INDETERMINATE, TBPF_NOPROGRESS}, il2cpp::{symbols::get_method_addr, types::*}};
 
 type ShowFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Show(this: *mut Il2CppObject) {
-    taskbar::update_connecting_state(TBPF_INDETERMINATE);
-    get_orig_fn!(Show, ShowFn)(this);
+def_detour! {
+    Show(this: *mut Il2CppObject) {
+            taskbar::update_connecting_state(TBPF_INDETERMINATE);
+        get_orig_fn!(Show, ShowFn)(this);
+    }
+    bail {
+                get_orig_fn!(Show, ShowFn)(this)
+    }
 }
 
 type HideFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Hide(this: *mut Il2CppObject) {
-    taskbar::update_connecting_state(TBPF_NOPROGRESS);
-    get_orig_fn!(Hide, HideFn)(this);
+def_detour! {
+    Hide(this: *mut Il2CppObject) {
+            taskbar::update_connecting_state(TBPF_NOPROGRESS);
+        get_orig_fn!(Hide, HideFn)(this);
+    }
+    bail {
+                get_orig_fn!(Hide, HideFn)(this)
+    }
 }
 
 pub fn init(umamusume: *const Il2CppImage) {

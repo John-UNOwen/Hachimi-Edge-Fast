@@ -17,11 +17,13 @@ fn set_UpdateMode(this: *mut Il2CppObject, value: &SpringUpdateMode) {
 }
 
 type InitFn = extern "C" fn(this: *mut Il2CppObject);
-extern "C" fn Init(this: *mut Il2CppObject) {
-    get_orig_fn!(Init, InitFn)(this);
+def_detour! {
+    Init(this: *mut Il2CppObject) {
+            get_orig_fn!(Init, InitFn)(this);
 
-    if let Some(mode) = Hachimi::instance().config.load().physics_update_mode.as_ref() {
-        set_UpdateMode(this, mode);
+        if let Some(mode) = Hachimi::instance().config.load().physics_update_mode.as_ref() {
+            set_UpdateMode(this, mode);
+        }
     }
 }
 

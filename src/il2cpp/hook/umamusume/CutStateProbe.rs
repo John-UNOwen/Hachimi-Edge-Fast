@@ -780,11 +780,16 @@ type MoveNextFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
 // Dumped as `MoveNext/0 -> bool()` on `<PlayTrainingCut>d__70`. Unity drives a live coroutine by calling
 // `MoveNext` on it, so this is the door that says whether the training cut's coroutine is advancing,
 // where it is sitting, and what the game's own timing values are while it sits there.
-extern "C" fn PlayTrainingCutStateMachine_MoveNext(this: *mut Il2CppObject) -> bool {
-    observe_step(this);
-    unsafe { note_values(this) };
+def_detour! {
+    PlayTrainingCutStateMachine_MoveNext(this: *mut Il2CppObject) coroutine _answer -> bool {
+            observe_step(this);
+        unsafe { note_values(this) };
 
-    get_orig_fn!(PlayTrainingCutStateMachine_MoveNext, MoveNextFn)(this)
+        get_orig_fn!(PlayTrainingCutStateMachine_MoveNext, MoveNextFn)(this)
+    }
+    bail {
+                get_orig_fn!(PlayTrainingCutStateMachine_MoveNext, MoveNextFn)(this)
+    }
 }
 
 // Whether `obj` is the machine these field handles belong to. A door that hands back a coroutine from a

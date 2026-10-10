@@ -25,11 +25,13 @@ static mut CREATE_RENDER_TEXTURE_FROM_SCREEN_ADDR: usize = 0;
 impl_addr_wrapper_fn!(CreateRenderTextureFromScreen, CREATE_RENDER_TEXTURE_FROM_SCREEN_ADDR, (), this: *mut Il2CppObject);
 
 type CheckGamepadInputFn = extern "C" fn(this: *mut Il2CppObject) -> bool;
-extern "C" fn CheckGamepadInput(this: *mut Il2CppObject) -> bool {
-    if free_camera::is_game_input_capture_active() {
-        false
-    } else {
-        get_orig_fn!(CheckGamepadInput, CheckGamepadInputFn)(this)
+def_detour! {
+    CheckGamepadInput(this: *mut Il2CppObject) -> bool {
+            if free_camera::is_game_input_capture_active() {
+            false
+        } else {
+            get_orig_fn!(CheckGamepadInput, CheckGamepadInputFn)(this)
+        }
     }
 }
 

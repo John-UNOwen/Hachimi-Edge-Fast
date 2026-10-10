@@ -18,107 +18,154 @@ use crate::{
     },
 };
 
-#[cfg(target_os = "android")]
-extern "C" fn ChangeScreenOrientationLandscapeAsync_MoveNext(
+def_detour! {
+    #[cfg(target_os = "android")]
+    ChangeScreenOrientationLandscapeAsync_MoveNext(
     enumerator: *mut Il2CppObject,
-) -> bool {
-    use crate::il2cpp::symbols::MoveNextFn;
-    let moved =
-        get_orig_fn!(ChangeScreenOrientationLandscapeAsync_MoveNext, MoveNextFn)(enumerator);
-    if !moved {
-        super::UIManager::apply_ui_scale();
+) coroutine answer -> bool {
+            use crate::il2cpp::symbols::MoveNextFn;
+        let moved =
+            get_orig_fn!(ChangeScreenOrientationLandscapeAsync_MoveNext, MoveNextFn)(enumerator);
+        answer.publish(moved);
+        if !moved {
+            super::UIManager::apply_ui_scale();
+        }
+        moved
     }
-    moved
 }
 
-#[cfg(target_os = "android")]
-extern "C" fn ChangeScreenOrientationPortraitAsync_MoveNext(enumerator: *mut Il2CppObject) -> bool {
-    use crate::il2cpp::symbols::MoveNextFn;
-    let moved = get_orig_fn!(ChangeScreenOrientationPortraitAsync_MoveNext, MoveNextFn)(enumerator);
-    if !moved {
-        super::UIManager::apply_ui_scale();
+def_detour! {
+    #[cfg(target_os = "android")]
+    ChangeScreenOrientationPortraitAsync_MoveNext(enumerator: *mut Il2CppObject) coroutine answer -> bool {
+            use crate::il2cpp::symbols::MoveNextFn;
+        let moved = get_orig_fn!(ChangeScreenOrientationPortraitAsync_MoveNext, MoveNextFn)(enumerator);
+        answer.publish(moved);
+        if !moved {
+            super::UIManager::apply_ui_scale();
+        }
+        moved
     }
-    moved
 }
 
 #[cfg(target_os = "android")]
 type ChangeScreenOrientationLandscapeAsyncFn =
     extern "C" fn() -> crate::il2cpp::symbols::IEnumerator;
-#[cfg(target_os = "android")]
-extern "C" fn ChangeScreenOrientationLandscapeAsync() -> crate::il2cpp::symbols::IEnumerator {
-    let enumerator = get_orig_fn!(
-        ChangeScreenOrientationLandscapeAsync,
-        ChangeScreenOrientationLandscapeAsyncFn
-    )();
-    if Hachimi::instance().config.load().ui_scale == 1.0 {
-        return enumerator;
-    }
+def_detour! {
+    #[cfg(target_os = "android")]
+    ChangeScreenOrientationLandscapeAsync() answer -> crate::il2cpp::symbols::IEnumerator {
+            let enumerator = get_orig_fn!(
+            ChangeScreenOrientationLandscapeAsync,
+            ChangeScreenOrientationLandscapeAsyncFn
+        )();
+        answer.publish(IEnumerator::from(enumerator.this));
+        if Hachimi::instance().config.load().ui_scale == 1.0 {
+            return enumerator;
+        }
 
-    if let Err(e) = enumerator.hook_move_next(ChangeScreenOrientationLandscapeAsync_MoveNext) {
-        error!("Failed to hook enumerator: {}", e);
-    }
+        if let Err(e) = enumerator.hook_move_next(ChangeScreenOrientationLandscapeAsync_MoveNext) {
+            error!("Failed to hook enumerator: {}", e);
+        }
 
-    enumerator
+        enumerator
+    }
 }
 
 #[cfg(target_os = "android")]
 type ChangeScreenOrientationPortraitAsyncFn =
     extern "C" fn() -> crate::il2cpp::symbols::IEnumerator;
-#[cfg(target_os = "android")]
-extern "C" fn ChangeScreenOrientationPortraitAsync() -> crate::il2cpp::symbols::IEnumerator {
-    let enumerator = get_orig_fn!(
-        ChangeScreenOrientationPortraitAsync,
-        ChangeScreenOrientationPortraitAsyncFn
-    )();
-    if Hachimi::instance().config.load().ui_scale == 1.0 {
-        return enumerator;
-    }
+def_detour! {
+    #[cfg(target_os = "android")]
+    ChangeScreenOrientationPortraitAsync() answer -> crate::il2cpp::symbols::IEnumerator {
+            let enumerator = get_orig_fn!(
+            ChangeScreenOrientationPortraitAsync,
+            ChangeScreenOrientationPortraitAsyncFn
+        )();
+        answer.publish(IEnumerator::from(enumerator.this));
+        if Hachimi::instance().config.load().ui_scale == 1.0 {
+            return enumerator;
+        }
 
-    if let Err(e) = enumerator.hook_move_next(ChangeScreenOrientationPortraitAsync_MoveNext) {
-        error!("Failed to hook enumerator: {}", e);
-    }
+        if let Err(e) = enumerator.hook_move_next(ChangeScreenOrientationPortraitAsync_MoveNext) {
+            error!("Failed to hook enumerator: {}", e);
+        }
 
-    enumerator
+        enumerator
+    }
 }
 
 #[cfg(target_os = "windows")]
 type GetWidthFn = extern "C" fn() -> i32;
-#[cfg(target_os = "windows")]
-extern "C" fn get_Width() -> i32 {
-    if Hachimi::instance().config.load().windows.freeform_window {
-        return UnityScreen::get_width();
-    }
+def_detour! {
+    #[cfg(target_os = "windows")]
+    get_Width() -> i32 {
+            if Hachimi::instance().config.load().windows.freeform_window {
+            return UnityScreen::get_width();
+        }
 
-    if let Some((width, _)) = crate::windows::utils::get_scaling_res() {
-        return width;
-    }
+        if let Some((width, _)) = crate::windows::utils::get_scaling_res() {
+            return width;
+        }
 
-    get_orig_fn!(get_Width, GetWidthFn)()
+        get_orig_fn!(get_Width, GetWidthFn)()
+    }
+    // Not a `bail`: this is not the call the game would have got, it is the value this wrapper says
+    // it answers with when it cannot answer with the game's, and a `Faulted` may have it because
+    // nothing in it replays the state that just faulted. The trip it is written for is the C1 chain:
+    // `get_orig_fn!` answering 0 for a trampoline the detach path took back, the line above calling
+    // through 0, the barrier taking the access violation. Answering that with the zero value - which
+    // is what a value arm used to do whatever the wrapper stated - hands the game and
+    // `windows/utils.rs` a divisor of 0. This is the same answer `get_Width_orig` already falls back
+    // to for the same reason.
+    fallback {
+                UnityScreen::get_width()
+    }
 }
 
 #[cfg(target_os = "windows")]
 pub fn get_Width_orig() -> i32 {
-    get_orig_fn!(get_Width, GetWidthFn)()
+    // `windows/utils.rs` calls this on the resolution-scaling path, and the result is a divisor
+    // there, so 0 is not an answer that can be passed on. These two `get_Method_addr` lookups sit
+    // on a game class (`Gallop.Screen`), which is exactly where a run writes `_addr is null` - the
+    // Global log has `umamusume::Screen: SetResolution_addr is null` - so fall back to what Unity
+    // itself reports, the same guarded call the detour above uses.
+    let Some(get_width) = get_orig_fn_guarded!(get_Width, GetWidthFn) else {
+        return UnityScreen::get_width();
+    };
+
+    get_width()
 }
 
 #[cfg(target_os = "windows")]
 type GetHeightFn = extern "C" fn() -> i32;
-#[cfg(target_os = "windows")]
-extern "C" fn get_Height() -> i32 {
-    if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
-        return UnityScreen::get_height();
-    }
+def_detour! {
+    #[cfg(target_os = "windows")]
+    get_Height() -> i32 {
+            if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
+            return UnityScreen::get_height();
+        }
 
-    if let Some((_, height)) = crate::windows::utils::get_scaling_res() {
-        return height;
-    }
+        if let Some((_, height)) = crate::windows::utils::get_scaling_res() {
+            return height;
+        }
 
-    get_orig_fn!(get_Height, GetHeightFn)()
+        get_orig_fn!(get_Height, GetHeightFn)()
+    }
+    // As above: the height is a divisor too, and `get_Height_orig` already treats Unity's answer as
+    // the one that can be passed on. A `Faulted` takes it for the same reason `get_Width` does - the
+    // body's own `get_orig_fn!` call is the thing that faults, so the answer cannot be a replay of it.
+    fallback {
+                UnityScreen::get_height()
+    }
 }
 
 #[cfg(target_os = "windows")]
 pub fn get_Height_orig() -> i32 {
-    get_orig_fn!(get_Height, GetHeightFn)()
+    // Same call site as `get_Width_orig` above: a divisor in `windows/utils.rs`, never a jump.
+    let Some(get_height) = get_orig_fn_guarded!(get_Height, GetHeightFn) else {
+        return UnityScreen::get_height();
+    };
+
+    get_height()
 }
 
 #[cfg(target_os = "windows")]
@@ -158,81 +205,101 @@ type SetResolutionFn = extern "C" fn(
     force_update: bool,
     skip_keep_aspect: bool,
 );
-#[cfg(target_os = "windows")]
-extern "C" fn SetResolution(
+def_detour! {
+    #[cfg(target_os = "windows")]
+    SetResolution(
     width: i32,
     height: i32,
     fullscreen: bool,
     force_update: bool,
     skip_keep_aspect: bool,
 ) {
-    if !Hachimi::instance().config.load().windows.freeform_window || Hachimi::instance().game.region == Region::Global {
-        get_orig_fn!(SetResolution, SetResolutionFn)(
-            width,
-            height,
-            fullscreen,
-            force_update,
-            skip_keep_aspect,
-        );
+            if !Hachimi::instance().config.load().windows.freeform_window || Hachimi::instance().game.region == Region::Global {
+            get_orig_fn!(SetResolution, SetResolutionFn)(
+                width,
+                height,
+                fullscreen,
+                force_update,
+                skip_keep_aspect,
+            );
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 type IsCurrentOrientationFn = extern "C" fn(target: ScreenOrientation) -> bool;
-#[cfg(target_os = "windows")]
-extern "C" fn IsCurrentOrientation(target: ScreenOrientation) -> bool {
-    if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
-        return true;
-    }
+def_detour! {
+    #[cfg(target_os = "windows")]
+    IsCurrentOrientation(target: ScreenOrientation) -> bool {
+            if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
+            return true;
+        }
 
-    get_orig_fn!(IsCurrentOrientation, IsCurrentOrientationFn)(target)
+        get_orig_fn!(IsCurrentOrientation, IsCurrentOrientationFn)(target)
+    }
 }
 
 #[cfg(target_os = "windows")]
 type WaitDeviceOrientationFn = extern "C" fn(target: ScreenOrientation) -> IEnumerator;
-#[cfg(target_os = "windows")]
-extern "C" fn WaitDeviceOrientation(target: ScreenOrientation) -> IEnumerator {
-    let enumerator = get_orig_fn!(WaitDeviceOrientation, WaitDeviceOrientationFn)(target);
-    if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
-        if let Err(e) = enumerator.hook_move_next(WaitDeviceOrientation_MoveNext) {
-            error!("Failed to stop WaitDeviceOrientation: {}", e);
-        }
-    }
-    enumerator
-}
-
-#[cfg(target_os = "windows")]
-extern "C" fn WaitDeviceOrientation_MoveNext(_enumerator: *mut Il2CppObject) -> bool {
-    if crate::windows::wnd_hook::close_freeform_window_for_landscape() {
-        return get_orig_fn!(WaitDeviceOrientation_MoveNext, MoveNextFn)(_enumerator);
-    }
-
-    if Hachimi::instance().config.load().windows.freeform_window {
-        return false;
-    }
-
-    get_orig_fn!(WaitDeviceOrientation_MoveNext, MoveNextFn)(_enumerator)
-}
-
-type ChangeScreenOrientationFn = extern "C" fn(target: ScreenOrientation, force: bool) -> IEnumerator;
-extern "C" fn ChangeScreenOrientation(target: ScreenOrientation, force: bool) -> IEnumerator {
+def_detour! {
     #[cfg(target_os = "windows")]
-    {
-        let enumerator = get_orig_fn!(ChangeScreenOrientation, ChangeScreenOrientationFn)(target, force);
+    WaitDeviceOrientation(target: ScreenOrientation) answer -> IEnumerator {
+            let enumerator = get_orig_fn!(WaitDeviceOrientation, WaitDeviceOrientationFn)(target);
+        answer.publish(IEnumerator::from(enumerator.this));
         if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
-            if let Err(e) = enumerator.hook_move_next(ChangeScreenOrientation_MoveNext) {
-                error!("Failed to stop ChangeScreenOrientation: {}", e);
+            if let Err(e) = enumerator.hook_move_next(WaitDeviceOrientation_MoveNext) {
+                error!("Failed to stop WaitDeviceOrientation: {}", e);
             }
         }
         enumerator
     }
-    #[cfg(target_os = "android")]
-    {
-        if should_force_orientation() {
-            let force_orientation = Hachimi::instance().config.load().android.force_orientation_mode;
-            return get_orig_fn!(ChangeScreenOrientation, ChangeScreenOrientationFn)(force_orientation, true);
+}
+
+def_detour! {
+    #[cfg(target_os = "windows")]
+    WaitDeviceOrientation_MoveNext(_enumerator: *mut Il2CppObject) coroutine _answer -> bool {
+            if crate::windows::wnd_hook::close_freeform_window_for_landscape() {
+            return get_orig_fn!(WaitDeviceOrientation_MoveNext, MoveNextFn)(_enumerator);
         }
-        get_orig_fn!(ChangeScreenOrientation, ChangeScreenOrientationFn)(target, force)
+
+        if Hachimi::instance().config.load().windows.freeform_window {
+            // Holding this coroutine open is the wrapper's own decision, and on a clean call it
+            // stands. Nothing here is an answer the game gave, so a trip is answered by the door
+            // rule instead: the coroutine is left to the game's own `MoveNext`.
+            return false;
+        }
+
+        get_orig_fn!(WaitDeviceOrientation_MoveNext, MoveNextFn)(_enumerator)
+    }
+}
+
+type ChangeScreenOrientationFn = extern "C" fn(target: ScreenOrientation, force: bool) -> IEnumerator;
+def_detour! {
+    ChangeScreenOrientation(target: ScreenOrientation, force: bool) answer -> IEnumerator {
+            #[cfg(target_os = "windows")]
+        {
+            let enumerator = get_orig_fn!(ChangeScreenOrientation, ChangeScreenOrientationFn)(target, force);
+            answer.publish(IEnumerator::from(enumerator.this));
+            if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
+                if let Err(e) = enumerator.hook_move_next(ChangeScreenOrientation_MoveNext) {
+                    error!("Failed to stop ChangeScreenOrientation: {}", e);
+                }
+            }
+            enumerator
+        }
+        #[cfg(target_os = "android")]
+        {
+            if should_force_orientation() {
+                let force_orientation = Hachimi::instance().config.load().android.force_orientation_mode;
+                let swapped = get_orig_fn!(ChangeScreenOrientation, ChangeScreenOrientationFn)(force_orientation, true);
+                answer.publish(IEnumerator::from(swapped.this));
+                return swapped;
+            }
+
+            let enumerator = get_orig_fn!(ChangeScreenOrientation, ChangeScreenOrientationFn)(target, force);
+            answer.publish(IEnumerator::from(enumerator.this));
+            enumerator
+        }
     }
 }
 
@@ -246,86 +313,101 @@ pub fn should_force_orientation() -> bool {
     true
 }
 
-#[cfg(target_os = "windows")]
-extern "C" fn ChangeScreenOrientation_MoveNext(_enumerator: *mut Il2CppObject) -> bool {
-    if crate::windows::wnd_hook::close_freeform_window_for_landscape() {
-        return get_orig_fn!(ChangeScreenOrientation_MoveNext, MoveNextFn)(_enumerator);
-    }
+def_detour! {
+    #[cfg(target_os = "windows")]
+    ChangeScreenOrientation_MoveNext(_enumerator: *mut Il2CppObject) coroutine _answer -> bool {
+            if crate::windows::wnd_hook::close_freeform_window_for_landscape() {
+            return get_orig_fn!(ChangeScreenOrientation_MoveNext, MoveNextFn)(_enumerator);
+        }
 
-    if Hachimi::instance().config.load().windows.freeform_window {
-        return false;
-    }
+        if Hachimi::instance().config.load().windows.freeform_window {
+            // Not the game's answer, so nothing is published and a trip goes to the door rule.
+            return false;
+        }
 
-    get_orig_fn!(ChangeScreenOrientation_MoveNext, MoveNextFn)(_enumerator)
+        get_orig_fn!(ChangeScreenOrientation_MoveNext, MoveNextFn)(_enumerator)
+    }
 }
 
 #[cfg(target_os = "windows")]
 type ChangeScreenOrientationAsyncFn = extern "C" fn() -> IEnumerator;
-#[cfg(target_os = "windows")]
-extern "C" fn ChangeScreenOrientationLandscapeAsyncWindows() -> IEnumerator {
-    let enumerator = get_orig_fn!(
-        ChangeScreenOrientationLandscapeAsyncWindows,
-        ChangeScreenOrientationAsyncFn
-    )();
-    if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
-        if let Err(e) =
-            enumerator.hook_move_next(ChangeScreenOrientationLandscapeAsyncWindows_MoveNext)
-        {
-            error!("Failed to stop landscape orientation change: {}", e);
+def_detour! {
+    #[cfg(target_os = "windows")]
+    ChangeScreenOrientationLandscapeAsyncWindows() answer -> IEnumerator {
+            let enumerator = get_orig_fn!(
+            ChangeScreenOrientationLandscapeAsyncWindows,
+            ChangeScreenOrientationAsyncFn
+        )();
+        answer.publish(IEnumerator::from(enumerator.this));
+        if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
+            if let Err(e) =
+                enumerator.hook_move_next(ChangeScreenOrientationLandscapeAsyncWindows_MoveNext)
+            {
+                error!("Failed to stop landscape orientation change: {}", e);
+            }
         }
+        enumerator
     }
-    enumerator
 }
 
-#[cfg(target_os = "windows")]
-extern "C" fn ChangeScreenOrientationLandscapeAsyncWindows_MoveNext(
+def_detour! {
+    #[cfg(target_os = "windows")]
+    ChangeScreenOrientationLandscapeAsyncWindows_MoveNext(
     _enumerator: *mut Il2CppObject,
-) -> bool {
-    if crate::windows::wnd_hook::close_freeform_window_for_landscape() {
-        return get_orig_fn!(
+) coroutine _answer -> bool {
+            if crate::windows::wnd_hook::close_freeform_window_for_landscape() {
+            return get_orig_fn!(
+                ChangeScreenOrientationLandscapeAsyncWindows_MoveNext,
+                MoveNextFn
+            )(_enumerator);
+        }
+
+        if Hachimi::instance().config.load().windows.freeform_window {
+            // Not the game's answer, so nothing is published and a trip goes to the door rule.
+            return false;
+        }
+
+        get_orig_fn!(
             ChangeScreenOrientationLandscapeAsyncWindows_MoveNext,
             MoveNextFn
-        )(_enumerator);
+        )(_enumerator)
     }
-
-    if Hachimi::instance().config.load().windows.freeform_window {
-        return false;
-    }
-
-    get_orig_fn!(
-        ChangeScreenOrientationLandscapeAsyncWindows_MoveNext,
-        MoveNextFn
-    )(_enumerator)
 }
 
-#[cfg(target_os = "windows")]
-extern "C" fn ChangeScreenOrientationPortraitAsyncWindows() -> IEnumerator {
-    let enumerator = get_orig_fn!(
-        ChangeScreenOrientationPortraitAsyncWindows,
-        ChangeScreenOrientationAsyncFn
-    )();
-    if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
-        if let Err(e) =
-            enumerator.hook_move_next(ChangeScreenOrientationPortraitAsyncWindows_MoveNext)
-        {
-            error!("Failed to stop portrait orientation change: {}", e);
+def_detour! {
+    #[cfg(target_os = "windows")]
+    ChangeScreenOrientationPortraitAsyncWindows() answer -> IEnumerator {
+            let enumerator = get_orig_fn!(
+            ChangeScreenOrientationPortraitAsyncWindows,
+            ChangeScreenOrientationAsyncFn
+        )();
+        answer.publish(IEnumerator::from(enumerator.this));
+        if Hachimi::instance().config.load().windows.freeform_window && Hachimi::instance().game.region != Region::Global {
+            if let Err(e) =
+                enumerator.hook_move_next(ChangeScreenOrientationPortraitAsyncWindows_MoveNext)
+            {
+                error!("Failed to stop portrait orientation change: {}", e);
+            }
         }
+        enumerator
     }
-    enumerator
 }
 
-#[cfg(target_os = "windows")]
-extern "C" fn ChangeScreenOrientationPortraitAsyncWindows_MoveNext(
+def_detour! {
+    #[cfg(target_os = "windows")]
+    ChangeScreenOrientationPortraitAsyncWindows_MoveNext(
     _enumerator: *mut Il2CppObject,
-) -> bool {
-    if Hachimi::instance().config.load().windows.freeform_window {
-        return false;
-    }
+) coroutine _answer -> bool {
+            if Hachimi::instance().config.load().windows.freeform_window {
+            // Not the game's answer, so nothing is published and a trip goes to the door rule.
+            return false;
+        }
 
-    get_orig_fn!(
-        ChangeScreenOrientationPortraitAsyncWindows_MoveNext,
-        MoveNextFn
-    )(_enumerator)
+        get_orig_fn!(
+            ChangeScreenOrientationPortraitAsyncWindows_MoveNext,
+            MoveNextFn
+        )(_enumerator)
+    }
 }
 
 #[cfg(target_os = "windows")]
