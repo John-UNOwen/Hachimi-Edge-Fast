@@ -242,6 +242,30 @@ pub const MIN_TIME_SCALE: f32 = 1.0;
 pub const MAX_UI_ANIMATION_SCALE: f32 = MAX_FACTOR;
 pub const MIN_UI_ANIMATION_SCALE: f32 = 0.1;
 
+// The ceiling on the *pair* of layers that reach one tween (C58, ledger item 62).
+//
+// `ui_animation_scale` multiplies the elapsed time `DG.Tweening.Core.TweenManager::Update` hands every
+// tween, both the scaled and the unscaled clock (`DOTween/TweenManager.rs:9-13`), and a group factor
+// divides the duration a game method is handed (`scale_duration` below). The two act on the same
+// quantity from opposite ends: a tween's real completion time is the duration it was told divided by
+// the clock it is measured on, so what the game waits on is shortened by the *product*. Each layer has
+// its own ceiling of `MAX_FACTOR` and neither one looked at the other, so a pair that is legal twice
+// reached 400x. That is what the runs read: `InitializePlateList 1 -> 0.05` (run 20) and
+// `CountupModifier_getDuration 0.16 -> 0.008` (run 17) beside `ui_animation 20` in the same snapshot,
+// which is 2.5 ms and 0.4 ms against a 5 ms frame at `target_fps 200` - a completion that finishes
+// before the coroutine waiting on it is parked on it. Run 31 ended 26 min 43 s on the career end
+// screen (`SceneDefine::ViewId` 1501) with that door the only training duration write the run reached,
+// `cut runs 4 wall 8283 ms timeline 0 ms`, and `CutInTimelineController::UpdateSpeed()` growing 3,456
+// to 46,652 while every door that advances a flow had frozen.
+//
+// The pair therefore gets the same ceiling each layer already has: 20x on one completion, the end of
+// the range the C58 concept's plain-Hachimi reading calls fast and still in order (2.4 s of play in
+// landing in 120 ms, about 21 frames, and plates 50 ms apart). The duration half backs off, because it
+// is the half that knows which group the value belongs to; the clock half is global to every tween in
+// the game, including ones this fork never touched, so trimming it there would slow tweens the group
+// factor has nothing to do with.
+pub const MAX_TWEEN_SPEED_PRODUCT: f32 = MAX_FACTOR;
+
 // The story choice auto select lever. `StoryChoiceController::CheckChoiceAutoTap` scales the
 // increment of `_choiceAutoSelectWaitTime` and `StoryViewController::GetTimeScaleByHighSpeedType`
 // scales the story time scale, both from `0.75 / delay` (C24 measured both sites multiplying by
@@ -350,7 +374,7 @@ pub fn factor(group: Group) -> f32 {
 // animation still receive it as a plain argument, so scaling the argument is the same
 // adjustment applied one level earlier, and it does not care how the caller stores it.
 pub fn scale_duration(value: f32, group: Group) -> f32 {
-    let factor = factor(group);
+    let factor = duration_factor(group);
 
     if factor == 1.0 || !value.is_finite() || value == 0.0 {
         return value;
@@ -359,6 +383,38 @@ pub fn scale_duration(value: f32, group: Group) -> f32 {
     // Dividing keeps the sign, so a negative offset moves towards zero instead of
     // flipping into a duration that did not exist before.
     value / factor
+}
+
+/// The headroom a duration in this group has left under `MAX_TWEEN_SPEED_PRODUCT`, which is what a
+/// duration door scales by. `ui_animation_scale` is read from the same live mirror the DOTween
+/// `Update` detour multiplies the tween clock by, so the shorter this fork has already made every
+/// tween, the less a group factor may take out of the duration handed to the game. At the neutral
+/// clock the headroom is `MAX_FACTOR` and every door scales exactly as it did; at `ui_animation 20`
+/// nothing is left, and a duration door hands on the number it received. A mirror below 1.0 (the
+/// slider's 0.1 floor slows the tween clock) leaves the group's own `MAX_FACTOR` ceiling in force,
+/// and a mirror that is not a number - which this module never stores - is read as the neutral 1.0.
+///
+/// The result never goes under 1.0: this is a ceiling on a speed-up, never a lever that slows the
+/// game (AGENTS section 5).
+pub fn duration_factor(group: Group) -> f32 {
+    let factor = factor(group);
+    let ui = ui_animation_scale();
+
+    // Fast path, and the shipped state: with the clock layer neutral this is the group's own factor,
+    // no division, and `MAX_FACTOR / ui` would be a wider bound than the group already has.
+    if ui <= 1.0 || !ui.is_finite() {
+        return factor;
+    }
+
+    factor.min(MAX_TWEEN_SPEED_PRODUCT / ui)
+}
+
+/// The speed a completion in this group actually runs at: the factor the duration is shortened by,
+/// times the factor the clock it is measured on is sped up by. `MAX_TWEEN_SPEED_PRODUCT` is a
+/// statement about this number, not about either lever, and a test that only reads the levers cannot
+/// see the defect it bounds (C58).
+pub fn tween_speed(group: Group) -> f32 {
+    duration_factor(group) * ui_animation_scale()
 }
 
 // A frame count never drops below one frame: the coroutines that advance animation
@@ -1113,11 +1169,16 @@ fn refresh_config_mirrors() {
 // and every scaling detour work from are the shipped code, testable the way `Time.rs`'s
 // `plan_write` is. `Config::default()` is what a build at the shipped options holds.
 fn mirror_config(config: &Config) {
-    TRANSITION_FACTOR.store(normalize(config.transition_speed).to_bits(), Ordering::Release);
-    SCREENS_FACTOR.store(normalize(config.result_screen_speed).to_bits(), Ordering::Release);
-    STORY_FACTOR.store(normalize(config.story_speed).to_bits(), Ordering::Release);
+    let transition = normalize(config.transition_speed);
+    let screens = normalize(config.result_screen_speed);
+    let story = normalize(config.story_speed);
+    let ui = normalize_ui_animation_scale(config.ui_animation_scale);
+
+    TRANSITION_FACTOR.store(transition.to_bits(), Ordering::Release);
+    SCREENS_FACTOR.store(screens.to_bits(), Ordering::Release);
+    STORY_FACTOR.store(story.to_bits(), Ordering::Release);
     TIME_SCALE.store(normalize_time_scale(config.time_scale).to_bits(), Ordering::Release);
-    UI_ANIMATION_SCALE.store(normalize_ui_animation_scale(config.ui_animation_scale).to_bits(), Ordering::Release);
+    UI_ANIMATION_SCALE.store(ui.to_bits(), Ordering::Release);
     // Clamped here so neither story choice site divides by the delay itself: `CheckChoiceAutoTap`
     // runs while a choice is up and `GetTimeScaleByHighSpeedType` is a story path getter, so both
     // read this mirror instead of the config (C24).
@@ -1125,6 +1186,39 @@ fn mirror_config(config: &Config) {
         normalize_story_choice_auto_select_multiplier(config.story_choice_auto_select_delay).to_bits(),
         Ordering::Release,
     );
+
+    note_pair_ceiling(ui, [transition, screens, story]);
+}
+
+// A clamp a run cannot see is a clamp that did not happen (AGENTS section 2). The pair ceiling shows
+// up on a door's hit line as a value handed on unchanged, which reads the same as a hook the game
+// never reached, so the config pass - once per setting change or view change, never a detour - says
+// it once for each clock setting that binds it. `PAIR_CEILING_LOGGED_UI` holds the clock value last
+// written; `normalize_ui_animation_scale` cannot produce 0.0, so its 0 sentinel means "nothing owed".
+static PAIR_CEILING_LOGGED_UI: AtomicU32 = AtomicU32::new(0);
+
+/// Whether this config pass got the line. `ui <= 1.0` binds nothing and clears the marker, so an arm
+/// switch back to a binding clock later in the same session is a window a run can still see.
+fn note_pair_ceiling(ui: f32, factors: [f32; 3]) -> bool {
+    if ui <= 1.0 || !ui.is_finite() {
+        PAIR_CEILING_LOGGED_UI.store(0, Ordering::Release);
+        return false;
+    }
+
+    if PAIR_CEILING_LOGGED_UI.swap(ui.to_bits(), Ordering::AcqRel) == ui.to_bits() {
+        return false;
+    }
+
+    debug!(
+        "AnimationSpeed: pair ceiling {product}x on one completion: ui_animation {ui}x leaves {headroom}x for a group factor (transition {transition}, result {screens}, story {story})",
+        product = MAX_TWEEN_SPEED_PRODUCT,
+        headroom = (MAX_TWEEN_SPEED_PRODUCT / ui).min(MAX_FACTOR),
+        transition = factors[0],
+        screens = factors[1],
+        story = factors[2],
+    );
+
+    true
 }
 
 // The factors as the write loop sees them: the mirrors, not the config. Indexed by
@@ -1220,6 +1314,17 @@ fn read_static(field: *mut FieldInfo, kind: Il2CppTypeEnum) -> f64 {
 
 // The arithmetic one write performs, kept apart from the il2cpp call so the passes are
 // testable without a game (see the tests at the end of this file).
+//
+// This half scales by `factor(group)` alone, not by `duration_factor(group)`: it is the one place the
+// module shortens a duration without the `MAX_TWEEN_SPEED_PRODUCT` pair bound (C58, ledger item 62). It
+// is not an oversight to patch here. The table mixes `f32` durations with `i4` frame counts, and frame
+// counts are polled on the frame clock the tween layer does not speed up, so a bound applied per group
+// would also cap half the entries that have no pair to bound; and one `APPLIED_FACTORS` marker per group
+// cannot record a duration factor and a frame count factor at once, which is the marker that decides
+// whether a pass rewrites a field at all. On this client the question is inert - 0 of 61 duration fields
+// resolve, every one of them a compile time constant (C13), and every apply pass reports `0 field
+// writes`. Bounding this half first means widening the marker table, and that is a decision for a client
+// whose fields do resolve.
 fn scale_value(original: f64, factor: f32, kind: Il2CppTypeEnum) -> f64 {
     match kind {
         Il2CppTypeEnum_IL2CPP_TYPE_R4 => (original as f32 / factor) as f64,
@@ -2126,6 +2231,194 @@ mod tests {
 
         // Nothing wrote the mirror in this test process, so a build at the defaults is inert.
         assert_eq!(ui_animation_scale(), 1.0, "the default mirrored to a speed-up");
+    }
+
+    // C58 / ledger item 62, spelled on the quantity the game waits on. Each layer has its own
+    // `MAX_FACTOR` ceiling and each was checked on its own, but a tween's real completion time is the
+    // duration handed to the game divided by the clock `TweenManager::Update` is handed, so the pair
+    // is what shortens the wait. The three rows are the ones the C58 concept measured in runs 17, 20
+    // and 26 beside `ui_animation 20` in the same config snapshot; the play in row is the door run 26
+    // took out of the scaling points, and it is here because it is the row the concept's table names.
+    const C58_TRAINING_ROWS: [(&str, f32); 3] = [
+        ("SingleModeMainViewTrainingCutStatus.PlayIn", 2.4),
+        ("TrainingParamChangeUI.InitializePlateList", 1.0),
+        ("CountupModifier.get_Duration", 0.16),
+    ];
+
+    // `target_fps 200`, the setting the C58 session ran with, is a 5 ms frame. Run 17's own frame
+    // clock measured about 182 fps, 5.5 ms a frame, so the budget is not generous.
+    const FRAME_MS_AT_200_FPS: f32 = 5.0;
+
+    /// Wall clock a completion takes on the mirrors as they stand: what the door hands the game, over
+    /// the clock the tween library is given. This is the number a coroutine resumes on, and neither
+    /// lever on its own is it.
+    fn completion_ms(raw: f32, group: Group) -> f32 {
+        scale_duration(raw, group) / ui_animation_scale() * 1000.0
+    }
+
+    fn ms_is(value: f32, expected: f32) -> bool { (value - expected).abs() < 0.01 }
+
+    /// A config with the four timing levers that make up a pair, everything else shipped.
+    fn timing_config(transition: f32, screens: f32, story: f32, ui: f32) -> Config {
+        Config {
+            transition_speed: transition,
+            result_screen_speed: screens,
+            story_speed: story,
+            ui_animation_scale: ui,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn the_two_speed_layers_that_reach_one_tween_are_bounded_as_a_pair() {
+        let _turn = pass_turn();
+
+        // The pair run 17 and run 20 ran on: `result 20` and `ui_animation 20`.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        // The bound is on the pair, not on either lever. A test that only reads the levers is the
+        // shape of blindness this item exists because of.
+        assert_eq!(factor(Group::Screens), MAX_FACTOR, "the group lever was rewritten instead of bounded");
+        assert_eq!(ui_animation_scale(), MAX_UI_ANIMATION_SCALE, "the clock lever was rewritten instead of bounded");
+
+        // What the two ceilings multiplied to before anything looked at the other one.
+        let unbounded = MAX_FACTOR * MAX_UI_ANIMATION_SCALE;
+        assert_eq!(unbounded, 400.0, "the pair no longer reaches the magnitude C58 recorded");
+
+        // What the pair does to each completion, printed before the assertions so a failure says the
+        // numbers the defect was measured in rather than only that something differed.
+        let handed: Vec<f32> = C58_TRAINING_ROWS.iter().map(|(_, raw)| scale_duration(*raw, Group::Screens)).collect();
+        let completions: Vec<f32> = handed.iter().map(|value| value / ui_animation_scale() * 1000.0).collect();
+
+        println!(
+            "C58 pair at result 20 / ui_animation 20: the two ceilings multiply to {unbounded}x; duration handed to the game {} {} {}, completion on a {}x tween clock {} ms, {} ms, {} ms against a {FRAME_MS_AT_200_FPS} ms frame",
+            handed[0], handed[1], handed[2],
+            ui_animation_scale(), completions[0], completions[1], completions[2],
+        );
+
+        // What it reaches now.
+        assert_eq!(tween_speed(Group::Screens), MAX_TWEEN_SPEED_PRODUCT, "the pair still multiplies");
+
+        // The defect as C58 measured it: two of the three training durations land under one frame
+        // when the pair is unbounded, and none of them does once the pair is bounded.
+        let unbounded_under_one_frame = C58_TRAINING_ROWS
+            .iter()
+            .filter(|(_, raw)| raw / unbounded * 1000.0 < FRAME_MS_AT_200_FPS)
+            .count();
+        assert_eq!(unbounded_under_one_frame, 2, "the unbounded pair no longer lands two of the three rows under a frame");
+
+        let bounded_under_one_frame = completions.iter().filter(|ms| **ms < FRAME_MS_AT_200_FPS).count();
+        assert_eq!(bounded_under_one_frame, 0, "{bounded_under_one_frame} of the three completions are still under one {FRAME_MS_AT_200_FPS} ms frame");
+
+        for ((door, raw), completion) in C58_TRAINING_ROWS.iter().zip(completions.iter()) {
+            let completion = *completion;
+
+            assert!(
+                ms_is(completion, raw / MAX_TWEEN_SPEED_PRODUCT * 1000.0),
+                "{door} completes in {completion} ms, not at the {}x the pair ceiling states", MAX_TWEEN_SPEED_PRODUCT
+            );
+            assert!(
+                completion >= FRAME_MS_AT_200_FPS,
+                "{door} still completes in {completion} ms, under one {FRAME_MS_AT_200_FPS} ms frame"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_factor_only_shortens_what_the_tween_clock_layer_left() {
+        let _turn = pass_turn();
+
+        // The whole ladder both sliders cover. Every step hands the game at most MAX_TWEEN_SPEED_PRODUCT
+        // on one completion, and the shorter the clock already runs the less the group may take out of
+        // the duration, down to handing it on unchanged.
+        for group in [Group::Transition, Group::Screens, Group::Story] {
+            for configured in [1.0, 2.0, 5.0, MAX_FACTOR] {
+                for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 4.0, 5.0, 10.0, MAX_UI_ANIMATION_SCALE] {
+                    mirror_config(&timing_config(configured, configured, configured, ui));
+
+                    let expected = configured.min((MAX_TWEEN_SPEED_PRODUCT / ui).max(1.0));
+                    assert_eq!(
+                        duration_factor(group), expected,
+                        "configured {configured} on a {ui} clock did not leave the group its headroom"
+                    );
+                    assert!(
+                        tween_speed(group) <= MAX_TWEEN_SPEED_PRODUCT,
+                        "{configured} against a {ui} clock reached {}x on one completion", tween_speed(group)
+                    );
+                    assert!(
+                        duration_factor(group) >= 1.0,
+                        "the bound turned a speed up into a slower animation than the game asked for"
+                    );
+                }
+            }
+        }
+
+        // At the shipped options every door is inert and the group still gets its full ceiling with
+        // nothing on the clock: this is the state the transition gap baselines in LEDGER section A
+        // were measured on.
+        mirror_config(&Config::default());
+        assert_eq!(duration_factor(Group::Transition), 1.0);
+        assert_eq!(scale_duration(1.0, Group::Transition), 1.0, "the neutral default changed a duration");
+        assert_eq!(tween_speed(Group::Transition), 1.0);
+
+        mirror_config(&timing_config(MAX_FACTOR, 1.0, 1.0, 1.0));
+        assert_eq!(duration_factor(Group::Transition), MAX_FACTOR, "a neutral clock cut the group below its own ceiling");
+        assert_eq!(scale_duration(1.0, Group::Transition), 1.0 / MAX_FACTOR);
+
+        // The clock slider's floor is a slow down of the tween clock. It is not headroom the group may
+        // spend twice: the group stays capped at its own MAX_FACTOR.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MIN_UI_ANIMATION_SCALE));
+        assert_eq!(duration_factor(Group::Screens), MAX_FACTOR, "the clock floor handed the group a wider ceiling");
+        assert!(tween_speed(Group::Screens) < MAX_TWEEN_SPEED_PRODUCT, "the pair left the ceiling through the clock floor");
+
+        // A mirror that is not a number is read as the neutral clock. This module never stores one;
+        // the bound must not turn one into a duration handed on at an invented factor.
+        UI_ANIMATION_SCALE.store(f32::NAN.to_bits(), Ordering::Release);
+        assert_eq!(duration_factor(Group::Screens), MAX_FACTOR, "a NAN clock changed a duration factor");
+    }
+
+    #[test]
+    fn the_plate_door_hands_the_game_its_own_interval_when_the_clock_layer_holds_its_20x() {
+        let _turn = pass_turn();
+
+        // The `All levers` arm: `result 20` and `ui_animation 20` (core::settings_preset). C62 holds
+        // this door at 0.25 s because run 31 handed the game 0.05 s. With the pair bounded the clock
+        // layer has already taken its 20x out of the same completion, so the floor is never reached
+        // and the door hands the cascade the interval the game asked for.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        let handed = plate_cascade_interval(1.0, scale_duration(1.0, Group::Screens));
+        assert_eq!(handed, 1.0, "the door still shortened the cascade on top of a 20x tween clock");
+        assert_eq!(completion_ms(handed, Group::Screens), 1000.0 / MAX_TWEEN_SPEED_PRODUCT);
+
+        // A clock at the neutral 1.0 is the state C62's floor was written for: the lever is back.
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, 1.0));
+        assert_eq!(plate_cascade_interval(1.0, scale_duration(1.0, Group::Screens)), MIN_PLATE_INTERVAL_SEC);
+    }
+
+    #[test]
+    fn the_pair_ceiling_line_is_owed_once_per_binding_clock_setting() {
+        let _turn = pass_turn();
+
+        // The neutral clock owes nothing, and it clears what was owed, so a session that leaves the
+        // `All levers` arm and comes back to it gets the line again in the second arm window (1516af6).
+        assert!(!note_pair_ceiling(1.0, [1.0, 1.0, 1.0]), "a neutral clock was announced as bound");
+
+        // A clock that binds the ceiling says it once. The same setting again is the same fact, and a
+        // config pass runs once per view change on top of once per setting change.
+        assert!(note_pair_ceiling(MAX_UI_ANIMATION_SCALE, [1.0, MAX_FACTOR, 1.0]), "the bound clock owed no line");
+        assert!(!note_pair_ceiling(MAX_UI_ANIMATION_SCALE, [1.0, MAX_FACTOR, 1.0]), "the same clock value printed twice");
+
+        assert!(!note_pair_ceiling(1.0, [1.0, 1.0, 1.0]));
+        assert!(note_pair_ceiling(MAX_UI_ANIMATION_SCALE, [1.0, MAX_FACTOR, 1.0]), "an arm switch back to a bound clock is invisible in the log");
+
+        // A different clock value is a different fact. The slider's floor is a slow down of the tween
+        // clock and binds nothing on its own.
+        assert!(note_pair_ceiling(5.0, [MAX_FACTOR, MAX_FACTOR, MAX_FACTOR]));
+        assert!(!note_pair_ceiling(MIN_UI_ANIMATION_SCALE, [MAX_FACTOR, MAX_FACTOR, MAX_FACTOR]));
+
+        // A mirror this module never stores still owes no line.
+        assert!(!note_pair_ceiling(f32::NAN, [1.0, 1.0, 1.0]));
     }
 
     // egui 0.33.3 `Slider::set_value`: the value is clamped to the range, then snapped to
