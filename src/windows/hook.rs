@@ -41,6 +41,35 @@ extern "C" fn LoadLibraryW(filename: PCWSTR) -> HMODULE {
     handle
 }
 
+type ExitProcessFn = extern "C" fn(exit_code: u32);
+extern "C" fn ExitProcess(exit_code: u32) {
+    // The door a normal in game quit reaches, which `DLL_PROCESS_DETACH` apparently does not: no run
+    // this fork has read printed the take-down counts, and the detach branch in `main.rs` was the only
+    // place they were said, so the fork could not tell a detach that never arrived from one that died
+    // on the way to the reports. The printing stands behind the barrier because this boundary cannot
+    // unwind, and a panic here would end the game in the middle of leaving. The call to the game's own
+    // exit never stands behind it and is never skipped: a mod that ate the exit call would leave the
+    // process hanging rather than closed.
+    let _ = crate::il2cpp::hook::guard::detour_fallback_or(
+        |_answer| {
+            info!("ExitProcess asked for with code {}", exit_code);
+            crate::core::hachimi::report_take_down_once();
+        },
+        || {},
+    );
+
+    let hachimi = Hachimi::instance();
+    let trampoline = hachimi.interceptor.get_trampoline_addr(ExitProcess as *const () as usize);
+    if trampoline == 0 {
+        // C1: an uninstalled hook answers 0, and 0 is not a way out of a process.
+        unsafe { ffi::ExitProcess(exit_code) };
+        return;
+    }
+
+    let orig_fn: ExitProcessFn = unsafe { std::mem::transmute(trampoline) };
+    orig_fn(exit_code);
+}
+
 fn init_internal() -> Result<(), Error> {
     let hachimi = Hachimi::instance();
 
@@ -63,6 +92,10 @@ fn init_internal() -> Result<(), Error> {
 
     info!("Hooking LoadLibraryW");
     hachimi.interceptor.hook(ffi::LoadLibraryW as *const () as usize, LoadLibraryW as *const () as usize)?;
+
+    // Armed beside the loader hook and never disarmed: the game calls this once, on the way out.
+    info!("Hooking ExitProcess");
+    hachimi.interceptor.hook(ffi::ExitProcess as *const () as usize, ExitProcess as *const () as usize)?;
 
     if let Ok(handle) = unsafe { GetModuleHandleW(w!("GameAssembly.dll")) } {
         info!("Late loading detected");
