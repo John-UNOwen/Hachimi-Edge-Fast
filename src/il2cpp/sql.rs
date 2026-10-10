@@ -1,4 +1,4 @@
-use std::{ptr, sync::{atomic::{AtomicBool, Ordering}, Mutex, RwLock}};
+use std::{ptr, sync::{atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering}, Mutex, RwLock}};
 use fnv::{FnvHashMap, FnvHashSet};
 use sqlparser::ast;
 use once_cell::sync::Lazy;
@@ -1045,35 +1045,139 @@ impl<'a> Iterator for BinaryOpIter<'a> {
     }
 }
 
+/// The last path component of a bundle name, under either separator a client reports.
+#[inline]
+pub fn bundle_file_name(name: &str) -> &str {
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+/// That component with a trailing extension removed (`atlas_common.a` -> `atlas_common`), and
+/// unchanged when the name carries no extension at all - which is how this client names bundles.
+#[inline]
+pub fn bundle_file_stem(name: &str) -> &str {
+    let file = bundle_file_name(name);
+    match file.rfind('.') {
+        None | Some(0) => file,
+        Some(idx) => &file[..idx],
+    }
+}
+
+/// The `a` table's `n` column, indexed under every form a client may report for the bundle it names.
+///
+/// The old key was `format!("{}.a", ..)` built off `n`, an extension this table does not have:
+/// `get_champions_live_max_year` below reads `n` values as `live/image/champions/tex_championslive_year_<i>`
+/// and parses what is left after that prefix as an `i32`, which a trailing `.a` would break on every
+/// row. That key could only ever be hit by a client reporting the bundle under a name carrying exactly
+/// that extension. Indexed under the name the table actually holds - whole, last component, component
+/// without extension - it answers every pair the old shape could have answered (an observed
+/// `<component>.a` reaches the row through `bundle_file_stem`) and the pairs it could not, which on
+/// this install is the ordinary case: a bundle named with no extension at all.
+fn index_logical_name(table: &mut FnvHashMap<String, String>, logical_name: &str, hash: &str) {
+    for key in [logical_name, bundle_file_name(logical_name), bundle_file_stem(logical_name)] {
+        if !key.is_empty() {
+            table.insert(key.to_owned(), hash.to_owned());
+        }
+    }
+}
+
+/// What this client's own `meta` table says about the two bundle names standing in front of the
+/// asset patch identity guard (C10, `hook/UnityEngine_AssetBundleModule/AssetBundle.rs`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetaIdentity {
+    /// This client records, for the bundle being loaded, exactly the identity the patch recorded.
+    Same,
+    /// The table names both sides and they are **different logical bundles**: this asset came from a
+    /// bundle the patch was not authored for, and that is known rather than guessed.
+    Different {
+        /// The logical name this client has for the identity the patch recorded.
+        expected_logical: String,
+        /// The logical name of the bundle being loaded.
+        observed_logical: String,
+    },
+    /// The table says nothing decidable: it is not readable here, it does not name the bundle being
+    /// loaded, or the two identities name the same logical bundle under different ids - which is what
+    /// a package authored against another client's install looks like from here, and is indistinguishable
+    /// from a bundle whose contents changed. Absence of evidence, not evidence of a difference.
+    Unknown,
+}
+
 #[derive(Default)]
 pub struct MetaData {
-    pub logical_name_to_hash: FnvHashMap<String, String>,
+    /// Every form the `a` table's `n` column can be reported under -> the `h` value it records.
+    pub name_to_hash: FnvHashMap<String, String>,
+    /// The other direction: a recorded `h` value -> the `n` value it belongs to. This is the direction
+    /// a client whose bundles are named by their physical id needs, to say which logical bundle the
+    /// asset in front of it belongs to.
+    pub hash_to_name: FnvHashMap<String, String>,
 }
 
 impl MetaData {
-    pub fn get_hash(logical_name: &str) -> Option<String> {
-        {
-            let meta_read = META_DATA.read().unwrap();
-            if !meta_read.logical_name_to_hash.is_empty() {
-                return meta_read.logical_name_to_hash.get(logical_name).cloned();
-            }
+    /// One row of the `a` table.
+    fn record(&mut self, logical_name: &str, hash: &str) {
+        index_logical_name(&mut self.name_to_hash, logical_name, hash);
+        if !hash.is_empty() {
+            self.hash_to_name.insert(hash.to_owned(), logical_name.to_owned());
+        }
+    }
+
+    fn hash_for(&self, observed: &str) -> Option<&str> {
+        [observed, bundle_file_name(observed), bundle_file_stem(observed)]
+            .into_iter()
+            .find_map(|key| self.name_to_hash.get(key).map(|hash| hash.as_str()))
+    }
+
+    fn logical_for(&self, recorded: &str) -> Option<&str> {
+        self.hash_to_name.get(recorded).map(|name| name.as_str())
+    }
+
+    /// The logical bundle name this table holds for a value reported either as a recorded id (`h`, how
+    /// a Global install names the bundle it loads) or as a bundle name (`n`, in any of the three
+    /// forms, how a Japan install reports it). `None` means this client's table does not know it.
+    fn logical_label(&self, value: &str) -> Option<&str> {
+        self.logical_for(value)
+            .or_else(|| self.hash_for(value).and_then(|hash| self.logical_for(hash)))
+    }
+
+    /// The C10 comparison, over data only: no game call, no lock, and no allocation unless the answer
+    /// is a refusal.
+    ///
+    /// A different id on its own is *not* a mismatch. The identity a data package records is the id the
+    /// authoring install has for that bundle, and a bundle with text baked into it - every UI atlas -
+    /// hashes differently between the Japan and Global packages, so a well authored patch routinely
+    /// records an id this install does not have. Refusing on that alone is how an identity check turns
+    /// into patches silently not applying. Only a pair this client's own table names as two different
+    /// bundles is a refusal, and both sides have to be known for that.
+    pub fn compare_identity(&self, expected: &str, observed: &str) -> MetaIdentity {
+        if expected == observed {
+            return MetaIdentity::Same;
         }
 
-        let mut meta_write = META_DATA.write().unwrap();
-
-        if meta_write.logical_name_to_hash.is_empty() {
-            if RETRIEVED_RAW_KEY.lock().unwrap().is_empty() {
-                return None;
-            }
-            let loaded = Self::load_from_db();
-            meta_write.logical_name_to_hash = loaded.logical_name_to_hash;
+        // The table's own record for the bundle being loaded settles it directly when it agrees.
+        if self.hash_for(observed) == Some(expected) {
+            return MetaIdentity::Same;
         }
 
-        meta_write.logical_name_to_hash.get(logical_name).cloned()
+        let (Some(expected_label), Some(observed_label)) =
+            (self.logical_label(expected), self.logical_label(observed))
+        else {
+            return MetaIdentity::Unknown;
+        };
+
+        // Known under both names but the same bundle under a different id: a bundle whose contents
+        // changed and a bundle seen from another install look identical from here, and neither is a
+        // reason to refuse.
+        if expected_label == observed_label {
+            return MetaIdentity::Unknown;
+        }
+
+        MetaIdentity::Different {
+            expected_logical: expected_label.to_owned(),
+            observed_logical: observed_label.to_owned(),
+        }
     }
 
     fn load_from_db() -> Self {
-        let mut logical_name_to_hash = FnvHashMap::default();
+        let mut meta = MetaData::default();
 
         let db_path_str = get_meta_path();
 
@@ -1096,13 +1200,7 @@ impl MetaData {
                         unsafe { path_ptr.as_ref() }.map(|s| s.as_utf16str().to_string()),
                         unsafe { hash_ptr.as_ref() }.map(|s| s.as_utf16str().to_string()),
                     ) {
-                        let logical_name = if let Some(idx) = path_str.rfind('/') {
-                            format!("{}.a", &path_str[idx + 1..])
-                        } else {
-                            format!("{}.a", path_str)
-                        };
-
-                        logical_name_to_hash.insert(logical_name, hash_str);
+                        meta.record(&path_str, &hash_str);
                     }
                 }
                 Query::Dispose(query);
@@ -1112,7 +1210,367 @@ impl MetaData {
             error!("Failed to open meta database at: {}", db_path_str);
         }
 
-        MetaData { logical_name_to_hash }
+        meta
+    }
+}
+
+/// What the next identity lookup is allowed to do about the `meta` table. This enum is the *read*
+/// half: it answers what the state is without charging for anything, which is all the asset patch
+/// guard needs before it decides whether converting a bundle name is worth a try
+/// (`AssetBundle::check_asset_bundle_name`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableRead {
+    /// The table is in memory; read it.
+    Read,
+    /// The armed window still has a try left, or the settled state is due for one of its bounded key
+    /// watches. Whether it comes out as a database open, a key bail or a watch is decided - and
+    /// charged - by `TableAttempts::authorise`.
+    Attempt,
+    /// The window is spent and the settled state has no key watch left to take. Every later lookup
+    /// answers `MetaIdentity::Unknown` without touching the game, a lock or the log - until a
+    /// witnessed change in the game's database key re-arms the window (`TableAttempts::plan`).
+    GiveUp,
+}
+
+/// What one patched-asset lookup was allowed to do, **and has already paid for**.
+///
+/// The difference between the two enums is who pays. `TableRead` is a peek; a `TableStep` comes out
+/// of `TableAttempts::authorise`, where the permission and the charge leave the same call. C10's cost
+/// half broke exactly on that seam: `plan` granted an `Attempt`, `identity_of`'s key bail returned
+/// `Unknown` without charging for the lock it had just taken, so the state never settled and
+/// `META_TABLE_KEY_BAILS_CAP` was a number production only ever read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableStep {
+    /// The table is in memory; read it. No key lock, no open.
+    Read,
+    /// A database key had been retrieved: this lookup owns one counted database open.
+    Open,
+    /// This lookup took the key lock and found no key in it: counted, and it spent no open.
+    Bail,
+    /// The settled state's bounded look for the observable change that re-opens it: one key lock,
+    /// charged against `META_TABLE_KEY_WATCH_CAP`, no open and no table. Answer `Unknown` unless the
+    /// lock had a key in it, in which case this lookup owns the open the re-arm exists to fund.
+    Watch,
+    /// The window is spent and no key watch is due. Answer `MetaIdentity::Unknown` without a lock, a
+    /// game call or a log line.
+    GiveUp,
+}
+
+/// The policy behind those answers: a bounded number of real read attempts, a bounded number of
+/// lookups that could not attempt one, then a remembered outcome that a witnessed key transition can
+/// re-open.
+///
+/// The old shape of this test was `logical_name_to_hash.is_empty()`, which is not a "loaded" marker:
+/// a table that could not be read leaves the map empty, so *every* later lookup re-ran the whole open
+/// - the write lock, `get_meta_path()`, `Connection::new`, `Connection::Open`, a managed string
+/// allocation and an `error!` line - on a path one asset load walks (AGENTS section 6 keeps all of
+/// those off it). Remembering the outcome is what makes the cost one-off instead of per load.
+///
+/// The counters are private because charging them is not a service this type offers: the only writer
+/// either one has is `authorise`, which grants a try and takes its payment in the same call. A cap
+/// some caller may choose not to pay for is not a cap, and that is exactly how
+/// `META_TABLE_KEY_BAILS_CAP` ended up dead code.
+///
+/// What those counters bound is an **armed window**, and a window is not terminal. The one fact that
+/// changes what the identity table is worth asking - whether the game has handed a database key over
+/// yet - is written by `core::hachimi::sqlite3_key_hook`, and on a real client that lands *after* the
+/// first patched-asset loads. A machine whose only inputs were its own two counters had no channel
+/// left for that fact, and it settled exactly where it hurt: a patch whose recorded name matches the
+/// bundle answers at `AssetBundle::bundle_names_match` before any charge, so the whole key-bail budget
+/// is spent by the mismatched loads the table exists to arbitrate, and once it is spent the guard was
+/// locked out for the rest of the session even after the key arrived. So each machine counts the key
+/// generations it has *seen* (`note_key_answer`: it has looked and found no key, then it looked and
+/// found one), a window is armed against one of them, and a witnessed transition re-arms it. A settled
+/// window spends at most `META_TABLE_KEY_WATCH_CAP` key locks - at doubling intervals - looking for
+/// that transition, and `META_TABLE_REARMS_CAP` bounds the re-arming itself, so the whole machine is
+/// `(1 + META_TABLE_REARMS_CAP)` windows and nothing loops.
+pub struct TableAttempts {
+    attempts: AtomicU8,
+    lookups_without_a_key: AtomicU8,
+    key_watches: AtomicU8,
+    settled_lookups: AtomicU32,
+    /// The key generation this window is armed against, and the number of transitions this machine has
+    /// witnessed since. They differ for exactly as long as a re-arm is owed.
+    armed_generation: AtomicU8,
+    generations_seen: AtomicU8,
+    /// The two halves of the transition, remembered separately: this machine has looked for a key and
+    /// found none, and this machine has since seen one. Latched, so a key that stays in the lock is one
+    /// transition and not one per load.
+    key_seen_absent: AtomicBool,
+    key_seen_present: AtomicBool,
+    rearms: AtomicU8,
+    loaded: AtomicBool,
+    announced: AtomicBool,
+}
+
+impl TableAttempts {
+    pub const fn new() -> Self {
+        Self {
+            attempts: AtomicU8::new(0),
+            lookups_without_a_key: AtomicU8::new(0),
+            key_watches: AtomicU8::new(0),
+            settled_lookups: AtomicU32::new(0),
+            armed_generation: AtomicU8::new(0),
+            generations_seen: AtomicU8::new(0),
+            key_seen_absent: AtomicBool::new(false),
+            key_seen_present: AtomicBool::new(false),
+            rearms: AtomicU8::new(0),
+            loaded: AtomicBool::new(false),
+            announced: AtomicBool::new(false),
+        }
+    }
+
+    /// Read the state and charge nothing: relaxed atomic loads, no lock, no game call. This is the
+    /// half the guard can afford to ask on every load.
+    pub fn plan(&self, attempts_cap: u8, bail_cap: u8) -> TableRead {
+        if self.loaded.load(Ordering::Relaxed) {
+            TableRead::Read
+        }
+        else if self.re_arm_if_stale(attempts_cap, bail_cap) {
+            TableRead::Attempt
+        }
+        else if self.attempts.load(Ordering::Relaxed) < attempts_cap && self.lookups_without_a_key.load(Ordering::Relaxed) < bail_cap {
+            TableRead::Attempt
+        }
+        else if self.watch_due(bail_cap) {
+            TableRead::Attempt
+        }
+        else {
+            // The cadence for the next key watch: every settled lookup counts here, and a watch is
+            // granted once the count reaches the next doubled interval. Counting is one relaxed
+            // read-modify-write, which is what AGENTS section 6 asks for on a per load path.
+            self.settled_lookups.fetch_add(1, Ordering::Relaxed);
+            self.announce_settled();
+            TableRead::GiveUp
+        }
+    }
+
+    /// Decide what this lookup gets to do **and charge it for, in the same call**, so the caps bound
+    /// something the shipped path actually did instead of something a test chose to record.
+    ///
+    /// `key` - the game's database key, or nothing - is asked *once*, and only when a try is actually
+    /// allowed, so the settled states stay atomic loads. A lookup that finds no key pays out of
+    /// `bail_cap` and spends no open, which keeps a table that only becomes readable once the game has
+    /// opened its own databases reachable. A lookup with a key in hand pays out of `attempts_cap`. A
+    /// bail is still charged because it is the one lock this path takes without a table, and AGENTS
+    /// section 6 does not accept a lock per asset load without an end: after `bail_cap` such lookups
+    /// the window settles to `GiveUp` and every later lookup answers from atomic loads only.
+    ///
+    /// In the settled state the only thing on offer is a key watch, charged against
+    /// `META_TABLE_KEY_WATCH_CAP`. A watch that finds no key answers `Unknown` and changes nothing. A
+    /// watch that finds the key has witnessed the transition the re-arm is armed against, so this
+    /// lookup - key in hand, window just re-opened - pays out of the re-armed `attempts_cap`.
+    ///
+    /// Honest about the shape: the counters are read, then charged, so lookups on other threads racing
+    /// for the last slot can each take one more than the cap by the number of threads racing.
+    /// Patched-asset loads walk this guard on the game thread (`LoadAsset_Internal` and
+    /// `AssetBundleRequest::GetResult` both end in `on_LoadAsset`), which is the walk this bound is
+    /// for.
+    pub fn authorise(&self, attempts_cap: u8, bail_cap: u8, key: impl FnOnce() -> bool) -> TableStep {
+        match self.plan(attempts_cap, bail_cap) {
+            TableRead::Read => TableStep::Read,
+            TableRead::GiveUp => TableStep::GiveUp,
+            TableRead::Attempt => {
+                let in_window = self.attempts.load(Ordering::Relaxed) < attempts_cap
+                    && self.lookups_without_a_key.load(Ordering::Relaxed) < bail_cap;
+
+                if in_window {
+                    let has_key = key();
+                    self.note_key_answer(has_key);
+
+                    if has_key {
+                        self.attempts.fetch_add(1, Ordering::Relaxed);
+                        TableStep::Open
+                    }
+                    else {
+                        self.lookups_without_a_key.fetch_add(1, Ordering::Relaxed);
+                        TableStep::Bail
+                    }
+                }
+                else {
+                    self.key_watches.fetch_add(1, Ordering::Relaxed);
+                    let has_key = key();
+                    self.note_key_answer(has_key);
+
+                    // The re-arm is what the watch exists for: a key found here, after this machine had
+                    // already looked and found none, is the transition, and re-arming the window is the
+                    // only thing witnessing it is allowed to buy. This lookup - key in hand, window just
+                    // re-opened - then pays out of the re-armed `attempts_cap`. A key that was already
+                    // in hand when the window armed is not a transition: it costs one key lock, spends
+                    // no open, and re-opens nothing.
+                    if has_key && self.re_arm_if_stale(attempts_cap, bail_cap) {
+                        self.attempts.fetch_add(1, Ordering::Relaxed);
+                        TableStep::Open
+                    }
+                    else {
+                        TableStep::Watch
+                    }
+                }
+            }
+        }
+    }
+
+    /// Records what one key read answered, which is the only way this machine ever hears about the key:
+    /// `RETRIEVED_RAW_KEY` is filled by `core::hachimi::sqlite3_key_hook` whenever the game keys one of
+    /// its own databases, and nothing here polls it. Finding no key records the empty half of the
+    /// transition; finding one *after* having found none moves this machine's generation forward exactly
+    /// once, because a key that stays in the lock is one state change, not one per patched-asset load.
+    ///
+    /// A machine that never saw the lock empty is armed against a world that already had the key and
+    /// witnesses nothing: no key read on its own re-opens a window.
+    fn note_key_answer(&self, has_key: bool) {
+        if !has_key {
+            self.key_seen_absent.store(true, Ordering::Relaxed);
+            return;
+        }
+        if !self.key_seen_absent.load(Ordering::Relaxed) {
+            return;
+        }
+        if !self.key_seen_present.swap(true, Ordering::Relaxed) {
+            self.generations_seen.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The re-opening half: a witnessed key generation this window was not armed against re-arms the
+    /// window's two budgets, bounded by `META_TABLE_REARMS_CAP` so a settled state can be re-opened a
+    /// fixed number of times and never in a loop.
+    fn re_arm_if_stale(&self, attempts_cap: u8, bail_cap: u8) -> bool {
+        let generation = self.generations_seen.load(Ordering::Relaxed);
+        let armed = self.armed_generation.load(Ordering::Relaxed);
+
+        if armed == generation {
+            return false;
+        }
+        if self.armed_generation.compare_exchange(armed, generation, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+            // Another lookup already moved this window onto that generation.
+            return false;
+        }
+        if self.rearms.fetch_add(1, Ordering::Relaxed) + 1 > META_TABLE_REARMS_CAP {
+            // The generation is adopted either way: a window that may not re-arm again must not stay
+            // stale, or every later lookup would walk back through this branch.
+            return false;
+        }
+
+        self.attempts.store(0, Ordering::Relaxed);
+        self.lookups_without_a_key.store(0, Ordering::Relaxed);
+        self.settled_lookups.store(0, Ordering::Relaxed);
+        self.announced.store(false, Ordering::Relaxed);
+        self.announce_rearm(attempts_cap, bail_cap);
+        true
+    }
+
+    /// A settled window's look for the key: `META_TABLE_KEY_WATCH_CAP` of them per machine, the n-th
+    /// one due after `bail_cap << n` settled lookups, so the interval doubles (32, 64, 128, 256, 512,
+    /// 1024) and the whole look costs six key locks across a session instead of one per load. The
+    /// counter is deliberately not reset by a re-arm: the look is bounded per machine, not per window.
+    fn watch_due(&self, bail_cap: u8) -> bool {
+        let watches = self.key_watches.load(Ordering::Relaxed);
+        if watches >= META_TABLE_KEY_WATCH_CAP {
+            return false;
+        }
+        self.settled_lookups.load(Ordering::Relaxed) >= (bail_cap as u32) << watches
+    }
+
+    pub fn mark_loaded(&self) {
+        self.loaded.store(true, Ordering::Relaxed);
+    }
+
+    /// The line that makes the bound readable in `hachimi.log` (AGENTS section 2: a change that
+    /// cannot be shown in the log is not a change): written by the first lookup that finds a window
+    /// settled and by none after it, until a re-arm clears the latch. Once written it costs one relaxed
+    /// load. It says what the guard still does - apply, unconfirmed - because on a client whose `meta`
+    /// table is not readable the settled answer must not read as a refusal.
+    fn announce_settled(&self) {
+        if !self.announced.load(Ordering::Relaxed) && !self.announced.swap(true, Ordering::Relaxed) {
+            info!("Meta table identity tries spent: later patched-asset loads apply unconfirmed with no key lock, no database open and no name conversion");
+        }
+    }
+
+    /// The line that makes the re-opening readable in the same log. Written once per re-arm, and
+    /// `META_TABLE_REARMS_CAP` bounds how many there are.
+    fn announce_rearm(&self, attempts_cap: u8, bail_cap: u8) {
+        info!("Meta table identity tries re-armed: the game's sqlite key arrived, so the identity table may be readable now; later patched-asset loads get {} database opens and {} key locks again", attempts_cap, bail_cap);
+    }
+}
+
+static META_TABLE_ATTEMPTS: TableAttempts = TableAttempts::new();
+
+/// Times one armed window opens the game's `meta` database looking for the identity table. Charged by
+/// `TableAttempts::authorise` when it hands out the open, so this bounds a `Connection::Open` and the
+/// `error!` line that comes with it. `META_TABLE_REARMS_CAP` is what bounds the number of windows.
+const META_TABLE_ATTEMPTS_CAP: u8 = 4;
+
+/// Times one armed window takes the key lock on the way to that database before it settles to
+/// `GiveUp`. Generous next to when the game opens its own databases, and it is what keeps that lock
+/// bounded instead of a per load cost - charged by the same `authorise` call that grants it.
+const META_TABLE_KEY_BAILS_CAP: u8 = 32;
+
+/// Times a settled window spends one key lock looking for the key it was armed without, at the
+/// doubling intervals `TableAttempts::watch_due` spaces them at. Six of them covers the span of a
+/// session's patched-asset loads after a window settled, and it is what stops a key arriving late from
+/// being invisible to a guard that had already given up on the table.
+const META_TABLE_KEY_WATCH_CAP: u8 = 6;
+
+/// Times one state machine re-arms a settled window against a key generation it witnessed. The key
+/// transition is itself latched (`TableAttempts::note_key_answer`), so this is the hard backstop on the
+/// re-opening: `(1 + META_TABLE_REARMS_CAP)` windows, at most `2 * META_TABLE_ATTEMPTS_CAP` opens and
+/// `2 * META_TABLE_KEY_BAILS_CAP` key locks per machine.
+const META_TABLE_REARMS_CAP: u8 = 1;
+
+/// The one key read the shipped lookup makes, and the only place it takes that lock: the lock the
+/// game's own `sqlite3_key` fills (`core::hachimi::sqlite3_key_hook`). The guard is released inside
+/// this function, so the key lock is never held across `META_DATA` or across the game's sqlite open -
+/// `sqlite3_open_v2_hook` reads this very lock, and a std `Mutex` is not reentrant.
+///
+/// It answers one question and nothing else: is a key in the lock. What the state machine makes of the
+/// answer - whether this is the empty -> non-empty transition a window re-arms against - is
+/// `TableAttempts::note_key_answer`'s. The key, its length and who may use it stay exactly as
+/// `sqlite3_key_hook` wrote them (AGENTS section 2).
+fn key_retrieved() -> bool {
+    let key = RETRIEVED_RAW_KEY.lock().unwrap_or_else(|e| e.into_inner());
+    !key.is_empty()
+}
+
+impl MetaData {
+    /// What consulting the identity table costs the calling load right now, read without charging
+    /// anything. A caller that gets `GiveUp` can answer `MetaIdentity::Unknown` without converting a
+    /// name, taking a lock, calling into the game or writing a log line.
+    pub fn table_plan() -> TableRead {
+        META_TABLE_ATTEMPTS.plan(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP)
+    }
+
+    /// The identity answer for one patched asset load.
+    ///
+    /// Cheap in the settled states: `Read` is one read lock and two map lookups on borrowed keys (no
+    /// allocation), `GiveUp` is one atomic load and nothing else. The spending states are charged as
+    /// they are granted: per armed window at most `META_TABLE_ATTEMPTS_CAP` database opens (which
+    /// bounds that failure log by the same number) and `META_TABLE_KEY_BAILS_CAP` key locks, plus
+    /// `META_TABLE_KEY_WATCH_CAP` key locks per process for the settled state's look for a key. After
+    /// a window settles this function answers `MetaIdentity::Unknown` - an apply, not a refusal -
+    /// until a witnessed key generation re-arms the window.
+    pub fn identity_of(expected: &str, observed: &str) -> MetaIdentity {
+        match META_TABLE_ATTEMPTS.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_retrieved) {
+            TableStep::Read => {
+                let meta = META_DATA.read().unwrap_or_else(|e| e.into_inner());
+                meta.compare_identity(expected, observed)
+            }
+            // The answers that cost the caller nothing but a branch: a bail and a watch have both
+            // already paid for the key lock they took, and a `GiveUp` took no lock at all.
+            TableStep::Bail | TableStep::Watch | TableStep::GiveUp => MetaIdentity::Unknown,
+            TableStep::Open => {
+                let mut meta = META_DATA.write().unwrap_or_else(|e| e.into_inner());
+                if meta.name_to_hash.is_empty() {
+                    *meta = Self::load_from_db();
+                }
+
+                if meta.name_to_hash.is_empty() {
+                    return MetaIdentity::Unknown;
+                }
+
+                META_TABLE_ATTEMPTS.mark_loaded();
+                meta.compare_identity(expected, observed)
+            }
+        }
     }
 }
 
@@ -1289,4 +1747,352 @@ pub fn get_champions_live_max_year() -> i32 {
         Connection::CloseDB(conn);
     }
     max_year
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    /// The shapes C10 actually has on the primary target, measured rather than invented: a Global
+    /// install stores what it downloads as `<Persistent>/dat/<2 chars>/<32 char id>` - 171,845 files,
+    /// none of them with an extension - and the identity a shipped data package records for
+    /// `assets/atlas/common` is `ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD`. The `n` column is `/` separated
+    /// and extension-less, which is the shape `get_champions_live_max_year` above parses as
+    /// `live/image/champions/tex_championslive_year_<i>` and turns into a year.
+    fn meta_table() -> MetaData {
+        let mut meta = MetaData::default();
+        meta.record("atlas/common", "ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD");
+        meta.record("atlas/common_v2", "222H4K4VZG6BTBWHDB6BVUJHW5LLNT7E");
+        meta.record("live/image/champions/tex_championslive_year_3", "IZ2K5DI3UXADWQERBTGA2RZRAVWUNUHS");
+        meta
+    }
+
+    /// The old key was `format!("{}.a", last component of n)`. The lookup half handed it a bare
+    /// `file_name()`, so the two halves could never agree and no identity was ever resolved - on any
+    /// region.
+    #[test]
+    fn the_table_is_indexed_under_the_names_it_actually_holds() {
+        let meta = meta_table();
+
+        assert_eq!(meta.hash_for("atlas/common"), Some("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD"));
+        assert_eq!(meta.hash_for("common"), Some("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD"));
+        // A client that reports the component with an extension still reaches the same row.
+        assert_eq!(meta.hash_for("res/ui/atlas/common.a"), Some("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD"));
+        assert_eq!(meta.hash_for("res\\ui\\atlas\\common"), Some("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD"));
+        assert_eq!(meta.hash_for("tex_championslive_year_3"), Some("IZ2K5DI3UXADWQERBTGA2RZRAVWUNUHS"));
+        assert_eq!(meta.hash_for("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD"), None, "the id is not a name the table indexes by");
+    }
+
+    /// The invented extension is gone from the key set entirely: a row whose `n` has no extension
+    /// must not become reachable only under a name that client never reports.
+    #[test]
+    fn no_key_carries_an_extension_the_a_table_does_not_have() {
+        let meta = meta_table();
+        assert!(meta.name_to_hash.contains_key("atlas/common"));
+        assert!(meta.name_to_hash.contains_key("common"));
+        assert!(!meta.name_to_hash.keys().any(|key| key.ends_with(".a")),
+            "a key built as `{{name}}.a` is only reachable if some client reports the bundle under exactly that name");
+    }
+
+    #[test]
+    fn a_recorded_id_this_table_records_for_a_bundle_is_the_same_bundle() {
+        let meta = meta_table();
+        assert_eq!(meta.compare_identity("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD", "atlas/common"), MetaIdentity::Same);
+        assert_eq!(meta.compare_identity("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD", "common"), MetaIdentity::Same);
+        assert_eq!(meta.compare_identity("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD", "res/ui/atlas/common.a"), MetaIdentity::Same);
+    }
+
+    /// The #56 case: both ids are rows in this client's own table and they name different bundles.
+    #[test]
+    fn two_ids_this_client_names_as_two_different_bundles_are_a_mismatch() {
+        let meta = meta_table();
+        assert_eq!(
+            meta.compare_identity("222H4K4VZG6BTBWHDB6BVUJHW5LLNT7E", "atlas/common"),
+            MetaIdentity::Different {
+                expected_logical: "atlas/common_v2".to_owned(),
+                observed_logical: "atlas/common".to_owned(),
+            }
+        );
+    }
+
+    /// A recorded id this table has no row for - the id the authoring install has for a bundle whose
+    /// contents differ per package, or an id from a version this install no longer has - names
+    /// nothing here. That is not evidence the bundle in front of the guard is the wrong one.
+    #[test]
+    fn a_recorded_id_this_table_has_no_row_for_decides_nothing() {
+        let meta = meta_table();
+        assert_eq!(meta.compare_identity("2d8f1a3b9c0d1e2f3a4b5c6d7e8f9012", "atlas/common"), MetaIdentity::Unknown);
+        assert_eq!(meta.compare_identity("ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD", "atlas/photostudio"), MetaIdentity::Unknown,
+            "a bundle the table does not name is not a bundle this client can call wrong");
+    }
+
+    /// The caps are only caps if the code that spends them pays for them, so every test below drives
+    /// `TableAttempts::authorise` - the shipped grant - or the shipped pair `MetaData::table_plan` +
+    /// `MetaData::identity_of`, and reads what the state machine charged. There is no counting method
+    /// left for a test to feed.
+    ///
+    /// A test never reaches `MetaData::load_from_db`, and that is deliberate: its `Hachimi::instance()`
+    /// ends the process when the game is not running (AGENTS section 4), so the tests drive the shipped
+    /// *grant* - which decides an open and charges for it - rather than executing an open a test
+    /// process has no game sqlite to serve.
+
+    /// The fact a lookup reports to the state machine: a key the game already used is in the lock.
+    /// Reporting it is not the same as the game handing one over, and `TableAttempts` is built not to
+    /// treat it as one: a machine that never saw the lock empty witnesses no transition.
+    fn key_in_hand() -> bool { true }
+
+    /// The half one armed window pays at most `META_TABLE_ATTEMPTS_CAP` times. The grant is what bounds
+    /// the open: `MetaData::identity_of`'s `TableStep::Open` arm is the only place that calls
+    /// `Self::load_from_db` (and so `Connection::Open`), and it only gets there through this grant -
+    /// four grants are four opens, and four `error!` lines at most.
+    ///
+    /// A table that could not be read used to look exactly like a table that had not been read yet, so
+    /// every later lookup on a per asset load path re-ran the write lock, `get_meta_path()`,
+    /// `Connection::new`, `Connection::Open`, a managed string allocation and an `error!` line (AGENTS
+    /// section 6 keeps all of those off it).
+    ///
+    /// A key in the lock from the first lookup is also the case that must *not* re-arm: nothing moved,
+    /// so the re-arm budget stays untouched and the open bound is the one window it was.
+    #[test]
+    fn the_meta_database_is_opened_a_bounded_number_of_times_per_process() {
+        assert_eq!(META_TABLE_ATTEMPTS_CAP, 4, "the shipped open bound is the number this item records");
+        assert_eq!(META_TABLE_KEY_WATCH_CAP, 6, "the settled state's key look is this many key locks");
+        assert_eq!(META_TABLE_REARMS_CAP, 1, "one re-armed window per machine is the bound this item records");
+        let attempts = TableAttempts::new();
+
+        // 2048 loads: long enough to spend the window and every key watch the cadence grants after it
+        // (32 + 32 + 64 + 128 + 256 + 512 settled lookups apart), so the settled state is fully drained.
+        let mut opens = 0;
+        for _ in 0..2048 {
+            if attempts.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_in_hand) == TableStep::Open {
+                opens += 1;
+            }
+        }
+
+        assert_eq!(opens, META_TABLE_ATTEMPTS_CAP as usize, "2048 patched asset loads reached the meta database open once per load instead of once per bounded try");
+        assert_eq!(attempts.attempts.load(Ordering::Relaxed), 4);
+        assert_eq!(attempts.lookups_without_a_key.load(Ordering::Relaxed), 0, "a lookup that had a key in hand is not a bail");
+        assert_eq!(attempts.key_watches.load(Ordering::Relaxed), META_TABLE_KEY_WATCH_CAP, "the settled state's key look is bounded, and it was spent");
+        assert_eq!(attempts.rearms.load(Ordering::Relaxed), 0, "a key that was in the lock all along is not a state change, so nothing re-armed");
+        assert_eq!(attempts.plan(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP), TableRead::GiveUp);
+
+        // And the bound holds over a longer session than this one: the drained machine grants no open
+        // for the next 2048 loads either.
+        for _ in 0..2048 {
+            assert_ne!(attempts.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_in_hand), TableStep::Open,
+                "a drained machine kept handing out opens");
+        }
+        assert_eq!(opens, META_TABLE_ATTEMPTS_CAP as usize);
+        assert_eq!(attempts.key_watches.load(Ordering::Relaxed), META_TABLE_KEY_WATCH_CAP);
+    }
+
+    /// The half one armed window pays at most `META_TABLE_KEY_BAILS_CAP` times: a lookup that finds no
+    /// key spends the key lock and nothing else, so a table that only becomes readable after the game
+    /// has opened its own databases stays reachable - until the window's tries are spent, and then for
+    /// at most `META_TABLE_KEY_WATCH_CAP` further key locks.
+    ///
+    /// `key_locks` counts every entry into the key lock from *outside* the state machine, so the bound
+    /// is measured rather than read back out of the counter the test itself filled.
+    #[test]
+    fn a_lookup_with_no_key_yet_spends_no_open_and_bails_out_after_a_bounded_number_of_locks() {
+        assert_eq!(META_TABLE_KEY_BAILS_CAP, 32, "the shipped key-bail bound is the number this item records");
+        let attempts = TableAttempts::new();
+        let key_locks = Cell::new(0usize);
+        let no_key_yet = || { key_locks.set(key_locks.get() + 1); false }; // what this install reports before the game opens its own databases
+
+        let mut bails = 0;
+        let mut watches = 0;
+        let mut settled = 0;
+        for _ in 0..2048 {
+            match attempts.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, no_key_yet) {
+                TableStep::Bail => bails += 1,
+                TableStep::Watch => watches += 1,
+                TableStep::GiveUp => settled += 1,
+                step => unreachable!("a window that never had a key handed out {:?}", step),
+            }
+        }
+
+        assert_eq!(bails, META_TABLE_KEY_BAILS_CAP as usize, "the window's key-bail budget is the number this item records");
+        assert_eq!(watches, META_TABLE_KEY_WATCH_CAP as usize, "the settled state's look for a key is bounded too");
+        assert_eq!(settled, 2048 - (META_TABLE_KEY_BAILS_CAP + META_TABLE_KEY_WATCH_CAP) as usize,
+            "every later lookup answered from atomic loads, which is the whole point of the bound");
+        assert_eq!(key_locks.get(), (META_TABLE_KEY_BAILS_CAP + META_TABLE_KEY_WATCH_CAP) as usize,
+            "the key lock was taken once per patched asset load instead of a bounded number of times");
+        assert_eq!(attempts.attempts.load(Ordering::Relaxed), 0, "a bail or a watch that opened nothing must not spend an open");
+        assert_eq!(attempts.key_seen_absent.load(Ordering::Relaxed), true, "the empty half of the key transition is what these lookups recorded");
+        assert_eq!(attempts.generations_seen.load(Ordering::Relaxed), 0, "no key ever arrived, so no generation moved");
+        assert_eq!(attempts.plan(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP), TableRead::GiveUp);
+    }
+
+    /// The Japan shape: the game keys one of its own databases part way into the session, and the
+    /// lookup that first finds the key is a **window** lookup, not a watch. The transition re-opens the
+    /// window exactly once - the lookups it had already spent key-less are not paid for twice - and
+    /// everything after it is bounded: the re-armed window's opens, the watch budget, then `GiveUp` for
+    /// the rest of the session.
+    #[test]
+    fn a_key_arriving_mid_session_re_opens_the_window_once_and_no_more() {
+        let attempts = TableAttempts::new();
+        let key_locks = Cell::new(0usize);
+        let arrived_at = 10usize; // the game hands its key over this many patched-asset loads in
+
+        let mut opens = 0;
+        let mut bails = 0;
+        let mut watches = 0;
+        let mut settled = 0;
+        for i in 0..4096usize {
+            let key_now = || { key_locks.set(key_locks.get() + 1); i >= arrived_at };
+            match attempts.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_now) {
+                TableStep::Open => opens += 1,
+                TableStep::Bail => bails += 1,
+                TableStep::Watch => watches += 1,
+                TableStep::GiveUp => settled += 1,
+                TableStep::Read => unreachable!("nothing here ever loads the table"),
+            }
+        }
+
+        assert_eq!(bails, arrived_at, "the key-less lookups before the arrival are charged as bails");
+        assert_eq!(opens, META_TABLE_ATTEMPTS_CAP as usize + 1, "one open was spent before the arrival, then the re-armed window's four");
+        assert_eq!(watches, META_TABLE_KEY_WATCH_CAP as usize, "and the settled state's key look ran out");
+        assert_eq!(settled, 4096 - (arrived_at + META_TABLE_ATTEMPTS_CAP as usize + 1 + META_TABLE_KEY_WATCH_CAP as usize));
+        assert_eq!(key_locks.get(), arrived_at + META_TABLE_ATTEMPTS_CAP as usize + 1 + META_TABLE_KEY_WATCH_CAP as usize,
+            "the key lock was taken once per patched asset load instead of a bounded number of times");
+        assert_eq!(attempts.rearms.load(Ordering::Relaxed), META_TABLE_REARMS_CAP, "the transition happened once, so the window re-armed once");
+        assert_eq!(attempts.generations_seen.load(Ordering::Relaxed), 1, "the key staying in the lock is not a new generation per load");
+        assert_eq!(attempts.attempts.load(Ordering::Relaxed), META_TABLE_ATTEMPTS_CAP);
+        assert_eq!(attempts.plan(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP), TableRead::GiveUp,
+            "a session that keeps loading patched assets ends settled, not re-arming");
+    }
+
+    /// Once the table is in memory the tries are not consulted again, the read path is the only one
+    /// left, and it does not touch the key lock at all.
+    #[test]
+    fn a_loaded_table_is_read_without_spending_any_more_attempts() {
+        let attempts = TableAttempts::new();
+        assert_eq!(attempts.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_in_hand), TableStep::Open);
+        attempts.mark_loaded();
+
+        let key_locks = Cell::new(0usize);
+        for _ in 0..500 {
+            assert_eq!(attempts.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, || { key_locks.set(key_locks.get() + 1); true }), TableStep::Read);
+        }
+
+        assert_eq!(key_locks.get(), 0, "the settled read state never asks the key lock");
+        assert_eq!(attempts.attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(attempts.key_watches.load(Ordering::Relaxed), 0, "a table in memory is never settled, so it never watches");
+    }
+
+    /// C10's cost state on the shipped path, end to end, in both directions.
+    ///
+    /// The drive is the exact pair `AssetBundle::check_asset_bundle_name` runs: `MetaData::table_plan()`
+    /// to decide whether the table is worth asking, the one name conversion, then
+    /// `MetaData::identity_of`. Nothing in a test process ever runs the game's `sqlite3_key`, so
+    /// `RETRIEVED_RAW_KEY` starts empty - the state C10 measured on this Global install, where
+    /// `<Persistent>/meta` is not `SQLite format 3` and an unkeyed open reads no rows.
+    ///
+    /// What the old shape of this test could not see: `identity_of`'s bail returned `Unknown` without
+    /// paying for the key lock it had just taken, so `plan` answered `Attempt` forever,
+    /// `META_TABLE_KEY_BAILS_CAP` was never reached and the guard's `GiveUp` skip never fired. What the
+    /// fix for *that* left open: the settled state had no way back out, and because a patch whose name
+    /// matches the bundle returns before any charge, the whole 32-lock budget belongs to the mismatched
+    /// loads the table exists to arbitrate - so a client whose sqlite key arrives late settled into
+    /// answering `Unknown` for the rest of the session. Both halves are asserted here: it settles, and
+    /// the key arriving re-opens it.
+    ///
+    /// Only this test touches the process-wide state machine and the shared key lock, so its numbers are
+    /// its own.
+    #[test]
+    fn a_settled_guard_pays_for_the_lock_it_takes_and_a_key_arriving_late_un_settles_it() {
+        assert_eq!(META_TABLE_KEY_BAILS_CAP, 32, "the shipped key-bail bound is the number this item records");
+        assert!(RETRIEVED_RAW_KEY.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "this test starts in the no-key state; a key in the shared lock would take the game's sqlite open");
+
+        let expected = "ZVG5NHCU7HGSYCCXSJOTUGAE5Q2UHJKD";
+        let observed = "atlas/common";
+
+        // 1. The window spends its key bails: every one of them charged by the shipped grant, one name
+        //    conversion each, nothing opened.
+        let mut name_conversions = 0;
+        for _ in 0..META_TABLE_KEY_BAILS_CAP {
+            assert_eq!(MetaData::table_plan(), TableRead::Attempt);
+            name_conversions += 1;
+            assert_eq!(MetaData::identity_of(expected, observed), MetaIdentity::Unknown);
+        }
+        assert_eq!(name_conversions, META_TABLE_KEY_BAILS_CAP as usize,
+            "the guard converted a bundle name once per patched asset load instead of a bounded number of times");
+        assert_eq!(META_TABLE_ATTEMPTS.lookups_without_a_key.load(Ordering::Relaxed), META_TABLE_KEY_BAILS_CAP,
+            "the key-bail counter only moved where a test put it: the shipped bail never paid for the lock it took");
+        assert_eq!(META_TABLE_ATTEMPTS.attempts.load(Ordering::Relaxed), 0,
+            "a bail must not spend an open, and must never reach `Connection::Open`");
+
+        // 2. It settles: the guard's skip, and the settled answer charges nothing.
+        for _ in 0..(META_TABLE_KEY_BAILS_CAP - 1) {
+            assert_eq!(MetaData::table_plan(), TableRead::GiveUp, "the guard is skipping the table, as it must");
+        }
+        assert_eq!(MetaData::identity_of(expected, observed), MetaIdentity::Unknown, "the settled state still answers");
+        assert_eq!(META_TABLE_ATTEMPTS.lookups_without_a_key.load(Ordering::Relaxed), META_TABLE_KEY_BAILS_CAP,
+            "the settled state charges nothing more");
+        assert_eq!(META_TABLE_ATTEMPTS.key_watches.load(Ordering::Relaxed), 0);
+
+        // 3. The settled state's bounded look: the first key watch comes at `bail_cap` settled lookups,
+        //    and a watch that finds no key is charged as a watch.
+        assert_eq!(MetaData::table_plan(), TableRead::Attempt, "the cadence granted the settled state its first key watch");
+        assert_eq!(MetaData::identity_of(expected, observed), MetaIdentity::Unknown, "a watch with an empty lock answers Unknown");
+        assert_eq!(META_TABLE_ATTEMPTS.key_watches.load(Ordering::Relaxed), 1);
+        assert_eq!(META_TABLE_ATTEMPTS.lookups_without_a_key.load(Ordering::Relaxed), META_TABLE_KEY_BAILS_CAP,
+            "a watch is charged as a watch, not as another bail");
+
+        // 4. The observable state change: the game keys one of its own databases and
+        //    `sqlite3_key_hook` writes the key into the same lock. Nothing notices it until a shipped
+        //    key read looks.
+        *RETRIEVED_RAW_KEY.lock().unwrap_or_else(|e| e.into_inner()) = vec![b'7'; 32];
+        assert_eq!(META_TABLE_ATTEMPTS.generations_seen.load(Ordering::Relaxed), 0,
+            "the key is only witnessed by the lookup that actually reads it");
+
+        let mut settled = 0;
+        while MetaData::table_plan() == TableRead::GiveUp {
+            settled += 1;
+        }
+        assert_eq!(settled, META_TABLE_KEY_BAILS_CAP as usize, "the next key watch is spaced at 2 * bail_cap settled lookups");
+
+        // The shipped grant, on the shipped key read. `identity_of` is not called here because the step
+        // it would act on is an open, and a test process has no game sqlite to serve one.
+        let step = META_TABLE_ATTEMPTS.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_retrieved);
+        assert_eq!(step, TableStep::Open, "the watch found the key the window was armed without, and the re-armed window funds the open it exists to fund");
+        assert_eq!(META_TABLE_ATTEMPTS.generations_seen.load(Ordering::Relaxed), 1, "empty -> non-empty was witnessed as one generation");
+        assert_eq!(META_TABLE_ATTEMPTS.armed_generation.load(Ordering::Relaxed), 1, "the window is armed against the key it now has");
+        assert_eq!(META_TABLE_ATTEMPTS.rearms.load(Ordering::Relaxed), 1);
+        assert_eq!(META_TABLE_ATTEMPTS.attempts.load(Ordering::Relaxed), 1, "the open is charged by the same call that granted it");
+        assert_eq!(META_TABLE_ATTEMPTS.lookups_without_a_key.load(Ordering::Relaxed), 0,
+            "un-settled: the 32 key-less lookups the window spent are tries again");
+        assert_eq!(META_TABLE_ATTEMPTS.settled_lookups.load(Ordering::Relaxed), 0);
+        assert_eq!(MetaData::table_plan(), TableRead::Attempt, "the guard asks the table again instead of answering from the settled state");
+
+        // 5. One re-arm, not a loop. The key is still in the lock on every later lookup and it is no
+        //    longer a state change: the re-armed window funds its remaining opens, then settles again and
+        //    the watch cadence runs out.
+        let mut opens = 0;
+        for _ in 0..500 {
+            if META_TABLE_ATTEMPTS.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_retrieved) == TableStep::Open {
+                opens += 1;
+            }
+        }
+        assert_eq!(opens, (META_TABLE_ATTEMPTS_CAP - 1) as usize, "the re-armed window funds its remaining opens and no more");
+        assert_eq!(META_TABLE_ATTEMPTS.rearms.load(Ordering::Relaxed), META_TABLE_REARMS_CAP, "one re-armed window per machine: a key already in hand re-opens nothing a second time");
+        assert_eq!(META_TABLE_ATTEMPTS.generations_seen.load(Ordering::Relaxed), 1, "the transition is latched, not per load");
+        assert_eq!(META_TABLE_ATTEMPTS.attempts.load(Ordering::Relaxed), META_TABLE_ATTEMPTS_CAP);
+
+        for _ in 0..4096 {
+            assert_ne!(META_TABLE_ATTEMPTS.authorise(META_TABLE_ATTEMPTS_CAP, META_TABLE_KEY_BAILS_CAP, key_retrieved), TableStep::Open,
+                "the second window settled and it kept handing out opens");
+        }
+        assert_eq!(opens, (META_TABLE_ATTEMPTS_CAP - 1) as usize);
+        assert_eq!(META_TABLE_ATTEMPTS.key_watches.load(Ordering::Relaxed), META_TABLE_KEY_WATCH_CAP, "the watches ran out, so the settled state stays settled");
+        assert_eq!(MetaData::table_plan(), TableRead::GiveUp);
+
+        // Leave the shared key lock as this test found it: `sqlite3_key_hook` only ever fills an empty
+        // lock, and no later test should read a key this test invented.
+        *RETRIEVED_RAW_KEY.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
+    }
 }

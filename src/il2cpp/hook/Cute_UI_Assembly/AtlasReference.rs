@@ -29,6 +29,13 @@ pub fn on_LoadAsset(bundle: *mut Il2CppObject, this: *mut Il2CppObject, name: &U
         return;
     }
 
+    // C10 applied marker, on the atlas asset this patch's file is keyed by: the same atlas asset is
+    // handed over on the sync load path and on the async one, and its replacement is a diff composed
+    // onto whatever the atlas texture currently holds.
+    if AssetBundle::asset_is_patched(this, AssetBundle::PatchSite::AtlasTexture) {
+        return;
+    }
+
     if Hachimi::instance().config.load().apply_atlas_workaround {
         return;
     }
@@ -49,9 +56,19 @@ pub fn on_LoadAsset(bundle: *mut Il2CppObject, this: *mut Il2CppObject, name: &U
     }
 
     // All of the sprites in the atlas uses the same texture so we just need to replace one of them
+    //
+    // C9: `sprites` is the game's own array field. An atlas whose slot the bundle has not filled
+    // hands back no array at all, and an array of references has slots nobody filled; both read
+    // here as "there is no sprite to take a texture off", which is what this already stops at.
     let sprites = get_sprites(this);
-    if let Some(sprite) = unsafe { sprites.as_slice().get(0) } {
-        replace_texture_with_diff(Sprite::get_texture(*sprite), replace_path, true);
+    let Some(sprite) = unsafe { sprites.as_slice() }.iter().find(|sprite| !sprite.is_null()) else {
+        return;
+    };
+    let texture = Sprite::get_texture(*sprite);
+    // Mark only on a write that happened, so an atlas whose replacement failed to load is left open
+    // for the next load of it.
+    if replace_texture_with_diff(texture, replace_path, true) {
+        AssetBundle::mark_asset_patched(this, AssetBundle::PatchSite::AtlasTexture);
     }
 }
 
