@@ -294,6 +294,12 @@ pub fn apply() {
     }
 }
 
+/// What the game's clock reads at the moment someone asks, for a census line that has to state the
+/// value rather than a peak. NAN when this build does not expose the getter.
+pub fn time_scale_now() -> f32 {
+    read_time_scale()
+}
+
 /// Called from the overlay when the config is saved; the actual write happens on the
 /// next game-thread tick in `GameSystem::GameSystem_Update`.
 pub fn mark_dirty() {

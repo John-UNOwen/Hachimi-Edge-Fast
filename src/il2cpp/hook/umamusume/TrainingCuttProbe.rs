@@ -2471,6 +2471,56 @@ pub fn init(umamusume: *const Il2CppImage) {
 }
 
 // Called from the GameSystem update detour beside the frame probe report.
+/// How long the training doors may stay quiet before the census says so out loud. The stall this line
+/// exists for held a live cut-in timeline for over five minutes with every other training door frozen,
+/// and a player who walked away from a menu never reaches it: the census only runs when a door was
+/// called, so an idle screen with no timeline alive produces no census at all.
+const SILENCE_WARN_SECS: i64 = 120;
+
+/// The counters allowed to keep growing inside a silence window. `CutInTimelineController::UpdateSpeed`
+/// is called every frame a timeline object exists, advancing or not, and that is what makes "this one
+/// grew and nothing else did" the reading of a frozen playhead rather than an idle screen. The 2026-10-10
+/// stall ran it 60 times a second for five minutes on a screen where every cut, plate and high speed
+/// stepping door had stopped.
+const SILENCE_EXEMPT_LABELS: [&str; 1] = ["CutInTimelineController::UpdateSpeed()"];
+
+fn is_exempt(label: &str) -> bool {
+    SILENCE_EXEMPT_LABELS.contains(&label)
+}
+
+/// The calls on the doors that move the flow forward, from the `(label, calls)` pairs the census reads.
+/// Held apart from the census so the split - which counter counts as progress - is a rule the tests run.
+fn progress_total(entries: &[(&str, usize)]) -> usize {
+    entries.iter().filter(|(label, _)| !is_exempt(label)).map(|(_, calls)| *calls).sum()
+}
+
+fn exempt_total(entries: &[(&str, usize)]) -> usize {
+    entries.iter().filter(|(label, _)| is_exempt(label)).map(|(_, calls)| *calls).sum()
+}
+
+fn silence_due(silence_sec: i64) -> bool {
+    silence_sec >= SILENCE_WARN_SECS
+}
+
+/// The line itself, apart from the log call, because it has to tell two readings apart that look the
+/// same in frozen counters: a timeline nothing is advancing, and a game waiting for a human to tap. The
+/// open cut run is what separates them, and `Time.timeScale` is what separates a frozen playhead from a
+/// paused one, which the write hook cannot say on its own: it logs its first six calls and then one per
+/// 4096, so a value the game wrote five minutes into a session never appears there.
+fn silence_line(silence_sec: i64, exempt_since_last: usize, exempt_total: usize, time_scale: f32, open_for_ms: i64) -> String {
+    let scale = if time_scale.is_finite() { time_scale.to_string() } else { "unread".to_string() };
+    let tail = if open_for_ms > 0 {
+        format!("a training cut run has been open for {open_for_ms} ms, which is what a wait for a tap looks like")
+    } else {
+        "no training cut run open".to_string()
+    };
+
+    format!(
+        "Cutt probe flow silence {silence_sec} s: {} ran {exempt_since_last} more times ({exempt_total} total) with no call on any other training door; Time.timeScale reads {scale}; {tail}",
+        SILENCE_EXEMPT_LABELS[0]
+    )
+}
+
 pub fn report_if_due() {
     if START.get().is_none() {
         return;
@@ -2699,7 +2749,44 @@ pub fn report_if_due() {
     }
 
     FLUSHED_WINDOW.store(current_window.saturating_sub(1).max(FLUSHED_WINDOW.load(atomic::Ordering::Relaxed)), atomic::Ordering::Relaxed);
+
+    // The stall reading. Reaching here with the advancing doors unchanged means the only counter that
+    // moved was the per-frame one, and the census has been printing all along because of it. What the
+    // frozen counters cannot say by themselves is how long that has held and what the game's clock reads,
+    // so the line states both. The first crossing is a warn and every later one a debug: a stall that
+    // lasts ten minutes should be visible once and clocked after that, not repeated at warn level every
+    // interval.
+    let entries: Vec<(&str, usize)> = PROBES.iter().map(|probe| (probe.label(), probe.calls())).collect();
+    let progress = progress_total(&entries);
+    let exempt = exempt_total(&entries);
+
+    if progress != LAST_PROGRESS_TOTAL.load(atomic::Ordering::Relaxed) {
+        LAST_PROGRESS_TOTAL.store(progress, atomic::Ordering::Relaxed);
+        LAST_EXEMPT_TOTAL.store(exempt, atomic::Ordering::Relaxed);
+        LAST_PROGRESS_SEC.store(now_sec, atomic::Ordering::Relaxed);
+        SILENCE_WARNED.store(false, atomic::Ordering::Relaxed);
+    }
+    else {
+        let silence = now_sec - LAST_PROGRESS_SEC.load(atomic::Ordering::Relaxed);
+
+        if silence_due(silence) {
+            let since_last = exempt.saturating_sub(LAST_EXEMPT_TOTAL.load(atomic::Ordering::Relaxed));
+            let line = silence_line(silence, since_last, exempt, crate::il2cpp::hook::UnityEngine_CoreModule::Time::time_scale_now(), open_for);
+
+            if SILENCE_WARNED.swap(true, atomic::Ordering::AcqRel) {
+                debug!("{line}");
+            }
+            else {
+                warn!("{line}");
+            }
+        }
+    }
 }
+
+static LAST_PROGRESS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static LAST_EXEMPT_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static LAST_PROGRESS_SEC: AtomicI64 = AtomicI64::new(0);
+static SILENCE_WARNED: AtomicBool = AtomicBool::new(false);
 
 static START: OnceLock<Instant> = OnceLock::new();
 static LAST_REPORT_SEC: AtomicI64 = AtomicI64::new(-1);
@@ -3051,5 +3138,45 @@ mod tests {
         assert_eq!(command_legs(-1, 500, 4_000), (None, None), "a cut open with no command before it has no turnaround to report");
         assert_eq!(command_legs(1_000, -1, 4_000), (Some(3_000), None), "the first command of a run has no earlier cut to be late for");
         assert_eq!(command_legs(4_000, 5_000, 4_500), (Some(500), None), "a send reading before the cut it follows is out of order and is dropped");
+    }
+
+    // The silence reading exists because of the 2026-10-10 stall on the inspiration event, where
+    // `UpdateSpeed` ran 3,456 to 46,652 times across censuses while every other training door sat frozen
+    // at its last count. The split between the two kinds of counter is the whole rule, so it is the
+    // thing the test drives.
+    #[test]
+    fn only_the_per_frame_door_is_exempt_from_a_silence_reading() {
+        let entries: Vec<(&str, usize)> = vec![
+            ("CutInTimelineController::UpdateSpeed()", 46_652),
+            ("SingleModeMainTrainingCuttController::PlayTrainingCut(info)", 4),
+            ("TrainingParamChangeUI::OnAllTypewriteEnd()", 9),
+        ];
+
+        assert_eq!(progress_total(&entries), 13, "the census counted the per-frame door as progress");
+        assert_eq!(exempt_total(&entries), 46_652, "the census did not count the door that keeps running");
+    }
+
+    #[test]
+    fn a_silence_has_to_outlast_the_longest_ordinary_gap_between_cuts() {
+        assert!(!silence_due(SILENCE_WARN_SECS - 1), "a window shorter than the threshold was reported");
+        assert!(silence_due(SILENCE_WARN_SECS));
+    }
+
+    #[test]
+    fn the_silence_line_names_the_door_that_kept_running_and_the_clock_it_reads() {
+        let line = silence_line(150, 9_000, 46_652, 1.0, 0);
+
+        assert!(line.contains("flow silence 150 s"), "{line}");
+        assert!(line.contains("CutInTimelineController::UpdateSpeed() ran 9000 more times (46652 total)"), "{line}");
+        assert!(line.contains("Time.timeScale reads 1"), "{line}");
+        assert!(line.contains("no training cut run open"), "{line}");
+    }
+
+    #[test]
+    fn a_silence_with_a_cut_run_open_is_read_as_the_game_waiting_for_a_tap() {
+        let line = silence_line(140, 8_400, 8_400, f32::NAN, 61_000);
+
+        assert!(line.contains("a training cut run has been open for 61000 ms"), "{line}");
+        assert!(line.contains("Time.timeScale reads unread"), "{line}");
     }
 }
