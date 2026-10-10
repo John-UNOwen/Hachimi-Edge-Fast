@@ -3705,6 +3705,15 @@ impl Gui {
                         let presets = SettingsPreset::all_presets(&config);
                         let mut chosen: Option<usize> = None;
 
+                        // Printed once per process rather than once per menu redraw: a run should say
+                        // which arms it was offered, and an arm whose name never reaches the log is an
+                        // arm the picker is not listing.
+                        static PRESET_ARMS_LOGGED: std::sync::Once = std::sync::Once::new();
+                        PRESET_ARMS_LOGGED.call_once(|| {
+                            let names: Vec<&str> = presets.iter().map(|preset| preset.name.as_str()).collect();
+                            info!("Settings preset arms: {}", names.join(" | "));
+                        });
+
                         ui.label(t!("menu.speed_preset"));
                         egui::ComboBox::new(ui.id().with("settings_preset"), "")
                             .selected_text(current)
