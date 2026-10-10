@@ -5880,6 +5880,56 @@ impl ConfigEditor {
         // Performance tab: frame caps, the speed groups that shorten Gallop animations,
         // the story text and choice pacing, and the spring physics update mode.
         if show_all || tab == ConfigEditorTab::Performance {
+            // The preset row. The speed options only become believable once they are measured against
+            // each other, and that needs the arms switched between turns instead of twelve sliders
+            // edited twice by hand. Clicking an arm saves the config and marks the levers dirty, so
+            // the next `GameSystem_Update` re-applies the group factors while the game is running.
+            if should_show_option(search, &t!("config_editor.speed_preset")) {
+                use crate::core::speed_preset::SpeedPreset;
+
+                let presets = SpeedPreset::all_presets(config);
+                let mut chosen: Option<String> = None;
+
+                ui.label(t!("config_editor.speed_preset"));
+                ui.horizontal(|ui| {
+                    for preset in presets.iter() {
+                        if ui.selectable_label(config.speed_preset_name == preset.name, preset.name.as_str()).clicked() {
+                            chosen = Some(preset.name.clone());
+                        }
+                    }
+                });
+                ui.end_row();
+
+                if let Some(name) = chosen {
+                    if let Some(preset) = presets.iter().find(|preset| preset.name == name) {
+                        preset.apply_to(config);
+                        log::info!("{}", preset.log_line());
+                        save_and_reload_config(config.clone());
+                    }
+                }
+
+                if should_show_option(search, &t!("config_editor.speed_preset_name")) {
+                    ui.label(t!("config_editor.speed_preset_name"));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut config.speed_preset_name).hint_text(t!("config_editor.speed_preset_name_hint")).desired_width(150.0));
+
+                        let typed = config.speed_preset_name.clone();
+
+                        if ui.button(t!("config_editor.speed_preset_save")).clicked() {
+                            let preset = SpeedPreset::capture(&typed, config);
+                            log::info!("Speed preset saved: {}", preset.log_line());
+                            SpeedPreset::save(config, &preset);
+                            save_and_reload_config(config.clone());
+                        }
+
+                        if ui.button(t!("config_editor.speed_preset_delete")).clicked() && SpeedPreset::remove(config, &typed) {
+                            save_and_reload_config(config.clone());
+                        }
+                    });
+                    ui.end_row();
+                }
+            }
+
             if should_show_option(search, &t!("config_editor.target_fps")) {
                 Self::option_slider(ui, &t!("config_editor.target_fps"), &mut config.target_fps, 30..=690);
             }

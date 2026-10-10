@@ -33,8 +33,10 @@ use crate::il2cpp::{
 const FIELD_ATTRIBUTE_STATIC: c_int = 0x10;
 const FIELD_ATTRIBUTE_LITERAL: c_int = 0x40;
 
-// Upper bound on how much of an animation may be removed in one step.
-const MAX_FACTOR: f32 = 20.0;
+// Upper bound on how much of an animation may be removed in one step. Public because a timing preset
+// names the same ceiling it writes (core::speed_preset), and the number a preset may offer has to be
+// the number this module honours.
+pub const MAX_FACTOR: f32 = 20.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Group {

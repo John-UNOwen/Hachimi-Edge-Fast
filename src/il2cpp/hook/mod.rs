@@ -1859,8 +1859,13 @@ pub fn init() {
         #[cfg(not(target_os = "windows"))]
         let target_fps_unfocused = "";
 
+        // Which timing arm the run is on. An empty name means the player never applied a preset,
+        // and that is printed as its own fact so a paired measurement can tell the arms apart.
+        let preset = if config.speed_preset_name.is_empty() { "none" } else { config.speed_preset_name.as_str() };
+
         info!(
-            "Config snapshot: transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
+            "Config snapshot: preset {} transition {} result {} story {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
+            preset,
             config.transition_speed,
             config.result_screen_speed,
             config.story_speed,

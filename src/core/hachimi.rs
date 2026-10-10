@@ -7,7 +7,7 @@ use textwrap::wrap_algorithms::Penalties;
 
 use crate::{core::{gui, plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il2cpp::{self, hook::guard, hook::umamusume::{CySpringController::SpringUpdateMode, GameSystem}, sql::{CharacterData, SkillDataDesc, SkillInfo}}};
 
-use super::{game::{Game, Region}, ipc, plurals, template, template_filters, tl_repo, utils, Error, Interceptor};
+use super::{game::{Game, Region}, ipc, plurals, speed_preset::SpeedPreset, template, template_filters, tl_repo, utils, Error, Interceptor};
 
 pub const REPO_PATH: &str = "kairusds/Hachimi-Edge";
 pub const GITHUB_API: &str = "https://api.github.com/repos";
@@ -1303,6 +1303,13 @@ pub struct Config {
     // StoryTimelineController::SetHighSpeedType. Off never touches it.
     #[serde(default)]
     pub story_high_speed_mode: bool,
+    // The timing arms a player switches between to measure the speed options against each other
+    // (core::speed_preset). The name is what `Config snapshot:` prints, and the saved list is what
+    // the Config Editor's picker shows next to the two built-in arms.
+    #[serde(default)]
+    pub speed_preset_name: String,
+    #[serde(default)]
+    pub speed_presets: Vec<SpeedPreset>,
     #[serde(default)]
     pub trainer_live_landscape: bool,
     #[serde(default)]
