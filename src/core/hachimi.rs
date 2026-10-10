@@ -87,6 +87,30 @@ pub fn report_poisoned_lock_recoveries() {
     info!("{}", poisoned_lock_report());
 }
 
+/// Which door reached the take-down counts first. Two doors can say them: the detach branch in
+/// `src/windows/main.rs`, and the process's own exit call in `src/windows/hook.rs`. Every run so far
+/// ended before either printed anything, so the fork could not tell a detach that never arrived from
+/// one that died on the way to the reports.
+static TAKE_DOWN_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// True for the first caller only, so a session says the counts once whichever door gets there.
+pub fn claim_take_down_report() -> bool {
+    !TAKE_DOWN_CLAIMED.swap(true, atomic::Ordering::SeqCst)
+}
+
+/// The counts a run reads at the end of a session, said once whichever door got there first. Each
+/// door names itself before calling this, so a run can see both doors and one set of counts. Cold
+/// path, reached once per process: the reports assemble one `String` each and nothing here stands on
+/// a path a detour runs.
+pub fn report_take_down_once() {
+    if !claim_take_down_report() {
+        return;
+    }
+
+    crate::il2cpp::hook::guard::report_trips();
+    report_poisoned_lock_recoveries();
+}
+
 type Sqlite3OpenV2Fn = extern "C" fn(filename: *const i8, pp_db: *mut *mut std::ffi::c_void, flags: i32, z_vfs: *const i8) -> i32;
 type Sqlite3KeyFn = extern "C" fn(db: *mut std::ffi::c_void, p_key: *const std::ffi::c_void, n_key: i32) -> i32;
 
@@ -2337,5 +2361,15 @@ mod tests {
         assert_eq!(key_hook(std::ptr::null_mut(), bogus, 64), SQLITE_ERROR,
             "the key detour answered a fault at its own boundary with something other than a refusal");
         assert_eq!(guard::fault_trip_count(), faults_before + 2, "the fault at the shipped detour was not taken by the barrier");
+    }
+
+    /// The take-down counts have two doors now, the detach branch and the process exit call, and a
+    /// session may only say them once. Only the doors claim them in shipped code, so this test owns
+    /// the latch for the whole test process.
+    #[test]
+    fn the_take_down_counts_belong_to_the_first_door_that_reaches_them() {
+        assert!(claim_take_down_report(), "no door had reached the counts, so the first one owns them");
+        assert!(!claim_take_down_report(), "the second door has nothing left to add");
+        assert!(!claim_take_down_report(), "and a third says nothing either");
     }
 }
