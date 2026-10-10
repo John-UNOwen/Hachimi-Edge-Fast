@@ -182,10 +182,11 @@ Hot paths run every frame or every tween tick. In them:
 - **Fast exit at neutral settings.** `if factor == 1.0 { return orig(...) }` before any other work.
 - **Startup:** hooks are created inside `begin_batch()` and armed in one `MH_EnableHook(MH_ALL_HOOKS)`
   pass by `finish_batch()`. Nothing between those two calls may call through a trampoline.
-  Remaining startup cost sits under the loader lock (C25): the introspect dump, native sqlite
-  hooking, window work, the Discord pipe and the update check (C26). Moving work out of `DllMain`
-  to a deferred thread or first game tick is a valid optimisation; keep anything that must precede
-  game code where it is.
+  Remaining startup cost sits under the loader lock (C25): the introspect dump - written once per
+  client and reused by every later launch, so delete `introspect.log` to force a fresh one (C44) -,
+  native sqlite hooking, window work, the Discord pipe and the update check (C26). Moving work out of
+  `DllMain` to a deferred thread or first game tick is a valid optimisation; keep anything that must
+  precede game code where it is.
 - Prefer `fnv`/`FnvHashMap`, `once_cell::Lazy`, `arc_swap` (already dependencies) over adding crates.
 
 ## 7. Measuring a change
@@ -255,6 +256,13 @@ A new speed or performance option touches, in one change:
   `Select-String '^- \[x\]|^[0-9]+\. \[x\]' LEDGER.md` and `Select-String '^state: fixed' knowledge\defects\*.md`
   before and after the change set, and quote both counts with the moment each was taken. A check
   that cannot match what it looks for returns a clean number on any tree.
+- Audit tooling is part of the change set it audits. A script whose number a concept quotes lives in
+  `tools/` and goes into git's index the moment it is written: `git add -u` and `git commit -am` skip an
+  untracked file without saying so, and `/target` is gitignored, so a script under `target/scratch/` is
+  deleted by `cargo clean` and by `git clean -xdf`. `python tools/scan_hook_barriers.py` prints, for the
+  tree it runs on, what a commit built that way would drop, and exits 1 while it would drop anything the
+  build or an audit needs. A tree-state count written into a concept is dated and re-printed, never
+  asserted in the present tense.
 - Upstream merges: keep our `introspect`/speed modules, take upstream's everything else, rebuild
   with zero warnings, and record the merge in section E.
 - `knowledge/` concepts follow OKF v0.2: frontmatter with a `type`, the ledger id inside the
