@@ -161,9 +161,10 @@ Rules learned the hard way (each has a ledger entry):
   the current value (C22, C24). Use an "applied" marker when an asset can be processed twice.
 - **Write on the game thread.** The GUI sets a `DIRTY` flag (`mark_dirty`); the write happens in
   `GameSystem_Update` via `apply_if_dirty()`. Don't call Unity natives from the overlay thread.
-- **`get_orig_fn!` returns 0 for an uninstalled hook** (C1). Only call it from inside the detour
-  it belongs to; a wrapper reachable from mod code should use `def_method_wrapper_fn!`, which
-  guards against 0.
+- **`get_orig_fn!` answers a live trampoline while the hook is armed, and the hook's own target
+  once a take-down has run or an arming was skipped** (C1). 0 remains only for a target that never
+  resolved. Only call it from inside the detour it belongs to; a wrapper reachable from mod code
+  should use `def_method_wrapper_fn!`, which guards against 0.
 - **`disabled_hooks` keys on the hook id**: the module path of the `new_hook!` site plus the wrapper
   name, `hachimi::il2cpp::hook::` cut off - `umamusume::NowLoading::Hide`. Both `new_hook!` log lines
   print it, so the key a player needs is in the log of the build they run. A key equal to the bare
