@@ -5,7 +5,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use fnv::FnvHashMap;
+use fnv::{FnvHashMap, FnvHashSet};
 
 use crate::interceptor_impl;
 
@@ -46,6 +46,18 @@ pub struct Interceptor {
     // Targets created while arming was batched, armed together by finish_batch.
     queued: Mutex<Vec<usize>>,
 
+    // C1: the callable original behind each wrapper this registry was asked to arm, keyed like
+    // `hook_map`. It is what survives the take-down: `hook_map` is precisely the entry the take-down
+    // drains, so the address of the game method a hook was armed on is forgotten at the exact moment
+    // it becomes callable again, and `reread_trampoline` - the cold read behind every `get_orig_fn!`
+    // - has nothing left to answer but 0 for a body that still wants to call the original. That is
+    // the committed tree being described, not a draft of this change: `git show f1a6584:src/core/interceptor.rs`
+    // answers 0 for a wrapper its map has no entry for, at its line 414 (`get_trampoline_addr`, its
+    // line 408) and at its line 447 (`reread_trampoline`, its line 429), and it has that one answer
+    // for a take-down whatever its backend half said: its test asserts the 0 at its line 1021. No
+    // build before this one handed a wrapper the target its hook was armed on.
+    declared: Mutex<FnvHashMap<usize, DeclaredTarget>>,
+
     // Barrier item 2 (C2): the take-downs whose backend half waits for a point that is not a frame of
     // the hook being taken down - the coroutine doors, and only them.
     //
@@ -67,9 +79,29 @@ pub struct Interceptor {
     // `android::hook.rs`'s dlopen pair and RegisterNatives, `windows::wnd_hook.rs`'s SetWindowLongPtr
     // pair, and a plugin doing the same through `interceptor_get_trampoline_addr`). For them 0 is a
     // call through 0 (C1), and nothing is armed to catch it: none of those wrappers is a
-    // `def_detour!` wrapper, so no barrier stands on them. `release_waits_for_a_safe_point` is the
-    // decision, and `il2cpp::symbols::is_coroutine_door_target` is the fact it rests on.
+    // `def_detour!` wrapper, so no barrier stands on them. The completed half of that chain is
+    // what `declared` closes - once a take-down has run, those wrappers are handed the target it
+    // put back - and the window while a backend half is mid-flight is the residual the C2 concept
+    // keeps. `release_waits_for_a_safe_point` is the decision, and `il2cpp::symbols::is_coroutine_door_target`
+    // is the fact it rests on.
     deferred: Mutex<Vec<DeferredUnhook>>,
+
+    // C1: the targets this registry put a patch on and has not proved back to their own bytes.
+    // Written once per hook the backend created (arming time, never a call path) and dropped only by
+    // a take-down whose backend half returned Ok. It is the one thing the registry still knows after
+    // `unhook` drained the map entry: `hook_map` is precisely what a take-down drains, so a refused
+    // restore leaves a game method carrying the jump into a wrapper with no entry naming it, and a
+    // later `hook` on that target has to be told nobody proved the bytes came back.
+    held_targets: Mutex<FnvHashSet<usize>>,
+    // Armings refused on a target this record still holds. Monotonic, and the counter the first-N
+    // line naming that refusal latches on.
+    refusals_held: AtomicUsize,
+    // Targets this registry opened as the callable original behind a wrapper: the moment a take-down
+    // whose backend returned Ok put the method's own bytes back, or a refusal proved nothing had ever
+    // patched them. One per wrapper: a second ask for a wrapper already open adds nothing. It is the
+    // number behind the line a run reads to tell "this body was handed the game's own method" from
+    // "this body was handed 0" (AGENTS section 7). Cold: one relaxed add per completed take-down.
+    callable_originals_opened: AtomicUsize,
     // How many entries `deferred` holds. It is a hint to skip the lock: a relaxed load here may lag a
     // take-down not yet queued on another thread by a frame, and the queue itself is ordered by its
     // mutex. The frame path pays this one load and nothing else (AGENTS section 6).
@@ -107,6 +139,15 @@ struct DeferredUnhook {
 /// How many hook take-downs name themselves in the log, and the rule `announce_takedown` applies.
 const TAKEDOWN_LOG_LIMIT: usize = 8;
 
+/// How many armings refused on a target this registry still holds name themselves before only the
+/// count is kept.
+const HELD_REFUSAL_LOG_LIMIT: usize = 8;
+
+/// How many targets this registry opens as a callable original name themselves before only the count
+/// is kept. Its own limit: the population is a completed take-down *and* a refusal that proved the
+/// target unpatched, which is wider than the take-down population `announce_takedown` counts.
+const CALLABLE_ORIGINAL_LOG_LIMIT: usize = 8;
+
 /// Which take-down's backend half has to wait for a point that is not a frame of the hook it takes
 /// down, and it is one: the coroutine door.
 ///
@@ -134,12 +175,33 @@ fn release_waits_for_a_safe_point(hook: &HookHandle) -> bool {
         && crate::il2cpp::symbols::is_coroutine_door_target(hook.orig_addr)
 }
 
-/// The first-N latch behind the take-down log: take-downs `1..=TAKEDOWN_LOG_LIMIT` each get a line at
-/// the moment they happen, `TAKEDOWN_LOG_LIMIT + 1` gets the line that says the rest are only counted,
-/// and nothing after that says anything. Pure, so the pattern is testable the way the probes' counters
-/// are; the barrier's `invented_answer` latch is the same shape on an atomic instead of a counter.
+/// The first-N log rule the take-down lines and the held-target refusal lines share: the first
+/// `limit` each get a line at the moment they happen, `limit + 1` gets the line that says the rest
+/// are only counted, and nothing after that says anything. Pure, so the pattern is testable the way
+/// the probes' counters are; the barrier's `invented_answer` latch is the same shape on an atomic
+/// instead of a counter.
+fn announces_first_n(n: usize, limit: usize) -> bool {
+    n <= limit || n == limit + 1
+}
+
+/// The take-down latch: take-downs `1..=TAKEDOWN_LOG_LIMIT` each get a line, one more says the rest
+/// are only counted.
 fn announce_takedown(n: usize) -> bool {
-    n <= TAKEDOWN_LOG_LIMIT || n == TAKEDOWN_LOG_LIMIT + 1
+    announces_first_n(n, TAKEDOWN_LOG_LIMIT)
+}
+
+/// The same latch for the refused-rearm line. `hook` is asked for again by every coroutine a class
+/// hands over (`il2cpp::symbols::hook_move_next`), so a target stuck in the held state would
+/// otherwise format a line per coroutine for the rest of the session (AGENTS section 6).
+fn announce_held_refusal(n: usize) -> bool {
+    announces_first_n(n, HELD_REFUSAL_LOG_LIMIT)
+}
+
+/// The same latch for the line naming a target this registry opened as its wrapper's callable
+/// original. Cold by construction (one per take-down that ran, plus a refusal), and the latch is
+/// what keeps a session that re-arms and releases one door all day from printing a line per release.
+fn announce_callable_original(n: usize) -> bool {
+    announces_first_n(n, CALLABLE_ORIGINAL_LOG_LIMIT)
 }
 
 #[derive(Clone, Copy)]
@@ -162,6 +224,81 @@ impl HookHandle {
 pub enum HookType {
     Function,
     Vtable
+}
+
+/// The callable original behind one wrapper, and whether a call site may be handed it (C1).
+///
+/// The trampoline is the original only while the hook is armed. Two other states have a callable
+/// original too, and the registry is the one place that can still name it there:
+///
+/// - A take-down that ran: the backend put the target's own bytes back (`MH_DisableHook`, Dobby's
+///   restore, or the vtable slot's saved pointer written back), so the target *is* the original
+///   function again, and calling it is what "call the original" means. A take-down the backend
+///   refused is not that state: nobody proved the bytes, and the target stays in `held_targets`.
+/// - An arming that never happened: `new_hook!` skipped a target for a disabled key, or the backend
+///   refused an attempt on a target nothing here holds a patch on. Nothing routes through the
+///   wrapper, and the unpatched target is callable as itself. A refusal on a target this registry
+///   still holds is not that state, and `refusal_proves_the_target_unpatched` is what keeps them
+///   apart.
+///
+/// For a function hook the callable address is `orig_addr`. For a vtable hook `orig_addr` is the
+/// slot - data, never callable code - and the callable address is the method pointer the slot
+/// carried, which `unhook_vtable` writes back into the slot.
+///
+/// `trusted` is the gate that keeps this safe: a target that still carries the jump into the
+/// wrapper must never be answered this way, because calling it jumps back into the body. It is
+/// raised only at the points that prove the target is back to its own code (the four completed
+/// restores), or that it was never patched (the macro's skipped arming, and a refused arming whose
+/// target no witness holds), and raising it bumps `INSTALL_GENERATION`, because a copy may have
+/// stamped the 0 it was legitimately handed mid-take-down and must go back to the registry to read
+/// this.
+struct DeclaredTarget {
+    callable: usize,
+    trusted: bool
+}
+
+fn callable_for(handle: &HookHandle) -> usize {
+    match handle.hook_type {
+        HookType::Function => handle.orig_addr,
+        HookType::Vtable => handle.trampoline_addr
+    }
+}
+
+/// Where a patch on one target can still sit, as far as this registry can see (C1).
+///
+/// `held_record`: a hook this registry created on that target whose restore has not returned Ok.
+/// This is the witness that survives the entry a take-down drains. `hook_map` is exactly what a
+/// take-down drains, so a refused restore leaves a game method carrying the jump into a wrapper with
+/// no entry naming it, and that is the state a re-arm cannot see any other way.
+///
+/// `waiting_release`: a take-down of that target is queued for a safe point, so the method is armed
+/// right now and its trampoline is still alive.
+///
+/// The two are independent reads on purpose, so the trust rule does not rest on one structure having
+/// been updated. A live `hook_map` entry is in the held record by construction (`hook`, `hook_vtable`
+/// and `record_hook_at` all mark its target), and the refusal branch of `hook` is standing on the
+/// map's lock, which a non-reentrant `std::sync::Mutex` may not be re-entered.
+struct TargetPatchWitness {
+    held_record: bool,
+    waiting_release: bool
+}
+
+impl TargetPatchWitness {
+    fn holds_the_target(&self) -> bool {
+        self.held_record || self.waiting_release
+    }
+}
+
+/// The rule a refused arming applies to its own target (C1).
+///
+/// A backend refusal says what *this attempt* did, never what the target's bytes are. Vendored
+/// MinHook answers `MH_CreateHook` with `MH_ERROR_ALREADY_CREATED` precisely when a hook entry for
+/// that target already exists (`minhook/src/hook.c:574` and `:643`), and `MH_EnableHook` with
+/// `MH_ERROR_ENABLED` precisely when the target is already enabled (`:737`), so the set of statuses a
+/// refusal can carry includes "this method is patched right now", which is the opposite of a callable
+/// original. What proves the target callable is the absence of a patch this registry still holds.
+fn refusal_proves_the_target_unpatched(witness: &TargetPatchWitness) -> bool {
+    !witness.holds_the_target()
 }
 
 /// One detour's own copy of the trampoline address it was created with (C33).
@@ -187,9 +324,13 @@ pub enum HookType {
 /// trampoline that is *still armed* rather than 0 (`reread_trampoline`), and the drain that releases it
 /// bumps the generation again before its backend runs, so no copy outlives the memory it names.
 ///
-/// `0` means "this hook is not installed", which is what `get_orig_fn!` documented before (C1): the
-/// caller is handed address 0 rather than a call through a target the registry does not have. That
-/// is only safe for a detour - see `resolve_or_none`, which is what every other call site has to ask.
+/// `0` means "no trampoline and no callable target behind this wrapper" - a hook whose target
+/// never existed. The two named C1 states answer through the registry instead: while the hook is
+/// armed the copy answers its trampoline, and once a take-down has run - or when `new_hook!`
+/// skipped arming a target that exists - the cold read answers that target, restored or never
+/// patched (see `DeclaredTarget`), so the body forwards the game's call instead of making one
+/// through 0. That is only safe for a detour - see `resolve_or_none`, which is what every other
+/// call site has to ask.
 pub struct CachedTrampoline {
     // The wrapper's own address, kept as a pointer because a function address cannot be cast to an
     // integer in a const context, and this field has to be filled in at compile time.
@@ -282,7 +423,7 @@ impl CachedTrampoline {
         }
 
         if self.claim_unresolved_report() {
-            warn!("{name}: no trampoline, the hook is not installed and the call is skipped");
+            warn!("{name}: no trampoline and no callable target behind it, the call is skipped");
         }
 
         None
@@ -318,18 +459,39 @@ impl Interceptor {
         match shared_lock(&self.hook_map).entry(hook_addr) {
             hash_map::Entry::Occupied(e) => Ok(e.get().trampoline_addr),
             hash_map::Entry::Vacant(e) => {
-                let trampoline_addr = unsafe {
+                // C1: declare the target before the attempt that would arm it. This is the last point
+                // at which anything knows "this wrapper's original lives here" - the map entry that
+                // carries it is exactly what a take-down drains - but the declaration is untrusted:
+                // what makes the target the callable answer is what the attempt turns out to have
+                // done to it, and `arming_refused` is the only branch allowed to say so.
+                self.declare_callable(hook_addr, orig_addr);
+
+                let created = unsafe {
                     if batched {
-                        interceptor_impl::create_hook(orig_addr, hook_addr)?
+                        interceptor_impl::create_hook(orig_addr, hook_addr)
                     }
                     else {
-                        interceptor_impl::hook(orig_addr, hook_addr)?
+                        interceptor_impl::hook(orig_addr, hook_addr)
+                    }
+                };
+
+                let trampoline_addr = match created {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        self.arming_refused(hook_addr, orig_addr);
+                        return Err(e);
                     }
                 };
 
                 if batched {
                     shared_lock(&self.queued).push(orig_addr);
                 }
+
+                // The target is the backend's now: `MH_CreateHook` holds an entry for it (batched
+                // arming) or the jump is already written (single call), and only a restore that
+                // returned Ok puts the method back to its own bytes. This record is what a later
+                // attempt on the same target reads when the map entry this one carries is long gone.
+                self.mark_target_held(orig_addr);
 
                 e.insert(
                     HookHandle {
@@ -371,6 +533,10 @@ impl Interceptor {
         if let Err(e) = unsafe { interceptor_impl::enable_all_hooks() } {
             error!("Batch arming failed: {e}, arming {} hooks one by one", queued.len());
 
+            // A target stays in `held_targets` whichever way its arming ended here: MinHook keeps a
+            // created entry either way, and this level cannot tell an armed entry from a created one.
+            // Keeping it held is the direction that can only cost a fallback to 0, never a call into a
+            // method that may still jump into a wrapper.
             for orig_addr in &queued {
                 if let Err(e) = unsafe { interceptor_impl::enable_hook(*orig_addr) } {
                     error!("Failed to arm hook {orig_addr:#016x}: {e}");
@@ -392,6 +558,12 @@ impl Interceptor {
             hash_map::Entry::Occupied(e) => Ok(e.get().trampoline_addr),
             hash_map::Entry::Vacant(e) => {
                 let hook_handle = unsafe { interceptor_impl::hook_vtable(vtable, vtable_index, hook_addr)? };
+                // C1: the callable behind a vtable wrapper is the method pointer the slot carried -
+                // the value `unhook_vtable` writes back - not the slot address itself. The slot is
+                // recorded as held because the write made it point at the wrapper, and only a write
+                // back that returned Ok proves it carries the method again.
+                self.declare_callable(hook_addr, callable_for(&hook_handle));
+                self.mark_target_held(hook_handle.orig_addr);
                 let trampoline_addr = hook_handle.trampoline_addr;
                 e.insert(hook_handle);
                 invalidate_trampoline_caches();
@@ -400,19 +572,218 @@ impl Interceptor {
         }
     }
 
-    /// The registry's answer: `0` when this map holds no entry for that wrapper.
+    /// Record what this wrapper's original is, beside - and ahead of - the attempt to arm it.
+    /// `trusted=false`: the attempt may patch the target, and while the target carries the jump
+    /// into the wrapper the callable answer would be a second entry into the body.
+    fn declare_callable(&self, wrapper: usize, callable: usize) {
+        if callable == 0 {
+            return;
+        }
+
+        shared_lock(&self.declared).insert(wrapper, DeclaredTarget { callable, trusted: false });
+    }
+
+    /// The macro-side entry point (C1): `new_hook!` skipped the arming - a disabled key, or a
+    /// target the macro will not attempt - but the target is a real function nothing patched. A
+    /// wrapper mod code reaches directly must hand the game its own call, and this is the answer
+    /// `get_trampoline_addr` and `reread_trampoline` give it from birth. Runs while hooking, never
+    /// on a call path.
+    pub fn declare_hook_target(&self, wrapper: usize, callable: usize) {
+        if callable == 0 {
+            return;
+        }
+
+        shared_lock(&self.declared).insert(wrapper, DeclaredTarget { callable, trusted: true });
+    }
+
+    /// The callable answer behind a wrapper, and only while its target is known not to jump into
+    /// the wrapper. Cold: the only readers are the tails of `get_trampoline_addr` and
+    /// `reread_trampoline`, and a warmed `CachedTrampoline` never reaches either.
+    fn callable_target(&self, wrapper: usize) -> usize {
+        shared_lock(&self.declared)
+            .get(&wrapper)
+            .filter(|target| target.trusted)
+            .map_or(0, |target| target.callable)
+    }
+
+    /// Open the declared target, at the point the backend put the target's own code back, or the point
+    /// that proves nothing ever patched it. It bumps the hook generation because a copy may have
+    /// stamped the 0 it was legitimately handed while the take-down was in flight; that copy must go
+    /// back to the registry and read this. Cold: one call per completed take-down, a handful per
+    /// session.
     ///
-    /// That is the answer a call site that is not the hook's own detour must stay inert on (C1). A hook
-    /// the registry has lost is not necessarily taken down yet - see `reread_trampoline`, which is what
-    /// the copy a detour was built with falls back to while the backend half of that take-down waits.
+    /// The line is the half a game run can read (AGENTS section 7): it names the wrapper and the
+    /// target the body is now handed, so a run can tell an opened callable original from the 0 a
+    /// mid-take-down read still gives, and count both against its take-down lines. A wrapper already
+    /// open is neither counted nor said again, because the number a run compares against its take-downs
+    /// has to be a count of completions, not of the code paths that reached them.
+    #[cold]
+    fn trust_callable_target(&self, wrapper: usize) {
+        let opened = {
+            let mut declared = shared_lock(&self.declared);
+
+            match declared.get_mut(&wrapper) {
+                Some(target) if !target.trusted => {
+                    target.trusted = true;
+                    Some(target.callable)
+                },
+                // No declaration, or already open: nothing about this wrapper changed.
+                _ => None
+            }
+        };
+
+        let Some(callable) = opened else { return };
+
+        invalidate_trampoline_caches();
+
+        let n = self.callable_originals_opened.fetch_add(1, Ordering::AcqRel) + 1;
+
+        if announce_callable_original(n) {
+            if n <= CALLABLE_ORIGINAL_LOG_LIMIT {
+                info!(
+                    "Callable original {}: the wrapper at {:#016x} is answered through its own target {:#016x}, not 0 (C1); a take-down this registry completed put that method back to its own bytes or nothing ever patched it, so a body calling it is the game's own call and not a second entry into the wrapper",
+                    n,
+                    wrapper,
+                    callable
+                );
+            }
+            else {
+                info!(
+                    "Callable originals after {} are opened the same way and answered the same way; only the count is kept",
+                    CALLABLE_ORIGINAL_LOG_LIMIT
+                );
+            }
+        }
+    }
+
+    /// A target the backend now holds a hook on: created (batched) or created and armed (a single
+    /// call, or a vtable slot pointing at the wrapper). Only `complete_restore` clears it. Cold: one
+    /// insert per hook, while hooking.
+    #[cold]
+    fn mark_target_held(&self, orig_addr: usize) {
+        if orig_addr == 0 {
+            return;
+        }
+
+        shared_lock(&self.held_targets).insert(orig_addr);
+    }
+
+    /// The four take-down completions, and only them: the backend returned Ok, which is the only
+    /// thing in this process that proves the method is back to its own bytes.
+    ///
+    /// One handle restored does not put a target back while another entry still claims it (a vtable
+    /// slot written by two wrappers is the shape that can), so the release asks the map first. Cold:
+    /// the map is not locked at any of the four call sites, which is what makes the ask legal here and
+    /// illegal in `hook`'s refusal branch.
+    #[cold]
+    fn complete_restore(&self, wrapper: usize, handle: &HookHandle) {
+        let still_claimed = shared_lock(&self.hook_map).values().any(|hook| hook.orig_addr == handle.orig_addr);
+
+        if !still_claimed {
+            shared_lock(&self.held_targets).remove(&handle.orig_addr);
+        }
+
+        self.trust_callable_target(wrapper);
+    }
+
+    /// A restore the backend refused. The target keeps its place in the record - nobody proved the
+    /// bytes, so every later ask about it is answered as if the jump were still there - and the
+    /// wrapper keeps 0 rather than a target that may route back into its own body.
+    #[cold]
+    fn restore_refused(&self, handle: &HookHandle, e: &Error) {
+        self.mark_target_held(handle.orig_addr);
+        error!("Failed to unhook {}: {}", handle.orig_addr, e);
+    }
+
+    /// Every place this registry can see a patch on one target sitting. Cold: the only reader is
+    /// `arming_refused`, on a backend failure while hooking.
+    ///
+    /// It does not read `hook_map`: `hook`'s refusal branch is already holding that lock and
+    /// `std::sync::Mutex` is not reentrant. A live entry is in the record by construction, because
+    /// every path that inserts one marks its target first (`hook`, `hook_vtable`, `record_hook_at`).
+    fn target_patch_witness(&self, orig_addr: usize) -> TargetPatchWitness {
+        let held_record = shared_lock(&self.held_targets).contains(&orig_addr);
+        let waiting_release = shared_lock(&self.deferred).iter().any(|entry| entry.handle.orig_addr == orig_addr);
+
+        TargetPatchWitness { held_record, waiting_release }
+    }
+
+    /// What a refused arming means for the wrapper it refused (C1).
+    ///
+    /// The refusal says what *this attempt* did, never what the target's bytes are: `MH_ERROR_ALREADY_CREATED`
+    /// is the status a target with a live hook entry answers, and `MH_ERROR_ENABLED` the status an
+    /// armed target answers, so the set of statuses a refusal can carry includes "this method is
+    /// patched right now", which is the opposite of a callable original. The trust rule is therefore
+    /// the absence of a patch this registry still holds, not the status word. No shipped build trusted
+    /// a refused target: `git show f1a6584:src/core/interceptor.rs` propagates this error with `?` at
+    /// its line 323 and its line 326, `new_hook!` only logs it (`git show f1a6584:src/il2cpp/hook/mod.rs`,
+    /// its line 10 to 12), and a later read answers 0. A target nothing here holds is still the game's
+    /// own function, and that is the case where the wrapper keeps forwarding the game's call rather
+    /// than falling to 0.
+    #[cold]
+    fn arming_refused(&self, wrapper: usize, orig_addr: usize) {
+        let witness = self.target_patch_witness(orig_addr);
+
+        if refusal_proves_the_target_unpatched(&witness) {
+            self.trust_callable_target(wrapper);
+            return;
+        }
+
+        let n = self.refusals_held.fetch_add(1, Ordering::AcqRel) + 1;
+
+        if announce_held_refusal(n) {
+            let reason = if witness.held_record {
+                "a hook created there has no restore that returned Ok"
+            }
+            else {
+                "a take-down of that target is waiting for a safe point"
+            };
+
+            if n <= HELD_REFUSAL_LOG_LIMIT {
+                warn!(
+                    "Hook arming refused on target {:#016x} ({}): this registry still holds a patch there, so nobody proved the method back to its own bytes. The wrapper at {:#016x} is answered 0, not that target (C1): a target that may still jump into a wrapper is not a callable original, and the barrier is what catches a call through 0",
+                    orig_addr,
+                    reason,
+                    wrapper
+                );
+            }
+            else {
+                warn!(
+                    "Hook armings refused on a target this registry still holds are answered 0 the same way after {}; only the count is kept",
+                    HELD_REFUSAL_LOG_LIMIT
+                );
+            }
+        }
+    }
+
+    /// The registry's answer for a wrapper: its live trampoline while the hook is armed, the
+    /// declared callable once a take-down put the target back or an arming never patched it (C1),
+    /// and 0 when neither exists.
+    ///
+    /// What this answered before the callable fallback is the committed tree: a take-down that ran
+    /// whole left it at 0 whatever its backend half answered, even though the game method the hook was
+    /// armed on was callable again, and every wrapper that asks for its own original from inside its
+    /// detour (`windows::hook.rs`'s LoadLibraryW, `wnd_hook.rs`'s SetWindowLongPtr pair,
+    /// `android::hook.rs`'s dlopen pair, a plugin doing the same through `interceptor_get_trampoline_addr`)
+    /// turned that 0 into a call through 0 with no barrier standing on it. `git show f1a6584:src/core/interceptor.rs`
+    /// is that build, and its test asserts the 0 for this same read at its line 1021. Nothing ever
+    /// handed a wrapper its own patched target, so the recursion this fallback keeps shut was never
+    /// shipped behaviour either; it is the state a fallback could create if it trusted the wrong
+    /// witness. The window *inside* a take-down - target armed, entry gone, backend half not finished
+    /// - is the one state that may not be answered with the target, and it still answers 0.
     pub fn get_trampoline_addr(&self, hook_addr: usize) -> usize {
         if let Some(hook) = shared_lock(&self.hook_map).get(&hook_addr) {
-            hook.trampoline_addr
+            return hook.trampoline_addr;
         }
-        else {
-            warn!("Attempted to get invalid hook: {}", hook_addr);
-            0
+
+        let callable = self.callable_target(hook_addr);
+
+        if callable != 0 {
+            return callable;
         }
+
+        warn!("Attempted to get invalid hook: {}", hook_addr);
+        0
     }
 
     /// The cold read a `CachedTrampoline` falls back to when its stamp is behind the hook set.
@@ -426,6 +797,12 @@ impl Interceptor {
     /// `take_down_deferred_for_target` invalidate every copy *before* their backend halves run, so a
     /// copy refreshed during the window goes back to the registry, where the entry is gone and the
     /// queue entry is taken, and is handed 0 - never the trampoline the backend is about to let go.
+    ///
+    /// Third comes the declared callable: once the take-down has run, the target it restored *is* the
+    /// original again, and the answer for "the detach path took the trampoline back" is that address,
+    /// not 0 - the body's call goes through to the game instead of into page zero (C1). A take-down
+    /// the backend refused keeps the target shut: its state is unknown, and an armed target answered
+    /// as a callable is the recursion this fallback exists to avoid.
     pub fn reread_trampoline(&self, hook_addr: usize) -> usize {
         let live = shared_lock(&self.hook_map).get(&hook_addr).map(|hook| hook.trampoline_addr);
 
@@ -441,6 +818,12 @@ impl Interceptor {
 
         if let Some(addr) = waiting {
             return addr;
+        }
+
+        let callable = self.callable_target(hook_addr);
+
+        if callable != 0 {
+            return callable;
         }
 
         warn!("Attempted to get invalid hook: {}", hook_addr);
@@ -567,8 +950,14 @@ impl Interceptor {
             }
         }
 
-        if let Err(e) = unsafe { handle.unhook() } {
-            error!("Failed to unhook {}: {}", handle.orig_addr, e);
+        match unsafe { handle.unhook() } {
+            // C1: the backend put the method's own bytes back (or the slot's own pointer back).
+            // From here the target is the original, and a body that re-reads is handed it - the
+            // game's call still reaches the game.
+            Ok(()) => self.complete_restore(wrapper, handle),
+            // The restore was refused: the target's state is unknown, and answering a target that
+            // may still jump into the wrapper is the recursion `callable_target` keeps shut.
+            Err(e) => self.restore_refused(handle, &e),
         }
     }
 
@@ -622,8 +1011,9 @@ impl Interceptor {
         self.backends_released.fetch_add(count, Ordering::AcqRel);
 
         for entry in &run {
-            if let Err(e) = unsafe { entry.handle.unhook() } {
-                error!("Failed to unhook {}: {}", entry.handle.orig_addr, e);
+            match unsafe { entry.handle.unhook() } {
+                Ok(()) => self.complete_restore(entry.wrapper, &entry.handle),
+                Err(e) => self.restore_refused(&entry.handle, &e),
             }
         }
 
@@ -671,8 +1061,9 @@ impl Interceptor {
         self.backends_released.fetch_add(count, Ordering::AcqRel);
 
         for entry in &deferred {
-            if let Err(e) = unsafe { entry.handle.unhook() } {
-                error!("Failed to unhook {}: {}", entry.handle.orig_addr, e);
+            match unsafe { entry.handle.unhook() } {
+                Ok(()) => self.complete_restore(entry.wrapper, &entry.handle),
+                Err(e) => self.restore_refused(&entry.handle, &e),
             }
         }
 
@@ -719,13 +1110,15 @@ impl Interceptor {
 
         // The same order as `unhook`, for the whole map at once: `mem::take` moves it out (the shape
         // `finish_batch` uses for the queue) so no entry is still in the registry when its generation
-        // goes stale, and every detour that reads after this point is handed 0.
+        // goes stale, and a detour that reads after its own take-down ran is handed the target that
+        // take-down restored rather than 0 (C1).
         let hooks = std::mem::take(&mut *shared_lock(&self.hook_map));
         invalidate_trampoline_caches();
 
-        for (_, hook) in hooks {
-            if let Err(e) = unsafe { hook.unhook() } {
-                error!("Failed to unhook {}: {}", hook.orig_addr, e);
+        for (wrapper, hook) in hooks {
+            match unsafe { hook.unhook() } {
+                Ok(()) => self.complete_restore(wrapper, &hook),
+                Err(e) => self.restore_refused(&hook, &e),
             }
         }
     }
@@ -758,12 +1151,14 @@ impl Interceptor {
     /// which is what every real hook is: the key is the wrapper the game reaches, `orig_addr` is the
     /// method or slot the backend was armed on. `release_waits_for_a_safe_point` reads `orig_addr`, so
     /// a test that wants to say "this take-down is a door" has to name the door's method, and a test
-    /// that wants to say "this one is not" has to name a target nothing recorded.
+    /// that wants to say "this one is not" has to name a target nothing recorded. It mirrors the rest
+    /// of the shipped `hook` too: the callable target is declared untrusted, and the target the
+    /// backend now holds goes into the record the refusal branch reads.
     pub(crate) fn record_hook_at(&self, wrapper: usize, orig_addr: usize, trampoline_addr: usize, hook_type: HookType) {
-        shared_lock(&self.hook_map).insert(
-            wrapper,
-            HookHandle { orig_addr, trampoline_addr, hook_type }
-        );
+        let handle = HookHandle { orig_addr, trampoline_addr, hook_type };
+        self.declare_callable(wrapper, callable_for(&handle));
+        self.mark_target_held(orig_addr);
+        shared_lock(&self.hook_map).insert(wrapper, handle);
         invalidate_trampoline_caches();
     }
 
@@ -794,13 +1189,17 @@ macro_rules! trampoline_cache {
 }
 
 /// The original method a detour hands its call to: `transmute` of whatever the registry answers
-/// for this wrapper, which is 0 when the hook is not installed (C1).
+/// for this wrapper. While the hook is armed that answer is its trampoline. Once the hook is out
+/// of the registry it is the target that hook was armed on - bytes a completed take-down put back,
+/// or a target `new_hook!` skipped arming - so the detach path answers the game's own method
+/// instead of handing the body address 0 (C1). 0 remains only for a hook whose target never
+/// existed, and nothing armed routes into a body in that state.
 ///
 /// Legal for the body of the detour it names, and for that alone. The registry holds an entry for
 /// an installed hook, a detour is reached through its own trampoline and nothing else, and the
 /// hook cannot be taken away from under a call already running on that trampoline. Anywhere else,
-/// the 0 this expands into is a callable function pointer and the call is an access violation:
-/// ask `get_orig_fn_guarded!` instead.
+/// the address this expands into is a callable function pointer chosen for a game method this call
+/// site has no standing to reach: ask `get_orig_fn_guarded!` instead.
 macro_rules! get_orig_fn {
     ($hook:ident, $type:tt) => (
         unsafe {
@@ -920,7 +1319,9 @@ mod tests {
         assert!(interceptor.drop_hook(armed() as usize).is_some());
 
         // The stamp is behind the hook set, and re-reading finds no entry: the wrapper is handed 0,
-        // never the trampoline the backend has taken back.
+        // never the trampoline the backend has taken back. The declared callable exists by now and is
+        // still shut: nothing here has proved the method back to its own bytes. f1a6584 answered 0 for
+        // this read too, at its line 925, with nothing declared at all.
         assert_eq!(cache.cached(armed()), None);
         assert_eq!(cache.reread(&interceptor, armed()), 0);
         assert_eq!(cache.cached(armed()), Some(0));
@@ -1017,7 +1418,11 @@ mod tests {
         assert_eq!(interceptor.backend_release_count(), released_before);
 
         // With the target back to its own bytes the wrapper is not reached again, so it is handed nothing
-        // to call: 0 here is the honest answer, not an armed hook nobody recorded.
+        // to call: 0 here is the honest answer, not an armed hook nobody recorded. It is the answer
+        // f1a6584 asserted for this same read at its line 1021, and it is still 0 because this restore
+        // was refused, the only answer a unit test can get for a target the backend never made. A
+        // restore that returned Ok opens NATIVE_TARGET instead, and that is the half the line
+        // `trust_callable_target` prints exists for.
         assert_eq!(interceptor.reread_trampoline(armed() as usize), 0);
     }
 
@@ -1609,5 +2014,361 @@ mod tests {
         assert_eq!(cache.resolve(armed()), 0x1000);
         assert_eq!(cache.resolve_or_none(armed(), "armed"), Some(0x1000));
         assert!(!cache.unresolved_reported(), "an armed hook spent the once-only report");
+    }
+
+    // The remaining C1 chain, closed at the registry. Its "before" is the committed tree, not a draft
+    // of this change: `git show f1a6584:src/core/interceptor.rs` keeps the address of the method a
+    // hook was armed on in one place only, the `hook_map` entry a take-down drains (its line 45), so
+    // once that entry was gone nothing in that build could name the method again and both reads
+    // answered 0 (its line 414 and its line 447). That build's own tests assert the 0 for the states a
+    // unit test can reach at all: `a_hook_the_registry_loses_is_not_jumped_through` at its line 925,
+    // and `a_take_down_that_is_not_a_door_is_whole_before_the_call_that_asked_returns` at its line
+    // 1021. Those states are 0 here too, for the same reason a unit test can only reach: the addresses
+    // these tests hand the backend were never created on it, so its half is refused, and a refusal
+    // proves nothing about the bytes. What this change adds is the state a unit test cannot make the
+    // backend produce, a restore that returned Ok, and the state `new_hook!` produces when it skips an
+    // arming, and those are driven here through the seams the shipped code runs: `drop_hook` is a
+    // take-down's registry half, `trust_callable_target` is the step all four completions run on a
+    // backend `Ok`, `declare_hook_target` is what `new_hook!`'s disabled branch calls on this tree
+    // (`src/il2cpp/hook/mod.rs:222`); on f1a6584 that branch printed `[DISABLED]` and nothing else
+    // (`git show f1a6584:src/il2cpp/hook/mod.rs`, its line 19). The `Ok` itself is a game run's to
+    // read (AGENTS section 4), and the line `trust_callable_target` prints is the line that run
+    // reads it from.
+    #[test]
+    fn a_completed_take_down_hands_the_body_the_restored_target_instead_of_zero() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+        interceptor.record_hook_at(armed() as usize, NATIVE_TARGET, 0x1000, HookType::Function);
+
+        let cache = CachedTrampoline::new(armed());
+        assert_eq!(cache.reread(&interceptor, armed()), 0x1000, "while armed, the trampoline is the answer");
+
+        assert!(interceptor.drop_hook(armed() as usize).is_some());
+
+        // The registry half alone may not open the target: the backend half has not run, the method
+        // may still carry the jump into the wrapper, and calling the target then is calling the body.
+        assert_eq!(interceptor.reread_trampoline(armed() as usize), 0, "a target mid-take-down is not callable");
+        assert_eq!(interceptor.get_trampoline_addr(armed() as usize), 0);
+
+        // The backend half ran and put the method's own bytes back: the target is the original
+        // again, and it - not 0 - is what the next read hands the body. The game call is forwarded,
+        // not skipped.
+        interceptor.trust_callable_target(armed() as usize);
+        assert_eq!(interceptor.reread_trampoline(armed() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.get_trampoline_addr(armed() as usize), NATIVE_TARGET);
+
+        // A copy that stamped the mid-take-down 0 is behind the hook set - trusting the target
+        // bumped the generation - and its re-read finds the restored target, which it answers hot
+        // from then on.
+        assert_eq!(cache.cached(armed()), None, "the copy of the window's 0 stayed current after the target came back");
+        assert_eq!(cache.reread(&interceptor, armed()), NATIVE_TARGET);
+        assert_eq!(cache.cached(armed()), Some(NATIVE_TARGET));
+    }
+
+    #[test]
+    fn a_hook_the_macro_skipped_forwards_the_game_call_through_its_declared_target() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+
+        // What `new_hook!`'s disabled branch now does for a target that exists: the backend was
+        // never asked to patch it, so the target is callable as the original from birth, and a
+        // wrapper mod code reaches directly hands the game its own call instead of calling through 0.
+        interceptor.declare_hook_target(other_hook() as usize, NATIVE_TARGET);
+
+        assert_eq!(interceptor.get_trampoline_addr(other_hook() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.reread_trampoline(other_hook() as usize), NATIVE_TARGET);
+
+        // The guard asks see it too: `Some(target)` where they used to answer `None`. The copy is
+        // proved current first for the usual reason - `resolve`'s cold branch is the singleton.
+        let cache = CachedTrampoline::new(other_hook());
+        assert_eq!(cache.reread(&interceptor, other_hook()), NATIVE_TARGET);
+        assert_eq!(cache.cached(other_hook()), Some(NATIVE_TARGET));
+        assert_eq!(cache.resolve_or_none(other_hook(), "skipped"), Some(NATIVE_TARGET));
+        assert!(!cache.unresolved_reported(), "a call that found its target reported a skip");
+    }
+
+    #[test]
+    fn an_armed_hook_is_answered_through_its_trampoline_and_never_through_its_target() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+        interceptor.record_hook_at(armed() as usize, NATIVE_TARGET, 0x1000, HookType::Function);
+
+        // The declared callable exists (the seam mirrors `hook`), but the armed target carries the
+        // jump into the wrapper: answering it would replay the body, so while the map holds the
+        // entry the trampoline is the only answer either read gives.
+        assert_eq!(interceptor.callable_target(armed() as usize), 0);
+        assert_eq!(interceptor.reread_trampoline(armed() as usize), 0x1000);
+        assert_eq!(interceptor.get_trampoline_addr(armed() as usize), 0x1000);
+    }
+
+    #[test]
+    fn a_refused_restore_keeps_the_target_out_of_reach() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+        interceptor.record_hook_at(armed() as usize, NATIVE_TARGET, 0x1000, HookType::Function);
+
+        // The shipped immediate completion, driven against a target this process never handed the
+        // backend: `handle.unhook()` is refused, the completion does not trust the target, and the
+        // honest answer stays 0 rather than a call into a method whose bytes nobody proved restored.
+        assert!(interceptor.unhook(armed() as usize).is_some());
+        assert_eq!(interceptor.callable_target(armed() as usize), 0, "a refused restore trusted its callable target");
+        assert_eq!(interceptor.reread_trampoline(armed() as usize), 0);
+    }
+
+    #[test]
+    fn a_vtable_take_down_hands_the_body_the_method_the_slot_carried_again() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+        interceptor.record_hook_at(other_hook() as usize, VTABLE_SLOT, 0x2000, HookType::Vtable);
+
+        // While armed, the map answers the slot's method pointer - what a vtable body already calls.
+        assert_eq!(interceptor.reread_trampoline(other_hook() as usize), 0x2000);
+
+        assert!(interceptor.drop_hook(other_hook() as usize).is_some());
+        assert_eq!(interceptor.reread_trampoline(other_hook() as usize), 0);
+
+        // The vtable completion writes the slot's own pointer back and frees nothing, so a
+        // `render_hook` pair re-reading after it is handed the original method again - the same
+        // callable it had while armed, and never the slot address, which is data.
+        interceptor.trust_callable_target(other_hook() as usize);
+        assert_eq!(interceptor.reread_trampoline(other_hook() as usize), 0x2000);
+        assert_eq!(interceptor.get_trampoline_addr(other_hook() as usize), 0x2000);
+        assert_ne!(interceptor.callable_target(other_hook() as usize), VTABLE_SLOT, "a vtable callable was the slot itself");
+    }
+
+    // The trust point the five tests above never reached: `hook`'s refused-arming branch. The chain
+    // the defect report names is a take-down whose backend half was refused (entry gone, method still
+    // carrying the jump) followed by the next coroutine of the same class asking for the same wrapper
+    // on the same target (`il2cpp::symbols::hook_move_next`), which lands on a backend refusal - the
+    // status `MH_CreateHook` answers for a target it still holds an entry for (vendored
+    // `minhook/src/hook.c:574` and `:643`) and `MH_EnableHook` answers for a target already enabled
+    // (`:737`). The branch used to read that refusal as proof the target was never patched and trust
+    // it, which hands the body the target its own jump points at. A unit test cannot make the backend
+    // answer `ALREADY_CREATED` (it never received the method), so what these prove is the decision at
+    // the branch, with the backend's own statuses cited from the vendored source.
+    #[test]
+    fn a_rearm_refused_after_a_failed_take_down_hands_the_body_nothing_to_jump_into() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+
+        // The door armed on the game's method, the way `symbols::hook_move_next` arms it.
+        arm_door(&interceptor, armed() as usize, GAME_DOOR_METHOD);
+
+        // The barrier's door rule takes it down on the spot, and the game tick runs the backend half
+        // against a method this process never handed the backend: the restore is refused, the entry is
+        // already gone, and nobody proved the method's bytes.
+        assert!(interceptor.unhook(armed() as usize).is_some());
+        assert_eq!(interceptor.drain_deferred_unhooks(), 1);
+        assert_eq!(interceptor.deferred_unhook_count(), 0);
+
+        // The state the re-arm is made from: no entry, nothing queued.
+        assert_eq!(interceptor.get_trampoline_addr(armed() as usize), 0);
+
+        // The next coroutine of the same class asks the shipped `hook` for the same wrapper on the
+        // same target, and the backend refuses it. The refusal branch is where the call lands.
+        assert!(interceptor.hook(GAME_DOOR_METHOD, armed() as usize).is_err(),
+            "a re-arm was allowed through on a target this registry still holds a patch on");
+
+        assert_eq!(interceptor.callable_target(armed() as usize), 0,
+            "a refused re-arm trusted the target its own jump still points at");
+        assert_eq!(interceptor.reread_trampoline(armed() as usize), 0,
+            "the door body was handed a target instead of the 0 the barrier catches");
+        assert_eq!(interceptor.refusals_held.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_refused_arming_on_a_target_nothing_holds_still_hands_the_body_its_target() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+
+        // The other half of the branch, unchanged: a refusal on a target no hook here was ever armed
+        // on (an allocation failure, an unsupported function) leaves the game's own function callable,
+        // so the wrapper forwards the game's call instead of falling to 0 and tripping the barrier.
+        assert!(interceptor.hook(NATIVE_TARGET, other_hook() as usize).is_err());
+
+        assert_eq!(interceptor.callable_target(other_hook() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.reread_trampoline(other_hook() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.get_trampoline_addr(other_hook() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.refusals_held.load(Ordering::Relaxed), 0,
+            "a refusal that opened its target was counted as one that did not");
+    }
+
+    #[test]
+    fn a_refused_arming_trusts_no_target_a_live_hook_or_a_waiting_release_is_holding() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+
+        // A second wrapper refused on a method another armed hook already covers: handing it that
+        // target sends it into the other wrapper's body, which is the same mistake wearing a
+        // different hat.
+        interceptor.record_hook_at(armed() as usize, NATIVE_TARGET, 0x1000, HookType::Function);
+        interceptor.declare_callable(other_hook() as usize, NATIVE_TARGET);
+        interceptor.arming_refused(other_hook() as usize, NATIVE_TARGET);
+        assert_eq!(interceptor.callable_target(other_hook() as usize), 0,
+            "a wrapper refused on an armed target was handed that target");
+
+        // The armed hook is unchanged: its trampoline is still the only answer it gets.
+        assert_eq!(interceptor.reread_trampoline(armed() as usize), 0x1000);
+
+        // And a take-down whose backend half is waiting for a safe point holds its target for the same
+        // reason: the method is patched right now, and its trampoline is the live answer.
+        arm_door(&interceptor, other_hook() as usize, 0x2000);
+        assert!(interceptor.unhook(other_hook() as usize).is_some());
+        interceptor.arming_refused(other_hook() as usize, GAME_DOOR_METHOD);
+        assert_eq!(interceptor.callable_target(other_hook() as usize), 0,
+            "a refusal trusted a target whose take-down has not run yet");
+        assert_eq!(interceptor.reread_trampoline(other_hook() as usize), 0x2000,
+            "the window lost the trampoline it is still calling through");
+    }
+
+    #[test]
+    fn only_the_backend_ever_opens_a_target_it_had_to_be_put_back_to() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+        interceptor.record_hook_at(armed() as usize, NATIVE_TARGET, 0x1000, HookType::Function);
+
+        // While the hook is armed a refusal may not open the target: it carries the jump.
+        interceptor.arming_refused(armed() as usize, NATIVE_TARGET);
+        assert_eq!(interceptor.callable_target(armed() as usize), 0);
+
+        // The registry half, then the completion the backend Ok runs, which is the only point that
+        // both releases the record and opens the callable.
+        let handle = interceptor.drop_hook(armed() as usize).expect("the hook was never recorded");
+        interceptor.complete_restore(armed() as usize, &handle);
+        assert_eq!(interceptor.callable_target(armed() as usize), NATIVE_TARGET);
+
+        // The record is not sticky: a target proved restored is the game's own function for the next
+        // wrapper refused on it as well.
+        interceptor.declare_callable(other_hook() as usize, NATIVE_TARGET);
+        interceptor.arming_refused(other_hook() as usize, NATIVE_TARGET);
+        assert_eq!(interceptor.callable_target(other_hook() as usize), NATIVE_TARGET);
+    }
+
+    #[test]
+    fn a_refusal_proves_its_target_unpatched_only_when_no_witness_holds_that_target() {
+        // The pure rule, one witness at a time: any place a patch can sit is enough to keep the
+        // callable shut, and only the state with none of them is the one a refusal may open.
+        assert!(refusal_proves_the_target_unpatched(&TargetPatchWitness { held_record: false, waiting_release: false }),
+            "a refusal proved the target callable where a patch was recorded");
+
+        for (held_record, waiting_release) in [(true, false), (false, true), (true, true)] {
+            let witness = TargetPatchWitness { held_record, waiting_release };
+            assert!(witness.holds_the_target());
+            assert!(!refusal_proves_the_target_unpatched(&witness),
+                "a refusal opened a target held_record: {held_record} waiting_release: {waiting_release}");
+        }
+    }
+
+    #[test]
+    fn one_restored_handle_does_not_put_back_a_target_another_entry_still_claims() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+
+        // Two wrappers claiming one target. `hook_vtable` writes a slot with no "already written"
+        // check, so this is the shape where the registry holds two claims on one address, and one
+        // handle coming back does not make that address the game's own.
+        interceptor.record_hook_at(armed() as usize, VTABLE_SLOT, 0x2000, HookType::Vtable);
+        interceptor.record_hook_at(other_hook() as usize, VTABLE_SLOT, 0x3000, HookType::Vtable);
+
+        let handle = interceptor.drop_hook(armed() as usize).expect("the first wrapper was never recorded");
+        interceptor.complete_restore(armed() as usize, &handle);
+
+        // The wrapper whose own restore ran is handed its callable, as every completion does.
+        assert_eq!(interceptor.callable_target(armed() as usize), 0x2000);
+
+        // A third ask on that target is not: the other claim is still armed there.
+        let third = other_hook() as usize + 32;
+        interceptor.declare_callable(third, VTABLE_SLOT);
+        interceptor.arming_refused(third, VTABLE_SLOT);
+        assert_eq!(interceptor.callable_target(third), 0,
+            "one restore put back a target another entry still claimed");
+    }
+
+    #[test]
+    fn a_refused_rearm_names_itself_for_the_first_eight_and_counts_the_rest() {
+        // `hook` is asked for again by every coroutine a class hands over, so a target stuck in the
+        // held state would format this line per coroutine for the rest of the session. The latch is
+        // the take-down line's, shared rather than copied.
+        for n in 1..=HELD_REFUSAL_LOG_LIMIT {
+            assert!(announce_held_refusal(n), "refused re-arm {n} said nothing at the moment it happened");
+        }
+
+        assert!(announce_held_refusal(HELD_REFUSAL_LOG_LIMIT + 1), "the line saying the rest are only counted never came");
+        assert!(!announce_held_refusal(HELD_REFUSAL_LOG_LIMIT + 2));
+        assert!(!announce_held_refusal(HELD_REFUSAL_LOG_LIMIT + 10_000));
+
+        for n in 1..=40 {
+            assert_eq!(announce_held_refusal(n), announce_takedown(n), "the two first-N rules drifted at {n}");
+        }
+
+        // The shared rule at a limit of its own, so the two families are the rule and not a pair of
+        // copies that happen to agree at 8.
+        assert!(announces_first_n(1, 1) && announces_first_n(2, 1), "the rule lost a line at the limit");
+        assert!(!announces_first_n(3, 1), "the rule said something after the counted-only line");
+        assert!(announces_first_n(3, 3) && announces_first_n(4, 3), "the rule lost a line at the limit");
+        assert!(!announces_first_n(5, 3), "the rule said something after the counted-only line");
+    }
+
+    #[test]
+    fn a_completed_restore_opens_its_target_once_and_counts_it_once() {
+        let _turn = take_turns();
+        let interceptor = Interceptor::default();
+
+        // The trust point all four completions run on a backend `Ok`. An ask naming a wrapper this
+        // registry never declared changes nothing about it, and it is not counted either: the number
+        // a run reads has to mean "a target was opened", nothing else.
+        interceptor.trust_callable_target(other_hook() as usize);
+        assert_eq!(interceptor.callable_originals_opened.load(Ordering::Relaxed), 0,
+            "an ask for a wrapper nobody declared opened nothing and was counted anyway");
+
+        interceptor.record_hook_at(armed() as usize, NATIVE_TARGET, 0x1000, HookType::Function);
+
+        // Armed, then out of the registry with its backend half not run: the target is declared and
+        // shut, and nothing has been opened.
+        assert_eq!(interceptor.callable_target(armed() as usize), 0);
+        let handle = interceptor.drop_hook(armed() as usize).expect("the wrapper was never recorded");
+        assert_eq!(interceptor.callable_target(armed() as usize), 0);
+        assert_eq!(interceptor.callable_originals_opened.load(Ordering::Relaxed), 0,
+            "the registry half of a take-down opened a target its backend half had not proved back");
+
+        // The completion, driven through the seam the four shipped completions run. This is the state
+        // no unit test can make the backend produce (AGENTS section 4), and it is the state the
+        // `Callable original` line exists so a run can count.
+        interceptor.complete_restore(armed() as usize, &handle);
+        assert_eq!(interceptor.callable_target(armed() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.reread_trampoline(armed() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.get_trampoline_addr(armed() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.callable_originals_opened.load(Ordering::Relaxed), 1,
+            "a completion that opened its target did not count it");
+
+        // Idempotent. One wrapper reached again by another completion, which is the `unhook_all`
+        // after a drain shape, opens nothing a second time and adds nothing to the count.
+        interceptor.complete_restore(armed() as usize, &handle);
+        interceptor.trust_callable_target(armed() as usize);
+        assert_eq!(interceptor.callable_target(armed() as usize), NATIVE_TARGET);
+        assert_eq!(interceptor.callable_originals_opened.load(Ordering::Relaxed), 1,
+            "one wrapper was counted as two opened originals");
+    }
+
+    #[test]
+    fn a_callable_original_line_names_itself_for_the_first_eight_and_counts_the_rest() {
+        // The take-down rule at a limit of its own. The population it counts is wider than the
+        // take-downs `announce_takedown` counts, because a refusal that proved its target unpatched
+        // opens an original without taking anything down, so it may not inherit that limit; what it
+        // shares is the rule, checked as one rule at limits that are not 8.
+        for n in 1..=CALLABLE_ORIGINAL_LOG_LIMIT {
+            assert!(announce_callable_original(n), "opened callable original {n} said nothing at the moment it happened");
+        }
+
+        assert!(announce_callable_original(CALLABLE_ORIGINAL_LOG_LIMIT + 1), "the line saying the rest are only counted never came");
+        assert!(!announce_callable_original(CALLABLE_ORIGINAL_LOG_LIMIT + 2));
+        assert!(!announce_callable_original(CALLABLE_ORIGINAL_LOG_LIMIT + 10_000));
+
+        for n in 1..=40 {
+            assert_eq!(announce_callable_original(n), announce_takedown(n), "the two first-N rules drifted at {n}");
+        }
+
+        assert!(announces_first_n(1, 1) && announces_first_n(2, 1), "the rule lost a line at the limit");
+        assert!(!announces_first_n(3, 1), "the rule said something after the counted-only line");
     }
 }

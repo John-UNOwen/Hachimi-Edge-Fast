@@ -16,6 +16,11 @@ macro_rules! new_hook {
             }
         }
         else {
+            // C1: the arming is skipped on purpose, but a target that resolved is a real game
+            // function nothing patched. Declare it, so a wrapper mod code reaches directly hands the
+            // game its own call instead of being handed 0: `get_orig_fn!` and `get_orig_fn_guarded!`
+            // answer this target from birth (a target that never resolved is 0 and stays inert).
+            hachimi.interceptor.declare_hook_target($hook as *const () as usize, $orig as usize);
             info!("[DISABLED] new_hook!: {}", stringify!($hook));
         }
     )
