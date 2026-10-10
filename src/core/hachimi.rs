@@ -1318,6 +1318,11 @@ pub struct Config {
     pub result_screen_speed: f32,
     #[serde(default = "Config::default_animation_speed")]
     pub story_speed: f32,
+    // The training stat plate cascade interval, on `TrainingParamChangeUI::InitializePlateList` alone. Runs 31 to
+    // 33 closed a cascade at or above the interval the door was handed rather than that interval over the
+    // multiplied tween clock, so this lever is the only one that reaches that completion (C58, ledger item 74).
+    #[serde(default = "Config::default_animation_speed")]
+    pub training_plate_speed: f32,
     #[serde(default)]
     pub auto_skip_result_screens: bool,
     // Raises the story and training High Speed settings that the Global options screen does not

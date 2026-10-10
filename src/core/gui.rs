@@ -6025,6 +6025,16 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            // The plate cascade lever is not priced against the pair ceiling above. The three runs that reached
+            // this door closed a cascade at or above the interval the door was handed, so the multiplied tween
+            // clock is not on that completion and there is no pair here to bound. `MIN_PLATE_INTERVAL_SEC` is
+            // where the ceiling lands, so 20x cannot take the cascade under a quarter of the game's own spacing.
+            if should_show_option(search, &t!("config_editor.training_plate_speed")) {
+                ui.label(t!("config_editor.training_plate_speed"));
+                ui.add(egui::Slider::new(&mut config.training_plate_speed, 1.0..=20.0).step_by(0.5));
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.auto_skip_result_screens")) {
                 ui.label(t!("config_editor.auto_skip_result_screens"));
                 ui.checkbox(&mut config.auto_skip_result_screens, "");

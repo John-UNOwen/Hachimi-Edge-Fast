@@ -209,6 +209,7 @@ config_editor:
   transition_speed: "过渡动画速度"
   result_screen_speed: "结算画面动画速度"
   story_speed: "剧情过场动画速度"
+  training_plate_speed: "Training stat plate animation speed"
   auto_skip_result_screens: "自动跳过结算画面动画"
   high_speed_settings: "将剧情与训练的高速设置提升到游戏最大值"
   story_high_speed_mode: "将剧情播放切换为游戏自身的高速模式"

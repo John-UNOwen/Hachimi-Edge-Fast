@@ -48,6 +48,11 @@ or a decision is taken, not as a scratch pad. The split and the evidence rule ar
   in the game, because the clock the ui lever multiplies is `Time.deltaTime`, which is that scale times real
   elapsed time. `ui_animation_scale` is capped at the product over that scale and never trimmed below the neutral
   1.0, so the bound trims what this fork puts on the channel and never slows the game (C58, ledger item 62).
+  `training_plate_speed` is the one duration lever outside that bound, on `TrainingParamChangeUI.InitializePlateList`
+  alone: runs 31 to 33 closed a plate cascade at the interval the door was handed rather than that interval over the
+  multiplied clock, so no pair composes on that completion. It mirrors to its own atomic, `normalize` holds it at
+  `MAX_FACTOR`, `MIN_PLATE_INTERVAL_SEC` is where the ceiling lands, and it is not on `Group::Training`, which stays
+  factor-less so the HP gauge blend time keeps its bound (C58, ledger item 74).
 - **Client side presentation only.** Do not speed things up by skipping server calls, faking
   success callbacks, changing simulation results, or touching purchase, legality, SQLite key or
   network paths (see C3, C6, C12, C20, C21, C31). `Time.timeScale` is a simulation lever, not an

@@ -145,6 +145,7 @@ config_editor:
   transition_speed: "Tốc độ hoạt ảnh chuyển cảnh"
   result_screen_speed: "Tốc độ hoạt ảnh màn hình kết quả"
   story_speed: "Tốc độ cutscene cốt truyện"
+  training_plate_speed: "Training stat plate animation speed"
   auto_skip_result_screens: "Tự động bỏ qua hoạt ảnh màn hình kết quả"
   high_speed_settings: "Nâng cài đặt Tốc độ cao của cốt truyện và luyện tập lên mức tối đa của game"
   gui_landscape_ratio: "Tỷ lệ thu phóng lớp phủ ngang"

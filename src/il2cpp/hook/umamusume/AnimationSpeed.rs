@@ -309,6 +309,10 @@ fn report_pass(pass: usize) {
 // Mirrored for hot paths (timeline getters run every frame while a cutscene plays).
 static TRANSITION_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static SCREENS_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+// The plate cascade lever, mirrored apart from the groups. `Group::Training` is shared by the plate interval and
+// the HP gauge blend time, and only one of those two is a completion the multiplied clock demonstrably does not
+// measure, so the door that earned a lever has its own (C58, ledger item 74).
+static PLATE_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static STORY_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static TIME_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static UI_ANIMATION_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
@@ -730,6 +734,11 @@ pub fn factor(group: Group) -> f32 {
 
     f32::from_bits(bits)
 }
+
+/// The plate cascade lever as the config pass left it. Read by one door, on one screen, so it is a plain atomic
+/// read on a call the training census counts a handful of times per turn rather than a group factor read on every
+/// duration detour.
+pub fn plate_factor() -> f32 { f32::from_bits(PLATE_FACTOR.load(Ordering::Relaxed)) }
 
 // Most of Gallop's durations are `const`, which IL2CPP folds into the call sites, so
 // the value has no writable storage (see the init log). The methods that play the
@@ -1661,6 +1670,9 @@ fn mirror_config(config: &Config) {
     STORY_FACTOR.store(story.to_bits(), Ordering::Release);
     TIME_SCALE.store(normalize_time_scale(config.time_scale).to_bits(), Ordering::Release);
     UI_ANIMATION_SCALE.store(ui.to_bits(), Ordering::Release);
+    // The same ceiling as the group factors, on the one training duration this fork scales: a hand edited
+    // config.json cannot ask for more than MAX_FACTOR out of a plate cascade.
+    PLATE_FACTOR.store(normalize(config.training_plate_speed).to_bits(), Ordering::Release);
     // Clamped here so neither story choice site divides by the delay itself: `CheckChoiceAutoTap`
     // runs while a choice is up and `GetTimeScaleByHighSpeedType` is a story path getter, so both
     // read this mirror instead of the config (C24).
@@ -1670,28 +1682,33 @@ fn mirror_config(config: &Config) {
     );
 
     note_pair_ceiling(ui, [transition, screens, story]);
-    note_training_doors_are_inert();
+    note_training_gate_levers();
 }
 
-// The separation C58 / ledger item 59 installed has to be visible in `hachimi.log`, because the doors it
-// quiets are still armed: a door that hands the value it received prints `call N 1 -> 1 unchanged`, which
-// is the same shape as a hook the game never reached (A4). Without this line a run reading
-// `TrainingParamChangeUI.InitializePlateList=36` cannot tell "the lever no longer reaches this gate" from
-// "the game never called it". Said once per process, by the config pass that mirrors the levers, naming
-// the doors exactly as the training census names them.
+// What each training gate is priced on has to be visible in `hachimi.log`, because both are armed and a door that
+// hands the value it received prints `call N 1 -> 1 unchanged`, which is the same shape as a hook the game never
+// reached (A4). Without this line a run reading `TrainingParamChangeUI.InitializePlateList=36` cannot tell "the
+// lever is at its neutral 1.0" from "the lever does not reach this door" from "the game never called it". Said once
+// per process, by the config pass that mirrors the levers, naming the doors exactly as the training census names
+// them, and naming the lever the plate door carries so a run can tell which arm it was on (C58, ledger items 59
+// and 74).
 static TRAINING_DOORS_NOTE_LOGGED: AtomicBool = AtomicBool::new(false);
 
+// Named exactly as `TRAINING_HIT_SLOTS` names them, so a run can match this line to the census counts.
+const TRAINING_PLATE_DOOR: &str = "TrainingParamChangeUI.InitializePlateList";
+const TRAINING_GAUGE_DOOR: &str = "SingleModeMainViewHpGauge.SetProgressbarBlendTime";
+
 /// Whether this config pass got the line.
-fn note_training_doors_are_inert() -> bool {
+fn note_training_gate_levers() -> bool {
     if TRAINING_DOORS_NOTE_LOGGED.swap(true, Ordering::AcqRel) {
         return false;
     }
 
-    let doors: Vec<&str> = TRAINING_HIT_SLOTS.iter().map(|(_, name)| *name).collect();
-
     debug!(
-        "AnimationSpeed: training gates are not scaling points: {} hand the game the values they were passed; result_screen_speed reaches result screens only",
-        doors.join(", "),
+        "AnimationSpeed: training gates: {} scales on training_plate_speed {} alone, off the pair bound; {} hands the game the value it was passed; result_screen_speed reaches result screens only",
+        TRAINING_PLATE_DOOR,
+        plate_factor(),
+        TRAINING_GAUGE_DOOR,
     );
 
     true
@@ -2149,11 +2166,19 @@ pub const PACE_GRAND_RESULT_FADE: Pace = Pace::TweenMeasured("TeamStadiumGrandRe
 // either door (installed is not called, A4).
 pub const PACE_TEXT_MODIFIER_TIMELINE: Pace = Pace::Unproven;
 
-// The training gates have no lever behind them (item 59), so which lane they sit on cannot move a number in
-// this build. `Unproven` is the honest answer and it is the bounded one: the plate interval is stored beside
-// `_groupPlaySequence [class<DG.Tweening.Sequence>]`, which is tween-shaped, while C54 and C62 both measured
-// that the interval is not the beat the cascade actually waits on. Nothing has read which.
+// The gauge blend time keeps the lane item 59 left it on: no lever behind it, `Unproven`, and so the bounded side
+// of the pair, because a progress bar blend is a tween duration and nothing has measured it off the clock.
 pub const PACE_TRAINING_GATE: Pace = Pace::Unproven;
+
+// The plate interval is the one training duration with readings on it. Three runs closed a plate cascade at or
+// above the interval the door was handed and never at a fraction of it, which is what a completion advanced by the
+// clock this fork multiplies would look like: `InitializePlateList 1 -> 0.05` with `9 cascades closed mean 338.2
+// ms` (run 31), `1 -> 0.25` with `8 cascades closed mean 396.9 ms` (run 32), and the interval handed on unchanged
+// at 1.0 s with `10 cascades closed mean 1242.1 ms` while `ui_animation 20` held a 20x delta clock (run 33). A
+// 1.0 s wait advanced by that clock closes in 50 ms, and it closed in 1242 ms. So the interval is the beat the
+// cascade waits on, which is what C54 read backwards from the fast end and C62 now states, and it is not advanced
+// by the multiplied clock, so there is no pair on it to bound and it carries its own lever.
+pub const PACE_PLATE_INTERVAL: Pace = Pace::OffTweenClock("run 31 closed a plate cascade in 338.2 ms on the 0.05 s the door handed, run 32 in 396.9 ms on 0.25 s, run 33 in 1242.1 ms with the 1.0 s interval handed on unchanged while ui_animation 20 held a 20x delta clock; none of them at a fraction of the interval, which is what a completion the multiplied clock advances would read like");
 
 // The count-up door is the one `Group::Screens` duration door a career session has been measured reaching
 // (`CountupModifier_getDuration 0.16 -> 0.008`, run 17, in the same snapshot as `result 20`), so it is the
@@ -2213,7 +2238,7 @@ pub const ARMED_DOOR_PACES: &[(&str, Group, Pace)] = &[
     ("TextModifier.get_Duration", Group::Screens, PACE_TEXT_MODIFIER_TIMELINE),
     ("TextModifier.get_Delay", Group::Screens, PACE_TEXT_MODIFIER_TIMELINE),
     (COUNTUP_DOOR, Group::Screens, PACE_COUNTUP),
-    ("TrainingParamChangeUI.InitializePlateList", Group::Training, PACE_TRAINING_GATE),
+    ("TrainingParamChangeUI.InitializePlateList", Group::Training, PACE_PLATE_INTERVAL),
     ("SingleModeMainViewHpGauge.SetProgressbarBlendTime", Group::Training, PACE_TRAINING_GATE),
 ];
 
@@ -2621,13 +2646,28 @@ def_detour! {
     }
 }
 
-/// What a training gate door hands the game. This is item 59 in one call: the two armed training doors
-/// scale on `Group::Training`, and that group has no factor, so the value is the one the caller passed.
-/// The wrapper exists so the tests drive the same decision the armed detours make - a test that only reads
-/// `Group::Training` would still pass if a door went back to `Group::Screens`, which is the regression this
-/// item exists to keep out. Its pace is written down too (PACE_TRAINING_GATE) so the day a lever is ever put
-/// back on this door, the lane the bound reaches it on is already stated.
+/// What the gauge blend door hands the game. This is item 59 in one call: the door scales on `Group::Training`,
+/// and that group has no factor, so the value is the one the caller passed. The wrapper exists so the tests drive
+/// the same decision the armed detours make - a test that only reads `Group::Training` would still pass if a door
+/// went back to `Group::Screens`, which is the regression this item exists to keep out. Its pace is written down
+/// too (PACE_TRAINING_GATE) so the day a lever is ever put on this door, the lane the bound reaches it on is
+/// already stated. It is deliberately not the plate door's path: a blend time is a tween duration, and the plate
+/// interval has readings saying the multiplied clock does not reach it.
 pub fn training_gate_duration(value: f32) -> f32 { scale_paced(value, Group::Training, PACE_TRAINING_GATE) }
+
+/// What the plate lever takes out of a cascade interval. Its own mirror, its own ceiling (`normalize` holds it at
+/// `MAX_FACTOR`), and no share of the pair bound, because the completion it prices is one the runs above measured
+/// the multiplied clock not to advance. At the shipped 1.0 the door hands the caller's interval on unchanged, which
+/// is the state item 59 left the door in and the state `Config::default()` ships.
+pub fn plate_interval_duration(value: f32) -> f32 {
+    let factor = plate_factor();
+
+    if factor == 1.0 || !value.is_finite() || value == 0.0 {
+        return value;
+    }
+
+    value / factor
+}
 
 // The plate cascade interval floor. This door is the only duration write this fork reaches on the
 // training screen that run 31 actually hit: its one hit line took the game's 1.0 s to 0.05 s
@@ -2641,16 +2681,16 @@ pub fn training_gate_duration(value: f32) -> f32 { scale_paced(value, Group::Tra
 // spacing: it keeps 4x of the 20x, and it is the value C62 tests against a career end run rather than a
 // number measured to be safe.
 //
-// Item 59 took the lever off this door, so the door hands the game its own interval and the floor below is
-// the guard on anything that ever tries to shorten it again, not something the shipped path reaches.
+// The lever `training_plate_speed` reaches this door, so the floor is what the fast arm lands on rather than a
+// guard nothing reaches: at the lever's `MAX_FACTOR` ceiling a 1.0 s interval hands 0.05 s, the value run 31 read
+// before any floor existed, in the session that ended stuck on the career end event.
 pub const MIN_PLATE_INTERVAL_SEC: f32 = 0.25;
 
 /// The interval to hand `InitializePlateList`, with the floor applied and the game's own value as the
 /// ceiling. The floor may not raise a number above what the caller passed: making a cascade the game asked
 /// to run in 0.1 s take 0.25 s would be a second bug on the same door. A zero or non finite `scaled` means
-/// `scale_duration` already declined to touch the value, so it stays declined. With `scaled` being the
-/// game's own interval - what `Group::Training` hands this door today - it is the identity, which is the
-/// state item 59 asked for.
+/// the lever already declined to touch the value, so it stays declined. With the lever at its shipped 1.0
+/// `scaled` is the caller's own interval and this is the identity, which is the state item 59 asked for.
 pub fn plate_cascade_interval(interval: f32, scaled: f32) -> f32 {
     if !interval.is_finite() || !scaled.is_finite() || interval <= 0.0 || scaled <= 0.0 {
         return interval;
@@ -2659,10 +2699,10 @@ pub fn plate_cascade_interval(interval: f32, scaled: f32) -> f32 {
     scaled.max(MIN_PLATE_INTERVAL_SEC).min(interval)
 }
 
-/// What the plate door hands `InitializePlateList`, in one call, on the mirrors as they stand: the group a
-/// training gate scales on, then C62's floor as the guard on the result. The armed detour calls this, so a
-/// test that calls it is driving the same decision the hook makes in game.
-pub fn plate_cascade_handoff(interval: f32) -> f32 { plate_cascade_interval(interval, training_gate_duration(interval)) }
+/// What the plate door hands `InitializePlateList`, in one call, on the mirrors as they stand: the plate lever
+/// first, then C62's floor as the guard on the result. The armed detour calls this, so a test that calls it is
+/// driving the same decision the hook makes in game.
+pub fn plate_cascade_handoff(interval: f32) -> f32 { plate_cascade_interval(interval, plate_interval_duration(interval)) }
 
 // The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
 // waited for a tap and 10,034 ms was the cut playing before it asked, while the cut's own timeline
@@ -3047,7 +3087,7 @@ mod tests {
 
     struct PassTurn {
         _turn: MutexGuard<'static, ()>,
-        saved_mirrors: [u32; 8],
+        saved_mirrors: [u32; 9],
         saved_applied: [u32; 4],
         saved_training_note: bool,
         saved_countup: CountupBracketState,
@@ -3065,6 +3105,7 @@ mod tests {
             STORY_CHOICE_AUTO_SELECT_MULT.load(Ordering::Relaxed),
             TIME_SCALE_RAISE.load(Ordering::Relaxed),
             TIME_SCALE_PRODUCED.load(Ordering::Relaxed),
+            PLATE_FACTOR.load(Ordering::Relaxed),
         ];
         let saved_applied = [
             APPLIED_FACTORS[0].load(Ordering::Relaxed),
@@ -3104,6 +3145,7 @@ mod tests {
             STORY_CHOICE_AUTO_SELECT_MULT.store(self.saved_mirrors[5], Ordering::Release);
             TIME_SCALE_RAISE.store(self.saved_mirrors[6], Ordering::Release);
             TIME_SCALE_PRODUCED.store(self.saved_mirrors[7], Ordering::Release);
+            PLATE_FACTOR.store(self.saved_mirrors[8], Ordering::Release);
             TRAINING_DOORS_NOTE_LOGGED.store(self.saved_training_note, Ordering::Release);
             restore_countup_bracket(&self.saved_countup);
 
@@ -4191,9 +4233,13 @@ mod tests {
         // that asserted the off clock lane stays empty forever is what made this bound unprovable: no door could
         // leave it without editing the gate. A gate that asserts only a measurement can fill it keeps the bound
         // and leaves the door movable.
-        assert_eq!(
-            lanes.contains(PACE_LANE_OFF_CLOCK),
-            matches!(armed_door_pace(COUNTUP_DOOR, countup.2), Pace::OffTweenClock(_)),
+        // A door standing in the off clock lane is not a gate failure, it is a door a reading put there. What
+        // this asserts is that the lane the log prints is the lane the door scales on, for the door whose lane a
+        // run can move, and that every door standing off the bound names the run reading that put it there.
+        let countup_lane = pace_lane(armed_door_pace(COUNTUP_DOOR, countup.2));
+
+        assert!(
+            lanes.contains(COUNTUP_DOOR) && lanes.contains(countup_lane),
             "the lane hachimi.log prints and the lane the door scales on are different facts: {lanes}"
         );
 
@@ -4202,7 +4248,6 @@ mod tests {
                 lanes.contains(PACE_LANE_UNPROVEN) && lanes.contains(COUNTUP_DOOR),
                 "the log does not say the count up door is bounded: {lanes}"
             );
-            assert!(!lanes.contains(PACE_LANE_OFF_CLOCK), "a door is off the bound with no run having measured it: {lanes}");
         }
         else {
             let measured_lane = pace_lane(countup_pace());
@@ -4214,6 +4259,17 @@ mod tests {
 
             assert!(lanes.contains(measured_lane) && lanes.contains(COUNTUP_DOOR), "a door a run measured is missing from the lane line: {lanes}");
             assert!(!unproven.contains(&COUNTUP_DOOR), "a door a run measured is still printed as unproven: {lanes}");
+        }
+
+        for (door, _, listed) in ARMED_DOOR_PACES {
+            // A door off the bound in the shipped state carries the reading that put it there in the pace
+            // itself, not in a comment beside it.
+            if let Pace::OffTweenClock(proof) = armed_door_pace(door, *listed) {
+                assert!(
+                    proof.contains("run "),
+                    "{door} stands off the pair bound without naming the run reading that put it there: {proof}"
+                );
+            }
         }
 
         for (door, group, listed) in ARMED_DOOR_PACES {
@@ -4602,12 +4658,13 @@ mod tests {
     }
 
     #[test]
-    fn the_plate_door_hands_the_game_its_own_interval_whatever_the_levers_do() {
+    fn the_plate_door_hands_its_own_interval_to_every_lever_but_its_own() {
         let _turn = pass_turn();
 
         // The `All levers` arm: `result 20` and `ui_animation 20` (core::settings_preset). Item 62 bounded
-        // the pair so this door handed 1.0 there, and item 59 took the lever off the door entirely, so the
-        // same reading holds at every other clock, including the neutral one C62's floor was written for.
+        // the pair and item 59 took the result screen lever off this door, so a plate call hands 1.0 here at
+        // every clock, including the neutral one C62's floor was written for, until the door's own lever is
+        // raised.
         for ui in [MIN_UI_ANIMATION_SCALE, 1.0, 2.0, 10.0, MAX_UI_ANIMATION_SCALE] {
             mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, ui));
 
@@ -4623,6 +4680,104 @@ mod tests {
         // here has to clear a quarter of the game's own spacing before the door will hand it over.
         mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, 1.0));
         assert_eq!(plate_cascade_interval(1.0, 1.0 / MAX_FACTOR), MIN_PLATE_INTERVAL_SEC);
+    }
+
+    // The lever ledger item 74 installed, on the door the three runs that reached it priced off the tween clock:
+    // 0.05 s handed closed a cascade in 338.2 ms (run 31), 0.25 s in 396.9 ms (run 32), and 1.0 s handed on
+    // unchanged in 1242.1 ms while `ui_animation 20` held a 20x delta clock (run 33). A completion the multiplied
+    // clock advanced would have closed that third one in 50 ms.
+    #[test]
+    fn the_plate_lever_hands_the_cascade_floor_at_its_ceiling_and_never_past_it() {
+        let _turn = pass_turn();
+
+        // The `All levers` arm as it now stands: the lever at `MAX_FACTOR` on a 20x tween clock. The floor is
+        // where the ceiling lands, so the door hands a quarter of the game's own beat and not the 0.05 s run 31
+        // read before any floor existed, in the session that stalled on the career end event.
+        let mut arm = timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE);
+        arm.training_plate_speed = MAX_FACTOR;
+        mirror_config(&arm);
+
+        println!(
+            "C58 item 74, one plate call at the arm: 1.0 s handed, {} s on the lever, {} s after C62's floor.",
+            plate_interval_duration(1.0),
+            plate_cascade_handoff(1.0),
+        );
+
+        assert_eq!(plate_factor(), MAX_FACTOR);
+        assert_eq!(plate_cascade_handoff(1.0), MIN_PLATE_INTERVAL_SEC, "the plate lever never reached the cascade");
+        assert_eq!(plate_cascade_handoff(1.5), MIN_PLATE_INTERVAL_SEC, "a raw peak went past the floor");
+        assert_eq!(plate_cascade_handoff(0.1), 0.1, "the floor raised an interval the caller wanted shorter");
+        assert_eq!(plate_cascade_handoff(0.0), 0.0, "the door invented an interval the game never handed it");
+
+        // Capped the way every other lever is. `normalize` is the one place the slider's 1000.0 or a hand edited
+        // config.json reaches the door, and a value that is not a number falls back to doing nothing.
+        let mut hand = Config::default();
+        hand.training_plate_speed = 1000.0;
+        mirror_config(&hand);
+        assert_eq!(plate_factor(), MAX_FACTOR, "the plate lever reached past MAX_FACTOR from a hand edited config");
+
+        let mut broken = Config::default();
+        broken.training_plate_speed = f32::NAN;
+        mirror_config(&broken);
+        assert_eq!(plate_factor(), 1.0, "a plate lever that is not a number reached the cascade");
+        assert_eq!(plate_cascade_handoff(1.0), 1.0, "a broken mirror moved the cascade's beat");
+    }
+
+    #[test]
+    fn the_plate_lever_reaches_the_plate_door_and_no_other_training_duration() {
+        let _turn = pass_turn();
+
+        let mut arm = timing_config(MAX_FACTOR, MAX_FACTOR, 10.0, MAX_UI_ANIMATION_SCALE);
+        arm.training_plate_speed = MAX_FACTOR;
+        mirror_config(&arm);
+
+        // The HP gauge blend time keeps item 59's separation and item 62's bound: a progress bar blend is a tween
+        // duration, it has no lever of its own, and the plate lever does not reach it.
+        assert_eq!(training_gate_duration(1.0), 1.0, "the plate lever reached the HP gauge blend time");
+        assert_eq!(training_gate_duration(2.4), 2.4, "a group factor reached the training gate");
+        assert_eq!(factor(Group::Training), 1.0, "the plate lever wrote the training group");
+        assert_eq!(plate_cascade_handoff(1.0), MIN_PLATE_INTERVAL_SEC, "the plate lever did not reach its own door");
+
+        // And the separation holds the other way: the lever at its shipped 1.0 with every other lever at its
+        // ceiling hands the game its own beat, which is the reading run 33 printed four times.
+        mirror_config(&timing_config(MAX_FACTOR, MAX_FACTOR, 10.0, MAX_UI_ANIMATION_SCALE));
+        assert_eq!(plate_cascade_handoff(1.0), 1.0, "another lever reached the plate cascade");
+    }
+
+    #[test]
+    fn the_plate_door_stands_off_the_pair_bound_on_the_readings_that_put_it_there() {
+        let _turn = pass_turn();
+
+        let (_, group, listed) = ARMED_DOOR_PACES
+            .iter()
+            .find(|(door, _, _)| *door == TRAINING_PLATE_DOOR)
+            .expect("the plate door is not in the armed door table");
+
+        assert_eq!(*group, Group::Training, "the plate door left the training group");
+        assert!(!listed.bounds_the_pair(), "the plate door is back inside the pair bound");
+
+        if let Pace::OffTweenClock(proof) = listed {
+            assert!(
+                proof.contains("run 31") && proof.contains("run 32") && proof.contains("run 33"),
+                "the plate door left the bound without the three readings that put it there: {proof}"
+            );
+        }
+
+        let lanes = armed_door_lanes();
+
+        println!("C58 item 74, the lane hachimi.log prints for the plate door: {lanes}");
+
+        assert!(
+            lanes.contains(PACE_LANE_OFF_CLOCK) && lanes.contains(TRAINING_PLATE_DOOR),
+            "the lane line does not name the plate door off the bound: {lanes}"
+        );
+
+        // The door beside it stays bounded: it has no readings, and a lane a run has not measured is the side
+        // of the ceiling that keeps the pair from composing on a tween blend time.
+        let gauge_lane = pace_lane(armed_door_pace(TRAINING_GAUGE_DOOR, PACE_TRAINING_GATE));
+
+        assert_eq!(gauge_lane, PACE_LANE_UNPROVEN, "the gauge blend door left the bound it has no readings to leave: {lanes}");
+        assert!(lanes.contains(TRAINING_GAUGE_DOOR), "the lane line does not name the gauge door: {lanes}");
     }
 
     // The defect this item closes, kept as an executable statement of what the door used to hand. The
@@ -4820,8 +4975,8 @@ mod tests {
     fn the_training_gate_note_is_owed_once_per_launch() {
         let _turn = pass_turn();
 
-        assert!(note_training_doors_are_inert(), "a run was never told the training gates stopped being scaled");
-        assert!(!note_training_doors_are_inert(), "the same fact was printed on every config pass");
+        assert!(note_training_gate_levers(), "a run was never told which lever each training gate carries");
+        assert!(!note_training_gate_levers(), "the same fact was printed on every config pass");
     }
 
     // egui 0.33.3 `Slider::set_value`: the value is clamped to the range, then snapped to
