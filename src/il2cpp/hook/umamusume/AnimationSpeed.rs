@@ -336,6 +336,15 @@ static TAG_CUT_BOTTOM_ANIMATOR_FIELD: AtomicUsize = AtomicUsize::new(0);
 // The first few writes are printed, so a run can tell "the lever is neutral" from "the Animator was not in hand"
 // from "the game never reached the door" (A4). Counted, not locked, because this door runs on the cut path.
 static TAG_CUT_WRITES_LOGGED: AtomicUsize = AtomicUsize::new(0);
+// The clock the cut-in effect really runs on. Run 45 reached `AnimateToUnity.AnMotion` through
+// `Gallop.FlashPlayer._motion` (`introspect.log:28743`, image `Plugins.dll`), and its speed door is
+// `SetMotionSpeed/2 -> void(float, bool)` with `get_MotionSpeed/0 -> float()` beside it. Run 44 proved the flash
+// player's own `Play/3` doors are hot on the training screen (1926 calls) and hand a label plus an int of 0, so the
+// speed is not an argument there and this lever has to write on the motion object instead.
+static MOTION_GET_SPEED_ADDR: AtomicUsize = AtomicUsize::new(0);
+static MOTION_SET_SPEED_ADDR: AtomicUsize = AtomicUsize::new(0);
+static FLASH_MOTION_FIELD: AtomicUsize = AtomicUsize::new(0);
+static MOTION_SPEED_WRITES_LOGGED: AtomicUsize = AtomicUsize::new(0);
 static STORY_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static TIME_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static UI_ANIMATION_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
@@ -452,6 +461,12 @@ pub const MIN_TIME_SCALE: f32 = 1.0;
 // because an Animator already playing at the game's own speed has no use for plate-lever speed, and because a
 // speed this fork writes is a request to play faster, not a request to skip frames.
 pub const MAX_TAG_CUT_ANIMATOR_SPEED: f32 = MAX_TIME_SCALE;
+
+// The ceiling on the speed this fork writes onto an `AnimateToUnity.AnMotion`, the object a training cut-in effect
+// is played on. It is priced the same way as the Animator lever: AnimateToUnity advances its own time on Unity's
+// clock, so the pair with `Time.timeScale` is bounded by `MAX_TWEEN_SPEED_PRODUCT`, and the ceiling itself is
+// `MAX_TIME_SCALE` because this is a request to play faster, never a request to skip content.
+pub const MAX_MOTION_SPEED: f32 = MAX_TIME_SCALE;
 
 // The ceiling on the training cut-in's own speed channel, stated rather than inherited from
 // `MAX_TIME_SCALE` (the decision A17 asks for before a lever sits on a value that is already above
@@ -2973,6 +2988,158 @@ def_detour! {
     }
 }
 
+/// The speed the cut-in lever writes onto an `AnimateToUnity.AnMotion`, priced against the scale this layer last
+/// handed Unity's `Time.timeScale` setter, the way C58 prices the ui clock and the tag cut-in Animator prices its
+/// pair. At the neutral lever this returns 1.0, and 1.0 means "write nothing" at every door below.
+pub fn flash_motion_speed() -> f32 {
+    let lever = training_cut_factor();
+
+    if lever == 1.0 {
+        return 1.0;
+    }
+
+    let produced = f32::from_bits(TIME_SCALE_PRODUCED.load(Ordering::Relaxed)).max(1.0);
+    let pair_bound = (MAX_TWEEN_SPEED_PRODUCT / produced).max(1.0);
+
+    lever.max(1.0).min(MAX_MOTION_SPEED).min(pair_bound)
+}
+
+type MotionGetSpeedFn = extern "C" fn(motion: *mut Il2CppObject) -> f32;
+type MotionSetSpeedFn = extern "C" fn(motion: *mut Il2CppObject, speed: f32, to_children: bool);
+
+/// Reads the speed the motion is actually at and writes only a higher one, so a motion the game already put at 8.0
+/// is never pulled back to the lever's 4.0. `SetMotionSpeed/2 -> void(float, bool)` carries a second flag whose
+/// meaning this fork has not measured, so the write passes `false` for it: the narrower reading, this motion only.
+/// `None` is "nothing here to write on", which covers a null motion and a pair that never resolved.
+unsafe fn raise_motion_speed(motion: *mut Il2CppObject, target: f32) -> Option<(f32, bool)> {
+    let get_addr = MOTION_GET_SPEED_ADDR.load(Ordering::Relaxed);
+    let set_addr = MOTION_SET_SPEED_ADDR.load(Ordering::Relaxed);
+
+    if motion.is_null() || get_addr == 0 || set_addr == 0 {
+        return None;
+    }
+
+    let get_speed: MotionGetSpeedFn = std::mem::transmute(get_addr);
+    let current = get_speed(motion);
+
+    if !(current < target) {
+        return Some((current, false));
+    }
+
+    let set_speed: MotionSetSpeedFn = std::mem::transmute(set_addr);
+    set_speed(motion, target, false);
+
+    Some((current, true))
+}
+
+/// The motion a flash player plays through: `field _motion [class<AnimateToUnity.AnMotion>]`
+/// (`introspect.log:26507`), read the same way the tag cut-in line animators are read. A field that did not resolve
+/// at init reads as null here, and a null motion is a no-op.
+unsafe fn read_flash_motion(this: *mut Il2CppObject) -> *mut Il2CppObject {
+    read_line_animator(this, FLASH_MOTION_FIELD.load(Ordering::Relaxed))
+}
+
+fn note_motion_write(door: &str, slot: usize, at: Option<(f32, bool)>, target: f32) {
+    let (raw, wrote) = match at {
+        Some((current, wrote)) => (current, wrote),
+        None => (0.0, false),
+    };
+    let seen = MOTION_SPEED_WRITES_LOGGED.fetch_add(1, Ordering::Relaxed) + 1;
+
+    if seen <= HIT_DETAIL_LIMIT {
+        let tail = match at {
+            Some((_, true)) => " raised",
+            Some((_, false)) => " already at or above the lever",
+            None => " no motion in hand",
+        };
+
+        debug!("AnimationSpeed: {door} call {seen}: motion speed {raw} -> {target}{tail}");
+    }
+
+    hit(slot, door, raw, if wrote { target } else { raw });
+}
+
+// Named after the doors `TrainingCuttProbe` counted in run 44, so a run can match the write lines to those counts.
+pub const FLASH_PLAY_INT_DOOR: &str = "Gallop.FlashPlayer.Play(label, action, int)";
+pub const FLASH_PLAY_FLOAT_DOOR: &str = "Gallop.FlashPlayer.Play(label, action, float)";
+pub const MOTION_SET_SPEED_DOOR: &str = "AnimateToUnity.AnMotion.SetMotionSpeed(speed, flag)";
+const FLASH_PLAY_INT_SLOT: usize = 16;
+const FLASH_PLAY_FLOAT_SLOT: usize = 17;
+const MOTION_SET_SPEED_SLOT: usize = 18;
+
+type FlashPlayerPlayIntFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, action: *mut Il2CppObject, value: i32);
+// `FlashPlayer::Play/3 -> void(string<System.String>, class<System.Action>, int)` (`introspect.log:28693`), reached
+// 1926 times in run 44 on the labels `in00`, `in`, `loop` and `end` with an int of 0. The label names a motion label
+// and the int is not a speed, so the lever writes on the motion the player holds rather than on an argument, after
+// the game has started the play. The string and the Action travel as addresses and go back untouched (A5).
+def_detour! {
+    FlashPlayer_PlayLabelActionIntSpeed(this: *mut Il2CppObject, label: *mut Il2CppString, action: *mut Il2CppObject, value: i32) {
+            get_orig_fn!(FlashPlayer_PlayLabelActionIntSpeed, FlashPlayerPlayIntFn)(this, label, action, value);
+        let speed = flash_motion_speed();
+
+        if speed == 1.0 {
+            hit(FLASH_PLAY_INT_SLOT, FLASH_PLAY_INT_DOOR, 1.0, 1.0);
+            return;
+        }
+
+        let at = unsafe { raise_motion_speed(read_flash_motion(this), speed) };
+        note_motion_write(FLASH_PLAY_INT_DOOR, FLASH_PLAY_INT_SLOT, at, speed);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_PlayLabelActionIntSpeed, FlashPlayerPlayIntFn)(this, label, action, value)
+    }
+}
+
+type FlashPlayerPlayFloatFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, action: *mut Il2CppObject, value: f32);
+// `Play/3 -> void(string<System.String>, class<System.Action>, float)` (`introspect.log:28694`), the same door with a
+// float, which run 44 reached zero times. Armed so a run says whether this client ever plays a cut-in effect through
+// it, with the same write on the motion behind the player.
+def_detour! {
+    FlashPlayer_PlayLabelActionFloatSpeed(this: *mut Il2CppObject, label: *mut Il2CppString, action: *mut Il2CppObject, value: f32) {
+            get_orig_fn!(FlashPlayer_PlayLabelActionFloatSpeed, FlashPlayerPlayFloatFn)(this, label, action, value);
+        let speed = flash_motion_speed();
+
+        if speed == 1.0 {
+            hit(FLASH_PLAY_FLOAT_SLOT, FLASH_PLAY_FLOAT_DOOR, 1.0, 1.0);
+            return;
+        }
+
+        let at = unsafe { raise_motion_speed(read_flash_motion(this), speed) };
+        note_motion_write(FLASH_PLAY_FLOAT_DOOR, FLASH_PLAY_FLOAT_SLOT, at, speed);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_PlayLabelActionFloatSpeed, FlashPlayerPlayFloatFn)(this, label, action, value)
+    }
+}
+
+/// What the scaling door may hand `SetMotionSpeed`: raised to the lever, capped at the pair bound, never below what
+/// the caller handed, and a motion the game paused (`0.0`) or slowed under the lever left as the game set it. The
+/// caller hands its own value on every call, so scaling the argument cannot compound (C22).
+fn raise_speed_argument(speed: f32, bound: f32) -> f32 {
+    if bound == 1.0 || !(speed > 0.0) {
+        return speed;
+    }
+
+    (speed * bound).min(bound).max(speed)
+}
+
+type MotionSetSpeedDoorFn = extern "C" fn(this: *mut Il2CppObject, speed: f32, to_children: bool);
+// `AnMotion::SetMotionSpeed/2 -> void(float, bool)` (`introspect.log:28841`), the game's own speed door on the
+// motion. The argument is scaled rather than the field multiplied, and the value written is never below what the
+// caller handed nor past the pair bound: a motion the game put at 8.0 stays at 8.0, and a paused motion stays paused.
+def_detour! {
+    AnMotion_SetMotionSpeed(this: *mut Il2CppObject, speed: f32, to_children: bool) {
+            let raised = raise_speed_argument(speed, flash_motion_speed());
+
+        hit(MOTION_SET_SPEED_SLOT, MOTION_SET_SPEED_DOOR, speed, raised);
+
+        get_orig_fn!(AnMotion_SetMotionSpeed, MotionSetSpeedDoorFn)(this, raised, to_children);
+    }
+    bail {
+                get_orig_fn!(AnMotion_SetMotionSpeed, MotionSetSpeedDoorFn)(this, speed, to_children)
+    }
+}
+
 // The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
 // waited for a tap and 10,034 ms was the cut playing before it asked, while the cut's own timeline
 // reported 2.4 s of total length. The door on that path carrying a duration is `InitializePlateList`,
@@ -3210,6 +3377,67 @@ fn install_getters(umamusume: *const Il2CppImage) {
 
             if create != 0 { new_hook!(create, TagCutInPlayer_CreateLineEffectSpeed); }
             if play != 0 { new_hook!(play, TagCutInPlayer_PlayLineEffectSpeed); }
+        }
+    }
+
+    // The clock a training cut-in effect actually runs on. `AnimateToUnity.AnMotion` lives in `Plugins.dll`, an image
+    // the dump scope does not walk but the game loads, and run 45 reached it through `Gallop.FlashPlayer._motion`
+    // (`introspect.log:28743`). Nothing is armed unless the motion's own getter and setter pair resolved: a lever
+    // that cannot read the speed it is about to raise cannot honour the raise-only rule, and 0 is never called.
+    let flash_player = TrainingCuttProbe::class_for_label(umamusume, "Gallop.FlashPlayer");
+    let motion_class = crate::il2cpp::symbols::get_assembly_image(c"Plugins.dll").ok().and_then(|image| {
+        if image.is_null() {
+            return None;
+        }
+
+        let class = il2cpp_class_from_name(image, c"AnimateToUnity".as_ptr(), c"AnMotion".as_ptr());
+
+        if class.is_null() { None } else { Some(class) }
+    });
+
+    match (flash_player, motion_class) {
+        (Some(player), Some(class)) => {
+            let (get_addr, set_addr) = unsafe {
+                (
+                    resolve_method(class, "get_MotionSpeed", &[], Il2CppTypeEnum_IL2CPP_TYPE_R4),
+                    resolve_method(class, "SetMotionSpeed", &[Il2CppTypeEnum_IL2CPP_TYPE_R4, Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN], Il2CppTypeEnum_IL2CPP_TYPE_VOID),
+                )
+            };
+            let field = il2cpp_class_get_field_from_name(player, c"_motion".as_ptr());
+
+            MOTION_GET_SPEED_ADDR.store(get_addr, Ordering::Release);
+            MOTION_SET_SPEED_ADDR.store(set_addr, Ordering::Release);
+            FLASH_MOTION_FIELD.store(field as usize, Ordering::Release);
+
+            if get_addr == 0 || set_addr == 0 {
+                warn!(
+                    "AnimationSpeed: cut-in motion lever stays inert: AnMotion get_MotionSpeed {} and SetMotionSpeed {} did not resolve, so {} is not armed",
+                    get_addr, set_addr, MOTION_SET_SPEED_DOOR
+                );
+            } else {
+                debug!(
+                    "AnimationSpeed: cut-in motion lever armed on {} and {}: AnMotion get_MotionSpeed {get_addr} SetMotionSpeed {set_addr}, FlashPlayer field _motion {field:p}",
+                    FLASH_PLAY_INT_DOOR, MOTION_SET_SPEED_DOOR
+                );
+
+                let play_int = unsafe { resolve_method(player, "Play", &[Il2CppTypeEnum_IL2CPP_TYPE_STRING, Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_I4], Il2CppTypeEnum_IL2CPP_TYPE_VOID) };
+                let play_float = unsafe { resolve_method(player, "Play", &[Il2CppTypeEnum_IL2CPP_TYPE_STRING, Il2CppTypeEnum_IL2CPP_TYPE_CLASS, Il2CppTypeEnum_IL2CPP_TYPE_R4], Il2CppTypeEnum_IL2CPP_TYPE_VOID) };
+
+                if play_int != 0 { new_hook!(play_int, FlashPlayer_PlayLabelActionIntSpeed); }
+                if play_float != 0 { new_hook!(play_float, FlashPlayer_PlayLabelActionFloatSpeed); }
+
+                // The game's own speed door is armed on the same address the lever writes through, which is one hook
+                // on one address (A4): a call this fork makes lands in the wrapper, and the wrapper's bound leaves an
+                // already raised value where it is.
+                new_hook!(set_addr, AnMotion_SetMotionSpeed);
+            }
+        }
+        (player, motion) => {
+            debug!(
+                "AnimationSpeed: cut-in motion lever not armed: Gallop.FlashPlayer {} and AnMotion in Plugins.dll {}",
+                if player.is_some() { "found" } else { "not found" },
+                if motion.is_some() { "found" } else { "not found" }
+            );
         }
     }
 }
@@ -5237,6 +5465,48 @@ mod tests {
 
         assert_eq!(hit_calls(TAG_CUT_SLOT), 1, "the CreateLineEffect door is not counted");
         assert_eq!(hit_calls(TAG_CUT_LINE_SLOT), 1, "the PlayLineEffect door is not counted");
+    }
+
+    #[test]
+    fn the_cut_in_motion_lever_stops_at_the_pair_bound_and_never_lowers_a_speed() {
+        let _turn = pass_turn();
+
+        // Run 45 named the object a cut-in effect runs on (`AnimateToUnity.AnMotion`, `introspect.log:28743`) and its
+        // speed door `SetMotionSpeed/2`. At the shipped 1.0 the lever writes nothing anywhere.
+        assert_eq!(flash_motion_speed(), 1.0, "a launch armed the cut-in motion lever");
+
+        let mut arm = Config::default();
+        arm.training_cut_speed = MAX_TIME_SCALE;
+        mirror_config(&arm);
+
+        assert_eq!(flash_motion_speed(), MAX_MOTION_SPEED, "the motion lever passed its own ceiling");
+
+        // AnimateToUnity advances its own time on Unity's clock, so with the time-scale lever written the pair stops
+        // at the product bound rather than at the lever's ceiling, the way C58 prices the ui clock.
+        TIME_SCALE_PRODUCED.store(5.0f32.to_bits(), Ordering::Release);
+        assert_eq!(flash_motion_speed(), MAX_TWEEN_SPEED_PRODUCT / 5.0, "the motion lever and the time-scale lever went past the pair ceiling together");
+        TIME_SCALE_PRODUCED.store(1.0f32.to_bits(), Ordering::Release);
+
+        let bound = MAX_MOTION_SPEED;
+
+        // What the scaling door hands the game: a 1.0 raised to the bound, a speed the game set above the bound left
+        // where the game put it, and a motion the game paused or slowed under the lever untouched.
+        assert_eq!(raise_speed_argument(1.0, bound), bound, "the door left the game's own 1.0 unraised");
+        assert_eq!(raise_speed_argument(8.0, bound), 8.0, "the cap pulled a speed the game set back down");
+        assert_eq!(raise_speed_argument(0.0, bound), 0.0, "the lever raised a motion the game paused");
+        assert_eq!(raise_speed_argument(0.5, 1.0), 0.5, "the neutral lever reached a motion speed");
+        assert_eq!(raise_speed_argument(-1.0, bound), -1.0, "the lever invented a speed the game did not hand");
+
+        assert!(
+            FLASH_PLAY_INT_SLOT < HIT_SLOTS && FLASH_PLAY_FLOAT_SLOT < HIT_SLOTS && MOTION_SET_SPEED_SLOT < HIT_SLOTS,
+            "a cut-in motion door counts on a slot nothing has"
+        );
+
+        note_motion_write(FLASH_PLAY_INT_DOOR, FLASH_PLAY_INT_SLOT, Some((1.0, true)), bound);
+        note_motion_write(MOTION_SET_SPEED_DOOR, MOTION_SET_SPEED_SLOT, None, bound);
+
+        assert_eq!(hit_calls(FLASH_PLAY_INT_SLOT), 1, "the flash play door is not counted");
+        assert_eq!(hit_calls(MOTION_SET_SPEED_SLOT), 1, "the motion speed door is not counted");
     }
 
     #[test]

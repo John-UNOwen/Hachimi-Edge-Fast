@@ -108,8 +108,8 @@ const PLAYER_INDEX_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, I4, CLASS];
 // `FlashPlayer::Play/3 -> void(string<System.String>, class<System.Action>, int)` and the same door spelled with a
 // float (`introspect.log:26462` to `26463`): a label, a callback, and the number this run has to identify as a
 // speed or a duration. Two overloads of one name and one arity, which is what resolving by signature is for (A2).
-const LABEL_ACTION_AND_INT: &[Il2CppTypeEnum] = &[STRING, CLASS, I4];
-const LABEL_ACTION_AND_FLOAT: &[Il2CppTypeEnum] = &[STRING, CLASS, R4];
+const LABEL_AND_INT: &[Il2CppTypeEnum] = &[STRING, I4];
+const LABEL_AND_FLOAT: &[Il2CppTypeEnum] = &[STRING, R4];
 // `FlashActionPlayer::Play/3 -> void(string<System.String>, float, string<System.String>)` and
 // `Play/2 -> void(string, string)` (`introspect.log:26411` to `26412`): the wrapper that holds a flash player and
 // has a float on its play door. Counted apart so a run says which of the two classes a cut-in effect plays on.
@@ -481,8 +481,11 @@ static FLASH_PLAYER_MATCH_LOGGED: AtomicUsize = AtomicUsize::new(0);
 // the tag cut-in player 167 flash players through `SetResultFlashPlayer` and reached none of these doors, because
 // no build had armed them yet, so the 1.2 s effect leg has never been measured from the object that runs it.
 static FLASH_PLAY_ACTION: CutProbe = CutProbe::counted("FlashPlayer::Play(action)");
-static FLASH_PLAY_LABEL_AND_INT: CutProbe = CutProbe::counted("FlashPlayer::Play(label, action, int)");
-static FLASH_PLAY_LABEL_AND_FLOAT: CutProbe = CutProbe::counted("FlashPlayer::Play(label, action, float)");
+static MOTION_PLAY_LABEL_FLOAT: CutProbe = CutProbe::peaked("AnMotion::SetMotionPlay(label, float)");
+static MOTION_PLAY_LABEL_INT: CutProbe = CutProbe::peaked("AnMotion::SetMotionPlay(label, int)");
+static MOTION_PLAY_FLOAT: CutProbe = CutProbe::peaked("AnMotion::SetMotionPlay(float)");
+static MOTION_PLAY: CutProbe = CutProbe::counted("AnMotion::SetMotionPlay");
+static MOTION_STOP: CutProbe = CutProbe::counted("AnMotion::SetMotionStop");
 static FLASH_PAUSE: CutProbe = CutProbe::counted("FlashPlayer::Pause(flag)");
 static FLASH_RESUME: CutProbe = CutProbe::counted("FlashPlayer::Resume()");
 static FLASH_STOP: CutProbe = CutProbe::counted("FlashPlayer::Stop()");
@@ -503,7 +506,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 97] = [
+static PROBES: [&CutProbe; 100] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -567,8 +570,11 @@ static PROBES: [&CutProbe; 97] = [
     &SUPPORT_MEMBER_PLAY_OUT_CUTIN,
     &TAG_PLAYER_SET_RESULT_FLASH,
     &FLASH_PLAY_ACTION,
-    &FLASH_PLAY_LABEL_AND_INT,
-    &FLASH_PLAY_LABEL_AND_FLOAT,
+    &MOTION_PLAY_LABEL_FLOAT,
+    &MOTION_PLAY_LABEL_INT,
+    &MOTION_PLAY_FLOAT,
+    &MOTION_PLAY,
+    &MOTION_STOP,
     &FLASH_PAUSE,
     &FLASH_RESUME,
     &FLASH_STOP,
@@ -2299,35 +2305,74 @@ def_detour! {
     }
 }
 
-type FlashPlayLabelIntFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: i32);
-// `Play/3 -> void(string<System.String>, class<System.Action>, int)` (`introspect.log:26462`). Which number this
-// door is handed is the question the run answers, so the value and `_lastMotionSpeed` after the play are both
-// recorded and the label is named, and every argument goes back untouched.
+type MotionPlayLabelFloatFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, value: f32);
+// `AnimateToUnity.AnMotion::SetMotionPlay/2 -> void(string<System.String>, float)` (`introspect.log:28805`): the play
+// door on the motion object the cut-in lever writes its speed onto. This is the only place other than that lever a
+// float enters the effect, so the census records the float and names the label and writes nothing (C47).
 def_detour! {
-    FlashPlayer_PlayLabelAndInt(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: i32) {
-            get_orig_fn!(FlashPlayer_PlayLabelAndInt, FlashPlayLabelIntFn)(this, label, on_end, value);
+    AnMotion_SetMotionPlayLabelFloat(this: *mut Il2CppObject, label: *mut Il2CppString, value: f32) {
+            MOTION_PLAY_LABEL_FLOAT.observe(&[value as f64]);
+        note_flash_label("AnMotion::SetMotionPlay(label, float)", label);
 
-        FLASH_PLAY_LABEL_AND_INT.observe(&[value as f64, flash_last_motion_speed(this) as f64]);
-        note_flash_label("FlashPlayer::Play(label, action, int)", label);
+        get_orig_fn!(AnMotion_SetMotionPlayLabelFloat, MotionPlayLabelFloatFn)(this, label, value);
     }
     bail {
-                get_orig_fn!(FlashPlayer_PlayLabelAndInt, FlashPlayLabelIntFn)(this, label, on_end, value)
+                get_orig_fn!(AnMotion_SetMotionPlayLabelFloat, MotionPlayLabelFloatFn)(this, label, value)
     }
 }
 
-type FlashPlayLabelFloatFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: f32);
-// `Play/3 -> void(string<System.String>, class<System.Action>, float)` (`introspect.log:26463`), the same door
-// with a float instead of an int. Two overloads of one name and one arity, which is exactly what resolving by
-// signature is for (A2).
+type MotionPlayLabelIntFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, value: i32);
+// `SetMotionPlay/2 -> void(string<System.String>, int)` (`introspect.log:28806`), the overload a
+// `FlashPlayer::Play(label, action, int)` lands on, with the int the flash player was handed kept as the peak.
 def_detour! {
-    FlashPlayer_PlayLabelAndFloat(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: f32) {
-            get_orig_fn!(FlashPlayer_PlayLabelAndFloat, FlashPlayLabelFloatFn)(this, label, on_end, value);
+    AnMotion_SetMotionPlayLabelInt(this: *mut Il2CppObject, label: *mut Il2CppString, value: i32) {
+            MOTION_PLAY_LABEL_INT.observe(&[value as f64]);
+        note_flash_label("AnMotion::SetMotionPlay(label, int)", label);
 
-        FLASH_PLAY_LABEL_AND_FLOAT.observe(&[value as f64, flash_last_motion_speed(this) as f64]);
-        note_flash_label("FlashPlayer::Play(label, action, float)", label);
+        get_orig_fn!(AnMotion_SetMotionPlayLabelInt, MotionPlayLabelIntFn)(this, label, value);
     }
     bail {
-                get_orig_fn!(FlashPlayer_PlayLabelAndFloat, FlashPlayLabelFloatFn)(this, label, on_end, value)
+                get_orig_fn!(AnMotion_SetMotionPlayLabelInt, MotionPlayLabelIntFn)(this, label, value)
+    }
+}
+
+type MotionPlayFloatFn = extern "C" fn(this: *mut Il2CppObject, value: f32);
+// `SetMotionPlay/1 -> void(float)` (`introspect.log:28807`), the play with a number and no label.
+def_detour! {
+    AnMotion_SetMotionPlayFloat(this: *mut Il2CppObject, value: f32) {
+            MOTION_PLAY_FLOAT.observe(&[value as f64]);
+
+        get_orig_fn!(AnMotion_SetMotionPlayFloat, MotionPlayFloatFn)(this, value);
+    }
+    bail {
+                get_orig_fn!(AnMotion_SetMotionPlayFloat, MotionPlayFloatFn)(this, value)
+    }
+}
+
+type MotionPlayFn = extern "C" fn(this: *mut Il2CppObject);
+// `SetMotionPlay/0 -> void()` (`introspect.log:28803`) and `SetMotionStop/0 -> void()` (`introspect.log:28816`):
+// counted, because whether the motion is played at all on the object the lever writes on is the fact a run needs
+// before a lever on that object can be called working rather than installed.
+def_detour! {
+    AnMotion_SetMotionPlay(this: *mut Il2CppObject) {
+            MOTION_PLAY.count();
+
+        get_orig_fn!(AnMotion_SetMotionPlay, MotionPlayFn)(this);
+    }
+    bail {
+                get_orig_fn!(AnMotion_SetMotionPlay, MotionPlayFn)(this)
+    }
+}
+
+type MotionStopFn = extern "C" fn(this: *mut Il2CppObject);
+def_detour! {
+    AnMotion_SetMotionStop(this: *mut Il2CppObject) {
+            MOTION_STOP.count();
+
+        get_orig_fn!(AnMotion_SetMotionStop, MotionStopFn)(this);
+    }
+    bail {
+                get_orig_fn!(AnMotion_SetMotionStop, MotionStopFn)(this)
     }
 }
 
@@ -3013,8 +3058,24 @@ pub fn init(umamusume: *const Il2CppImage) {
     }
 
     probe!(flash_player, FlashPlayer_PlayAction, "Play", ONE_ACTION, VOID, "FlashPlayer::Play(action)");
-    probe!(flash_player, FlashPlayer_PlayLabelAndInt, "Play", LABEL_ACTION_AND_INT, VOID, "FlashPlayer::Play(label, action, int)");
-    probe!(flash_player, FlashPlayer_PlayLabelAndFloat, "Play", LABEL_ACTION_AND_FLOAT, VOID, "FlashPlayer::Play(label, action, float)");
+    // `AnimateToUnity.AnMotion` is in `Plugins.dll`, an image the dump scope does not walk (A8), and run 45 named it
+    // through `Gallop.FlashPlayer._motion`. `AnimationSpeed` holds the speed door on this class, so only the play
+    // family is censused here and no door is armed on an address the lever owns (A4).
+    let motion_class = crate::il2cpp::symbols::get_assembly_image(c"Plugins.dll").ok().and_then(|image| {
+        if image.is_null() {
+            return None;
+        }
+
+        let class = crate::il2cpp::api::il2cpp_class_from_name(image, c"AnimateToUnity".as_ptr(), c"AnMotion".as_ptr());
+
+        if class.is_null() { None } else { Some(class) }
+    });
+
+    probe!(motion_class, AnMotion_SetMotionPlayLabelFloat, "SetMotionPlay", LABEL_AND_FLOAT, VOID, "AnMotion::SetMotionPlay(label, float)");
+    probe!(motion_class, AnMotion_SetMotionPlayLabelInt, "SetMotionPlay", LABEL_AND_INT, VOID, "AnMotion::SetMotionPlay(label, int)");
+    probe!(motion_class, AnMotion_SetMotionPlayFloat, "SetMotionPlay", ONE_FLOAT, VOID, "AnMotion::SetMotionPlay(float)");
+    probe!(motion_class, AnMotion_SetMotionPlay, "SetMotionPlay", NO_PARAMS, VOID, "AnMotion::SetMotionPlay");
+    probe!(motion_class, AnMotion_SetMotionStop, "SetMotionStop", NO_PARAMS, VOID, "AnMotion::SetMotionStop");
     probe!(flash_player, FlashPlayer_Pause, "Pause", ONE_FLAG, VOID, "FlashPlayer::Pause(flag)");
     probe!(flash_player, FlashPlayer_Resume, "Resume", NO_PARAMS, VOID, "FlashPlayer::Resume");
     probe!(flash_player, FlashPlayer_Stop, "Stop", NO_PARAMS, VOID, "FlashPlayer::Stop");
@@ -3748,8 +3809,11 @@ mod tests {
             "TrainingParamChangeSupportMemberA2U::PlayAoharuSpSoulCutin(index, parent, action, action)",
             "TrainingParamChangeSupportMemberA2U::PlayOutMemberCutin(player, index, action)",
             "FlashPlayer::Play(action)",
-            "FlashPlayer::Play(label, action, int)",
-            "FlashPlayer::Play(label, action, float)",
+            "AnMotion::SetMotionPlay(label, float)",
+            "AnMotion::SetMotionPlay(label, int)",
+            "AnMotion::SetMotionPlay(float)",
+            "AnMotion::SetMotionPlay",
+            "AnMotion::SetMotionStop",
             "FlashPlayer::Pause(flag)",
             "FlashPlayer::Resume()",
             "FlashPlayer::Stop()",
