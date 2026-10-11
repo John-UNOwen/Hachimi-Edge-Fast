@@ -174,6 +174,7 @@ config_editor:
   training_cut_speed: "Training cut-in animation speed"
   training_tag_cut_speed: "Bilis ng epekto ng tag cut-in ng training"
   auto_skip_result_screens: "Awtomatikong i-skip ang mga animation ng result screen"
+  skip_training_cut: "Skip the training cut-in through the game's own skip door"
   high_speed_settings: "Itaas ang High Speed settings ng kwento at training hanggang sa maximum ng laro"
   story_high_speed_mode: "Ilagay ang story playback sa high speed mode ng game"
   graphics_quality: "Kalidad ng graphics"

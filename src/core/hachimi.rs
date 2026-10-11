@@ -1339,6 +1339,14 @@ pub struct Config {
     pub training_tag_cut_speed: f32,
     #[serde(default)]
     pub auto_skip_result_screens: bool,
+    // Advances a training cut-in through the game's own cut-in timeline skip door rather than
+    // shortening the cut from outside it. The door is `CutInTimelineController::SkipRuntime(frames,
+    // keep)`, the one the cut-in engine uses for its own skip, and this build asks it for a few
+    // frames at a time while a training cut is in flight, bounded per cut and guarded against
+    // re-entering itself (`TrainingCuttProbe.rs`, ledger items 88 and 93). At `false` no address is
+    // called through it and the lever does nothing at all.
+    #[serde(default)]
+    pub skip_training_cut: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
     // expose, using StoryManager's own max and save path.
     #[serde(default)]
