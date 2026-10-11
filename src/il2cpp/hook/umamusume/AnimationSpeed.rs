@@ -1798,47 +1798,34 @@ fn mirror_config(config: &Config) {
 // rather than the config. Neutral default: at `false` the lever is inert and no address is called.
 static SKIP_TRAINING_CUT: AtomicBool = AtomicBool::new(false);
 
-/// A pump step is a sub-step. It asks the cut-in timeline for a few frames at a time instead of
-/// handing it the rest of the cut, so a fast skip cannot overshoot the state the cut was going to
-/// land on, which is what a skip that jumps the whole cut does to a presentation mid-cut.
-pub(crate) const MAX_TRAINING_CUT_SKIP_FRAMES_PER_STEP: i32 = 4;
-/// How far one cut-in may be advanced through the door in total. A lever that keeps firing while a
-/// cut is stuck should stop rather than drive the presentation past its own end: at the frame
-/// distance below that is three seconds of cut, against the 1011 to 1332 ms cut wall run 48 measured.
-pub(crate) const MAX_TRAINING_CUT_SKIP_FRAMES_PER_RUN: i32 = 180;
-/// The frame distance the cut-in clock is priced against. A step is charged in the door's own unit,
-/// which is frames, so the wall time between two visits to the door has to be converted to it.
-const TRAINING_CUT_SKIP_FRAME_SEC: f32 = 1.0 / 60.0;
-
-/// Whether this build may advance a training cut-in through the game's own skip door.
+/// Whether this build may ask the cut-in timeline to skip through the client's own door.
 pub(crate) fn skip_training_cut() -> bool {
     SKIP_TRAINING_CUT.load(Ordering::Acquire)
 }
 
-/// The cut-in lever the mirror holds, for the pump that prices its step against it.
-pub(crate) fn training_cut_lever() -> f32 {
-    f32::from_bits(TRAINING_CUT_FACTOR.load(Ordering::Acquire))
-}
+/// The value this client is measured handing its own cut-in skip door. `CutInTimelineController::SkipRuntime(time)`
+/// carries 2.667 s in every run that recorded a non-zero argument (runs 43 to 48, max calls 1 / 3 / 6 / 14 / 21),
+/// and nothing else has ever been seen on it. Asking for that number is asking the client's own code to do the
+/// thing it already does; asking for a larger one is this fork guessing at a jump longer than the client takes.
+pub(crate) const TRAINING_CUT_SKIP_TIME_SEC: f32 = 2.667;
 
-/// Extra frames one pump step may ask the cut-in timeline to advance, in that door's own unit.
-/// `gap_ms` is the wall time since this build's previous step on the same cut, `lever` is the cut's
-/// own speed lever, `spent` is what the cut in flight has already advanced through the door. `None`
-/// means do nothing, and that is every neutral case: no gap yet, a lever at its neutral 1.0, or a cut
-/// that has spent its bound. The switch itself is the caller's fast exit.
-pub(crate) fn training_cut_skip_frames(gap_ms: i64, lever: f32, spent: i32) -> Option<i32> {
-    if gap_ms <= 0 || spent >= MAX_TRAINING_CUT_SKIP_FRAMES_PER_RUN {
+/// How long a cut run must have been open before this build asks the skip door for it. The client's own
+/// skip arrives after the presentation is set up, and asking in the frame the timeline resets is the shape
+/// that leaves a completion closure reading a null (C64).
+pub(crate) const MIN_CUTT_OPEN_MS_BEFORE_SKIP: i64 = 100;
+
+/// Whether this cut run should be asked to skip and with what. `open_ms` is when the run opened, `-1` when
+/// none is open, `now_ms` is the visit to the door, `skipped` is whether this build has already asked for
+/// this run. `None` is every neutral case; the switch itself is the caller's fast exit.
+pub(crate) fn training_cut_skip_time(open_ms: i64, now_ms: i64, skipped: bool) -> Option<f32> {
+    if skipped || open_ms < 0 {
+        return None;
+    }
+    if now_ms - open_ms < MIN_CUTT_OPEN_MS_BEFORE_SKIP {
         return None;
     }
 
-    let extra = normalize_training_cut_lever(lever) - 1.0;
-    if !extra.is_finite() || extra <= 0.0 {
-        return None;
-    }
-
-    let frames = (extra * (gap_ms as f32 / 1000.0 / TRAINING_CUT_SKIP_FRAME_SEC) + 0.5) as i32;
-    let room = MAX_TRAINING_CUT_SKIP_FRAMES_PER_RUN - spent;
-
-    Some(frames.max(1).min(MAX_TRAINING_CUT_SKIP_FRAMES_PER_STEP).min(room))
+    Some(TRAINING_CUT_SKIP_TIME_SEC)
 }
 
 // What each training gate is priced on has to be visible in `hachimi.log`, because both are armed and a door that
@@ -3674,24 +3661,19 @@ mod tests {
     use std::sync::MutexGuard;
 
     #[test]
-    fn the_cut_skip_pump_is_inert_at_the_neutral_lever_and_bounded_above_it() {
-        // No gap yet, and a lever at its neutral 1.0, ask the door for nothing at all.
-        assert_eq!(training_cut_skip_frames(0, 10.0, 0), None);
-        assert_eq!(training_cut_skip_frames(-16, 10.0, 0), None);
-        assert_eq!(training_cut_skip_frames(16, 1.0, 0), None);
-        // One 60 fps frame at lever 2.0 is one frame of advance. The same frame at the top of the
-        // lever is a sub-step, not the rest of the cut.
-        assert_eq!(training_cut_skip_frames(16, 2.0, 0), Some(1));
-        assert_eq!(training_cut_skip_frames(16, 10.0, 0), Some(MAX_TRAINING_CUT_SKIP_FRAMES_PER_STEP));
-        // The run bound closes the last step to what is left rather than overrunning it, and a cut
-        // that already spent the bound gets nothing.
+    fn the_cut_skip_asks_the_clients_own_door_once_and_only_after_the_cut_is_open() {
+        // No cut run open, and a run this build already asked for, both answer nothing.
+        assert_eq!(training_cut_skip_time(-1, 5_000, false), None);
+        assert_eq!(training_cut_skip_time(1_000, 5_000, true), None);
+        // A cut that has barely opened is not asked for yet: the client's own skip lands after the
+        // presentation is set up, not in the frame its timeline resets.
+        assert_eq!(training_cut_skip_time(1_000, 1_000 + MIN_CUTT_OPEN_MS_BEFORE_SKIP - 1, false), None);
         assert_eq!(
-            training_cut_skip_frames(16, 10.0, MAX_TRAINING_CUT_SKIP_FRAMES_PER_RUN - 1),
-            Some(1)
+            training_cut_skip_time(1_000, 1_000 + MIN_CUTT_OPEN_MS_BEFORE_SKIP, false),
+            Some(TRAINING_CUT_SKIP_TIME_SEC)
         );
-        assert_eq!(training_cut_skip_frames(16, 10.0, MAX_TRAINING_CUT_SKIP_FRAMES_PER_RUN), None);
-        // A lever only a hand edited config could ask for is still held by the lever's own clamp.
-        assert_eq!(training_cut_skip_frames(16, f32::NAN, 0), None);
+        // What is asked for is the number the client is measured handing the door, not a lever multiple.
+        assert_eq!(TRAINING_CUT_SKIP_TIME_SEC, 2.667);
     }
 
     #[test]
