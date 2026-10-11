@@ -464,9 +464,14 @@ pub const MAX_TAG_CUT_ANIMATOR_SPEED: f32 = MAX_TIME_SCALE;
 
 // The ceiling on the speed this fork writes onto an `AnimateToUnity.AnMotion`, the object a training cut-in effect
 // is played on. It is priced the same way as the Animator lever: AnimateToUnity advances its own time on Unity's
-// clock, so the pair with `Time.timeScale` is bounded by `MAX_TWEEN_SPEED_PRODUCT`, and the ceiling itself is
-// `MAX_TIME_SCALE` because this is a request to play faster, never a request to skip content.
-pub const MAX_MOTION_SPEED: f32 = MAX_TIME_SCALE;
+// clock, so the pair with `Time.timeScale` is bounded by `MAX_TWEEN_SPEED_PRODUCT`. The ceiling itself is stated
+// rather than inherited, because a run measured this one: `MAX_TIME_SCALE` on this door halved both training cut
+// walls (friendship 1057 ms against 2380, tag answer 1181 against 1430, tag leg 324 ms against 1323) and taking the
+// lever away brought them back (eight cuts at 1713 to 2164 ms), so the halving is this lever's and 5.0 is a floor
+// the measurement has not reached. `2.0 * MAX_TIME_SCALE` is where the next run looks, and it is still inside the
+// pair bound on the scale this layer actually holds: on both measurement runs `Time::set_timeScale` printed no call
+// line, so the produced scale was 1.0 and the bound stood at 20.
+pub const MAX_MOTION_SPEED: f32 = 2.0 * MAX_TIME_SCALE;
 
 // The ceiling on the training cut-in's own speed channel, stated rather than inherited from
 // `MAX_TIME_SCALE` (the decision A17 asks for before a lever sits on a value that is already above
@@ -2998,10 +3003,14 @@ pub fn flash_motion_speed() -> f32 {
         return 1.0;
     }
 
+    // The slider is the arm and the reach. `training_cut_speed` mirrors at `MAX_TIME_SCALE`, while this channel is
+    // measured at twice that, so the proportion the slider sets is kept and the ceiling is where the measurement
+    // says to look next rather than where another lever had to stop.
+    let reach = lever * (MAX_MOTION_SPEED / MAX_TIME_SCALE);
     let produced = f32::from_bits(TIME_SCALE_PRODUCED.load(Ordering::Relaxed)).max(1.0);
     let pair_bound = (MAX_TWEEN_SPEED_PRODUCT / produced).max(1.0);
 
-    lever.max(1.0).min(MAX_MOTION_SPEED).min(pair_bound)
+    reach.max(1.0).min(MAX_MOTION_SPEED).min(pair_bound)
 }
 
 type MotionGetSpeedFn = extern "C" fn(motion: *mut Il2CppObject) -> f32;
@@ -5481,18 +5490,34 @@ mod tests {
 
         assert_eq!(flash_motion_speed(), MAX_MOTION_SPEED, "the motion lever passed its own ceiling");
 
+        // The slider is the proportion, not just the arm: the reach is twice what the slider mirrors at, so half the
+        // slider is half the motion speed and the ceiling lands where the slider max does.
+        let mut half = Config::default();
+        half.training_cut_speed = MAX_TIME_SCALE / 2.0;
+        mirror_config(&half);
+        assert_eq!(flash_motion_speed(), MAX_MOTION_SPEED / 2.0, "the motion lever ignored where the slider stood");
+
+        let mut nudge = Config::default();
+        nudge.training_cut_speed = 1.5;
+        mirror_config(&nudge);
+        assert_eq!(flash_motion_speed(), 3.0, "the motion lever rounded a small slider move up to its ceiling");
+
         // AnimateToUnity advances its own time on Unity's clock, so with the time-scale lever written the pair stops
-        // at the product bound rather than at the lever's ceiling, the way C58 prices the ui clock.
+        // at the product bound rather than at the lever's ceiling, the way C58 prices the ui clock. On the full arm
+        // that means 4.0 and not the 10.0 this channel can reach.
+        mirror_config(&arm);
         TIME_SCALE_PRODUCED.store(5.0f32.to_bits(), Ordering::Release);
         assert_eq!(flash_motion_speed(), MAX_TWEEN_SPEED_PRODUCT / 5.0, "the motion lever and the time-scale lever went past the pair ceiling together");
         TIME_SCALE_PRODUCED.store(1.0f32.to_bits(), Ordering::Release);
 
         let bound = MAX_MOTION_SPEED;
 
-        // What the scaling door hands the game: a 1.0 raised to the bound, a speed the game set above the bound left
-        // where the game put it, and a motion the game paused or slowed under the lever untouched.
+        // What the scaling door hands the game: a 1.0 raised to the bound, a speed under the bound raised to it, and a
+        // speed the game already set past the bound left where the game put it. A motion the game paused or slowed
+        // under the lever is untouched.
         assert_eq!(raise_speed_argument(1.0, bound), bound, "the door left the game's own 1.0 unraised");
-        assert_eq!(raise_speed_argument(8.0, bound), 8.0, "the cap pulled a speed the game set back down");
+        assert_eq!(raise_speed_argument(8.0, bound), bound, "the door left a speed under its bound unraised");
+        assert_eq!(raise_speed_argument(MAX_MOTION_SPEED + 2.0, bound), MAX_MOTION_SPEED + 2.0, "the cap pulled a speed the game set past the bound back down");
         assert_eq!(raise_speed_argument(0.0, bound), 0.0, "the lever raised a motion the game paused");
         assert_eq!(raise_speed_argument(0.5, 1.0), 0.5, "the neutral lever reached a motion speed");
         assert_eq!(raise_speed_argument(-1.0, bound), -1.0, "the lever invented a speed the game did not hand");
