@@ -18,8 +18,12 @@ jobs:
         include:
           - name: Windows
             target: x86_64-pc-windows-msvc
-          - name: Android
-            target: aarch64-linux-android
+        # The aarch64-linux-android leg was dropped by decision (knowledge/decisions/
+        # android-is-not-a-gate-on-this-fork.md). This fork is played on the Windows Global client,
+        # the Windows release build never compiles src/android (src/lib.rs gates the module), and the
+        # leg cost an NDK environment setup per run for code the shipped DLL does not contain.
+        # src/android, the slot tables and their tests are unchanged. Restoring the leg is one matrix
+        # entry plus the two steps that were removed with it.
 
     steps:
       - uses: actions/checkout@v7
@@ -35,16 +39,6 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
-
-      - name: Setup Android NDK Environment
-        if: steps.filter.outputs.code_changed == 'true' && matrix.target == 'aarch64-linux-android'
-        run: |
-          echo "RUSTFLAGS=-C link-args=-static-libstdc++ -C link-args=-lc++abi" >> $GITHUB_ENV
-          TOOLCHAIN="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android24-clang" >> $GITHUB_ENV
-          echo "CXX_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android24-clang++" >> $GITHUB_ENV
-          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android24-clang" >> $GITHUB_ENV
 
       - name: Install Rust
         if: steps.filter.outputs.code_changed == 'true'
@@ -80,12 +74,9 @@ jobs:
       - name: Run Clippy (Windows)
         if: steps.filter.outputs.code_changed == 'true' && matrix.target == 'x86_64-pc-windows-msvc'
         run: cargo xwin clippy --target ${{ matrix.target }} -- -D warnings
-
-      - name: Run Clippy (Android)
-        if: steps.filter.outputs.code_changed == 'true' && matrix.target == 'aarch64-linux-android'
-        # --all-targets: the android only modules and their #[cfg(test)] modules are behind
-        # cfg(target_os = "android"), so this is the only job that lints them at all (C42).
-        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+        # The android only modules and their #[cfg(test)] modules are behind cfg(target_os = "android")
+        # and are not compiled by this leg. They were linted by the dropped Android job (C42); running
+        # them locally needs the NDK names recorded in AGENTS.md section 4.
 
   # The hook tests in `src/il2cpp/hook/**/tests` are what the ledger cites as verification for
   # C33 to C40, and nothing ran them: clippy compiling a `#[cfg(test)]` module is not running it.

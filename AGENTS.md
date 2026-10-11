@@ -26,8 +26,11 @@ breaking the game, the account, or the upstream feature set. In priority order:
    a save, or skips a server round trip is a regression.
 
 Primary target: **Windows, Steam, Global client** (deployed as `cri_mana_vpx.dll` at the game
-root, see C4). Android must still compile (CI runs clippy for `aarch64-linux-android`), but is not
-where performance work is measured.
+root, see C4). Android support is still in the tree and unchanged, but it is **not a gate on this
+fork**: the `aarch64-linux-android` clippy leg is out of CI and out of the per-change check list,
+because `src/lib.rs` gates `mod android` behind `cfg(target_os = "android")` so the Windows build
+never compiles it and this fork is played on the PC Global client. Lint it by hand if you ever touch
+`src/android/` or the slot tables. Decision: `knowledge/decisions/android-is-not-a-gate-on-this-fork.md`.
 
 The durable half of that memory is an OKF bundle at `knowledge/`: one concept per file, for a
 rule, a decision, a baseline or a measurement procedure. Write one when an item closes with a run
@@ -96,23 +99,26 @@ or a decision is taken, not as a scratch pad. The split and the evidence rule ar
 ## 4. Build and check
 
 ```bash
-cargo check
-cargo build --release
-cargo clippy --target x86_64-pc-windows-msvc -- -D warnings
-cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
+cargo check --all-targets
+cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
 cargo test --lib
+cargo build --release
+
+# Only when a change touches src/android/ or the slot tables:
+cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
 ```
 
 - Release profile is `opt-level=3`, fat LTO, `codegen-units=1`, stripped. Don't loosen it.
 - Clippy: everything is allowed except `clippy::perf`, which is **deny**. Treat a perf lint as a
   real bug, never `#[allow]` it away. clippy is installed for the stable toolchain here
-  (`cargo clippy --version`), so run both legs locally instead of recording them as unrunnable.
-- CI (`.github/workflows/clippy_check.yml`) runs clippy with `-D warnings` for both Windows and
-  `aarch64-linux-android`, and `cargo test --lib` on a Windows runner. Platform specific code must
-  sit behind `#[cfg(target_os = ...)]`. `src/android/` is linted only by the Android leg, and
-  `slot_table` / `slot_table_generated` are gated `cfg(any(target_os = "android", test))`: a Windows
-  `--all-targets` run lints them and `cargo test --lib` runs their tests, while Windows `check`,
-  `clippy` without `--all-targets`, and `build --release` never compile them (C43).
+  (`cargo clippy --version`), so run it locally instead of recording it as unrunnable.
+- CI (`.github/workflows/clippy_check.yml`) runs clippy with `-D warnings` for Windows and
+  `cargo test --lib` on a Windows runner; the Android matrix entry and its NDK setup step were
+  removed by decision (section 1). Platform specific code must sit behind `#[cfg(target_os = ...)]`.
+  `src/android/` is no longer linted by CI at all, and `slot_table` / `slot_table_generated` are
+  gated `cfg(any(target_os = "android", test))`: a Windows `--all-targets` run lints them and
+  `cargo test --lib` runs their tests, while Windows `check`, `clippy` without `--all-targets`, and
+  `build --release` never compile them (C43).
 - Android builds use `tools/android/build.sh` (needs `ANDROID_NDK_ROOT`). For the Android clippy leg on
   a Windows host, the tool names CI writes into the environment are the *Linux* ones: in a Windows NDK
   copy `aarch64-linux-android24-clang` and `llvm-ar` are bash wrapper scripts Windows cannot exec, and
