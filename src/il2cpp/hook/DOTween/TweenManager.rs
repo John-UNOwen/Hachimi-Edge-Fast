@@ -24,6 +24,12 @@ def_detour! {
         // performs lives in `AnimationSpeed::tween_clocks`, which the `cargo test --lib` case
         // `the_tween_clock_layer_scales_the_delta_channel_and_not_the_independent_one` drives; the wrapper
         // itself cannot run in a test, because `get_orig_fn!` is 0 outside `init` (C1).
+        //
+        // `tween_clocks` also asks the training cut whether it is playing, and hands this pair back untouched
+        // while it is (ledger item 106): a cut parked on `UnityEngine.WaitForFixedUpdate` while the animation
+        // it waits on finished on the multiplied clock is how three sessions stalled a training turn at
+        // `ui_animation_scale 20.0`. The hold is one cut wide and its bound is measured on the game thread's
+        // tick, in `TrainingCuttProbe::tick_cut_gate`.
         let (delta_time, independent_time) = AnimationSpeed::tween_clocks(delta_time, independent_time);
 
         get_orig_fn!(Update, UpdateFn)(update_type, delta_time, independent_time);
