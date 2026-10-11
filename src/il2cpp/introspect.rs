@@ -122,10 +122,10 @@ const FULL_DUMP_NAMES: &[&str] = &[
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
 /// is bounded, so the log grows by these classes and not by whatever else matches a filter. One simple name can
-/// match in more than one image, so 44 names spent 48 blocks on the Global client (`introspect.log:27687`), and the
-/// budget is sized over that: a client that renames a state machine takes the slot rather than crowding a name this
-/// fork is measured against out.
-const MAX_ALLOWLIST_CLASSES: usize = 56;
+/// match in more than one image, so 44 names spent 48 blocks and 46 names spent the whole 56 block budget on the
+/// Global client (`introspect.log:27687`), and the budget is sized over that: a client that renames a state machine
+/// takes the slot rather than crowding a name this fork is measured against out.
+const MAX_ALLOWLIST_CLASSES: usize = 64;
 
 /// Shape of the dump itself, stamped into the file. Bump it when the log gains or loses a
 /// kind of line so an older file fails the comparison and is rewritten rather than reused as
@@ -150,10 +150,12 @@ struct ScopeImage {
     class_count: usize,
 }
 
-/// What the metadata walk is scoped to: the in-scope images in domain order, plus the reason
-/// there are none when the domain is not there yet.
+/// What the metadata walk is scoped to: the in-scope images in domain order, the names it left out, plus the
+/// reason there are none when the domain is not there yet. The skipped names are printed, because a class this
+/// fork wants can sit in an image the filter never named, and absence from the dump then proves nothing (A8).
 struct Scope {
     images: Vec<ScopeImage>,
+    skipped: Vec<String>,
     missing: Option<&'static str>,
 }
 
@@ -161,7 +163,7 @@ struct Scope {
 /// client run that is six images, so a launch that goes on to reuse its dump pays this pass
 /// and nothing else.
 fn collect_scope() -> Scope {
-    let mut scope = Scope { images: Vec::new(), missing: None };
+    let mut scope = Scope { images: Vec::new(), skipped: Vec::new(), missing: None };
 
     let domain = il2cpp_domain_get();
     if domain.is_null() {
@@ -189,6 +191,7 @@ fn collect_scope() -> Scope {
 
         let name = as_string(il2cpp_image_get_name(image)).unwrap_or_default();
         if !image_is_in_scope(&name) {
+            scope.skipped.push(name);
             continue;
         }
 
@@ -745,10 +748,21 @@ pub fn dump_if_enabled() {
 
     // The scope pass is the whole cost of a launch that can reuse the dump: image headers,
     // no class walk, no formatting, nothing written.
-    let mut scope = Scope { images: Vec::new(), missing: Some("metadata stamp walk faulted") };
+    let mut scope = Scope { images: Vec::new(), skipped: Vec::new(), missing: Some("metadata stamp walk faulted") };
     let scope_ok = crate::core::utils::seh_guard("introspect metadata stamp", || {
         scope = collect_scope();
     });
+
+    // Named once per launch, in the log rather than in the dump: an image the filter never matched holds classes
+    // no dump can ever print, and the animation middleware the cut-in effects run on turned out to be one of them.
+    if scope_ok && !scope.skipped.is_empty() {
+        info!(
+            "introspect: {} images in scope, {} out of scope: {}",
+            scope.images.len(),
+            scope.skipped.len(),
+            scope.skipped.join(", ")
+        );
+    }
 
     let stamp = if scope_ok { DumpStamp::of(&scope.images, &client_identity()) } else { None };
 

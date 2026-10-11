@@ -60,6 +60,11 @@ const R4: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_R4;
 const I4: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_I4;
 const BOOL: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN;
 const CLASS: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_CLASS;
+// A `string<System.String>` parameter is its own type in the metadata, and the exact walk compares the enum the
+// wrapper declared with the one the method carries. Run 43 reported `Play(label, action, int)` and
+// `Play(label, action, float)` as "no matching overload" because this file asked for CLASS where the dump spells a
+// string, so the two doors that carry the number were never armed (A2).
+const STRING: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_STRING;
 // `struct<Gallop.TrainingDefine.TrainingCommandId:4B>` and `TrainingResultType` are value types of
 // four bytes, which is the size A5 proved travels in a general purpose register. A probe only hands
 // them back untouched, and the resolver still measures the size before anything is installed.
@@ -103,8 +108,13 @@ const PLAYER_INDEX_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, I4, CLASS];
 // `FlashPlayer::Play/3 -> void(string<System.String>, class<System.Action>, int)` and the same door spelled with a
 // float (`introspect.log:26462` to `26463`): a label, a callback, and the number this run has to identify as a
 // speed or a duration. Two overloads of one name and one arity, which is what resolving by signature is for (A2).
-const LABEL_ACTION_AND_INT: &[Il2CppTypeEnum] = &[CLASS, CLASS, I4];
-const LABEL_ACTION_AND_FLOAT: &[Il2CppTypeEnum] = &[CLASS, CLASS, R4];
+const LABEL_ACTION_AND_INT: &[Il2CppTypeEnum] = &[STRING, CLASS, I4];
+const LABEL_ACTION_AND_FLOAT: &[Il2CppTypeEnum] = &[STRING, CLASS, R4];
+// `FlashActionPlayer::Play/3 -> void(string<System.String>, float, string<System.String>)` and
+// `Play/2 -> void(string, string)` (`introspect.log:26411` to `26412`): the wrapper that holds a flash player and
+// has a float on its play door. Counted apart so a run says which of the two classes a cut-in effect plays on.
+const LABEL_TIME_AND_LABEL: &[Il2CppTypeEnum] = &[STRING, R4, STRING];
+const TWO_LABELS: &[Il2CppTypeEnum] = &[STRING, STRING];
 // `InitializeFlash/4 -> void(generic<List<ChangeParameterInfo>>, float, bool, class<Canvas>)` and
 // `PlayParameterChangeAsync/2 -> IEnumerator(generic<List<ChangeParameterInfo>>, float)`. Both are
 // reference plus float doors, and the generic half only resolves through the generic matcher (C48).
@@ -478,6 +488,8 @@ static FLASH_RESUME: CutProbe = CutProbe::counted("FlashPlayer::Resume()");
 static FLASH_STOP: CutProbe = CutProbe::counted("FlashPlayer::Stop()");
 static FLASH_END: CutProbe = CutProbe::counted("FlashPlayer::End()");
 static GRAPHIC_SETTINGS_EFFECT_TIME_SCALE: CutProbe = CutProbe::counted("GraphicSettings::SetEffectTimeScale(scale)");
+static FLASH_ACTION_PLAY_WITH_TIME: CutProbe = CutProbe::counted("FlashActionPlayer::Play(label, time, label)");
+static FLASH_ACTION_PLAY_TWO_LABELS: CutProbe = CutProbe::counted("FlashActionPlayer::Play(label, label)");
 // `field _lastMotionSpeed [float]` on the flash player (`introspect.log:26509`): the speed the wrapper last played
 // its motion at, read with the same field accessor the plate UI's cascade floats use, so a run reports the number
 // the game holds instead of inferring it from a wall. A client with no such field reads a zero, which is reported
@@ -491,7 +503,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 95] = [
+static PROBES: [&CutProbe; 97] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -562,6 +574,8 @@ static PROBES: [&CutProbe; 95] = [
     &FLASH_STOP,
     &FLASH_END,
     &GRAPHIC_SETTINGS_EFFECT_TIME_SCALE,
+    &FLASH_ACTION_PLAY_WITH_TIME,
+    &FLASH_ACTION_PLAY_TWO_LABELS,
     &HP_GAUGE_PLAY_IN,
     &HP_GAUGE_PLAY_VALUE,
     &HP_GAUGE_PLAY_OUT,
@@ -2380,6 +2394,46 @@ def_detour! {
     }
 }
 
+fn note_flash_labels(door: &str, first: *mut Il2CppString, second: *mut Il2CppString) {
+    let seen = FLASH_PLAY_LOGGED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+    if seen <= PROBE_DETAIL_LIMIT {
+        let (first, second) = unsafe { (flash_label_text(first), flash_label_text(second)) };
+
+        info!("Cutt probe: {door} call {seen} plays labels {first} then {second}");
+    }
+}
+
+type FlashActionPlayWithTimeFn = extern "C" fn(this: *mut Il2CppObject, first: *mut Il2CppString, time: f32, second: *mut Il2CppString);
+// `FlashActionPlayer::Play/3 -> void(string<System.String>, float, string<System.String>)` and
+// `Play/2 -> void(string, string)` (`introspect.log:26411` to `26412`): the class that owns a flash player has a
+// float on its play door, which is where a cut-in effect's length would be named apart from its speed. The float
+// and both labels go back untouched, and the float is what the census records.
+def_detour! {
+    FlashActionPlayer_PlayWithTime(this: *mut Il2CppObject, first: *mut Il2CppString, time: f32, second: *mut Il2CppString) {
+            FLASH_ACTION_PLAY_WITH_TIME.observe(&[time as f64]);
+        note_flash_labels("FlashActionPlayer::Play(label, time, label)", first, second);
+
+        get_orig_fn!(FlashActionPlayer_PlayWithTime, FlashActionPlayWithTimeFn)(this, first, time, second);
+    }
+    bail {
+                get_orig_fn!(FlashActionPlayer_PlayWithTime, FlashActionPlayWithTimeFn)(this, first, time, second)
+    }
+}
+
+type FlashActionPlayTwoLabelsFn = extern "C" fn(this: *mut Il2CppObject, first: *mut Il2CppString, second: *mut Il2CppString);
+def_detour! {
+    FlashActionPlayer_PlayTwoLabels(this: *mut Il2CppObject, first: *mut Il2CppString, second: *mut Il2CppString) {
+            FLASH_ACTION_PLAY_TWO_LABELS.count();
+        note_flash_labels("FlashActionPlayer::Play(label, label)", first, second);
+
+        get_orig_fn!(FlashActionPlayer_PlayTwoLabels, FlashActionPlayTwoLabelsFn)(this, first, second);
+    }
+    bail {
+                get_orig_fn!(FlashActionPlayer_PlayTwoLabels, FlashActionPlayTwoLabelsFn)(this, first, second)
+    }
+}
+
 type MemberCutinFn = extern "C" fn(ids: *mut Il2CppObject, parent: *mut Il2CppObject, on_end: *mut Il2CppObject) -> *mut Il2CppObject;
 // `PlayMemberCutin/3 -> static class<Gallop.FlashPlayer>(generic<List<int>:24B>, class<Transform>, class<Action>)`
 // (`introspect.log:25120`). The generic half is a pointer this wrapper never reads through (C48) and the door is
@@ -2738,6 +2792,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     let support_member = class_for_label(umamusume, "Gallop.TrainingParamChangeSupportMemberA2U");
     let flash_player = class_for_label(umamusume, "Gallop.FlashPlayer");
     let graphic_settings = class_for_label(umamusume, "Gallop.GraphicSettings");
+    let flash_action_player = class_for_label(umamusume, "Gallop.FlashActionPlayer");
     // The class that owns the stat change presentation for a training turn: its coroutine
     // `PlayParameterChangeAsync/2` is the level above the plate list door.
     let story_view = class_for_label(umamusume, "Gallop.StoryViewController");
@@ -2959,6 +3014,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(flash_player, FlashPlayer_Stop, "Stop", NO_PARAMS, VOID, "FlashPlayer::Stop");
     probe!(flash_player, FlashPlayer_End, "End", NO_PARAMS, VOID, "FlashPlayer::End");
     static_probe!(graphic_settings, GraphicSettings_SetEffectTimeScale, "SetEffectTimeScale", ONE_FLOAT, VOID, "GraphicSettings::SetEffectTimeScale");
+    probe!(flash_action_player, FlashActionPlayer_PlayWithTime, "Play", LABEL_TIME_AND_LABEL, VOID, "FlashActionPlayer::Play(label, time, label)");
+    probe!(flash_action_player, FlashActionPlayer_PlayTwoLabels, "Play", TWO_LABELS, VOID, "FlashActionPlayer::Play(label, label)");
 
     // Run 9's one install failure: the parameter is a generic instantiation, which the exact walk has never
     // answered (C48). The wrapper declares a pointer for it and never reads through it.
@@ -3692,6 +3749,8 @@ mod tests {
             "FlashPlayer::Stop()",
             "FlashPlayer::End()",
             "GraphicSettings::SetEffectTimeScale(scale)",
+            "FlashActionPlayer::Play(label, time, label)",
+            "FlashActionPlayer::Play(label, label)",
         ] {
             assert!(labels.contains(&want), "the census has no door for {want}");
         }
