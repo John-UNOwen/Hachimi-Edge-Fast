@@ -96,6 +96,12 @@ const INTERVAL_FRAME_FLAG_AND_ACTION: &[Il2CppTypeEnum] = &[R4, I4, BOOL, CLASS]
 // `SingleModeMainViewTrainingCutStatusFrame::PlayIn/9 -> void(int, int, int, int, int, int, float, int, bool)`
 // and `Skip/5 -> void(int, int, int, int, int)`, nine and five plain arguments and no struct among them (A5).
 const FRAME_PLAY_IN_ARGS: &[Il2CppTypeEnum] = &[I4, I4, I4, I4, I4, I4, R4, I4, BOOL];
+// `TimelineTrainingCuttController::Init/9 -> void(class<TrainingCuttControllerDelegate>, class<Action>,
+// class<Action>, class<TrainingCuttControllerDelegate>, class<Action>, class<Action>, class<Action>,
+// generic<Action<float>>, generic<Func<bool>>)` (`introspect.log`, the class block): nine references and
+// no struct among them, so every one of them travels in a general purpose register (A5) and the wrapper
+// hands all nine back to the original untouched.
+const NINE_REFERENCES: &[Il2CppTypeEnum] = &[CLASS, CLASS, CLASS, CLASS, CLASS, CLASS, CLASS, CLASS, CLASS];
 const FIVE_INTS: &[Il2CppTypeEnum] = &[I4, I4, I4, I4, I4];
 // `PlayMemberCutin/3 -> static class<Gallop.FlashPlayer>(generic<List<int>>, class<Transform>, class<Action>)`,
 // `PlayAoharuSoulCutin/4 -> static class<FlashPlayer>(int, class<Transform>, class<Action>, class<Action>)` and
@@ -429,6 +435,20 @@ static CUTT_TRAINING_ASYNC: CutProbe = CutProbe::counted("SingleModeMainTraining
 static CUTT_PLAY_IN_TRAINING_STATUS: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayInTrainingStatus()");
 static CUTT_PLAY_OUT_TRAINING_STATUS: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::PlayOutTrainingStatus()");
 static CUTT_CLEAN_UP_CUTT: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::CleanUpCutt()");
+// Item 88: the game's own skip for a training cutt, on the class that owns the stat change
+// presentation. No hook file in this fork has ever named it, so before a lever is allowed to call it a
+// run has to say whether the client reaches it by itself (A4: installed is not the same as called).
+static STORY_SKIP_TRAINING_CUTT: CutProbe = CutProbe::counted("StoryViewController::SkipTrainingCutt()");
+// Item 89: the duration door next to the scale door `AnimationSpeed` owns on the same class. The scale
+// half is measured (run 48 handed the door its 30.0 ceiling while the reader door still peaked at the
+// game's own 5.680, item 82), so what is left of the cut's length is a duration asked for elsewhere.
+// Sampled, not counted: what matters is the number the game took.
+static UTILS_GET_HIGH_SPEED_PLAY_DURATION: CutProbe = CutProbe::peaked("SingleModeUtils::GetHighSpeedPlayDuration()");
+// Item 90: `Gallop.TimelineTrainingCuttController` keeps a cut clock in public float fields `StartTime`,
+// `DelayTime`, `TotalTime` and in delegate slots wired by `Init`. Nothing counts that class today, so no
+// run knows whether a training cut on this client runs through it. One counted door where the delegates
+// get wired is the answer.
+static TIMELINE_CUTT_INIT: CutProbe = CutProbe::counted("TimelineTrainingCuttController::Init(delegates)");
 static CUTT_GET_TOTAL_TIME: CutProbe = CutProbe::peaked("CutInTimelineController::GetTotalTime()");
 static CUTT_GET_SPEED: CutProbe = CutProbe::peaked("CutInTimelineController::get_Speed()");
 static CUTT_SET_SKIP_FRAME: CutProbe = CutProbe::counted("CutInTimelineController::set_SkipFrame(frames)");
@@ -506,7 +526,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 100] = [
+static PROBES: [&CutProbe; 103] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -607,6 +627,9 @@ static PROBES: [&CutProbe; 100] = [
     &MAIN_SEND_COMMAND_ASYNC,
     &MAIN_BACK_FROM_TRAINING,
     &MAIN_TRY_REMAIN_TURN_CHANGE,
+    &STORY_SKIP_TRAINING_CUTT,
+    &UTILS_GET_HIGH_SPEED_PLAY_DURATION,
+    &TIMELINE_CUTT_INIT,
 ];
 
 // One cut-in run, opened by `ResetCurrentTime` and closed by the next one. The wall clock between the
@@ -2000,6 +2023,60 @@ def_detour! {
     }
 }
 
+// Item 88: `StoryViewController::SkipTrainingCutt/0 -> void()`, the game's own skip for a training
+// cutt. Counted only and the wrapper changes nothing: a run has to learn whether the client reaches this
+// on its own before this fork is allowed to call it, and a door that never prints is an answer too.
+type SkipTrainingCuttFn = extern "C" fn(this: *mut Il2CppObject);
+def_detour! {
+    StoryViewController_SkipTrainingCutt(this: *mut Il2CppObject) {
+            STORY_SKIP_TRAINING_CUTT.count();
+
+        get_orig_fn!(StoryViewController_SkipTrainingCutt, SkipTrainingCuttFn)(this);
+    }
+    bail {
+                get_orig_fn!(StoryViewController_SkipTrainingCutt, SkipTrainingCuttFn)(this)
+    }
+}
+
+// Item 89: `SingleModeUtils::GetHighSpeedPlayDuration/0 -> static float()`, the duration door that sits
+// next to the scale door `AnimationSpeed` arms on the same class. A static target takes no `this`, which
+// is why its wrapper declares only the return (A3).
+type GetHighSpeedPlayDurationFn = extern "C" fn() -> f32;
+def_detour! {
+    SingleModeUtils_GetHighSpeedPlayDuration() -> f32 {
+            let value = get_orig_fn!(SingleModeUtils_GetHighSpeedPlayDuration, GetHighSpeedPlayDurationFn)();
+        UTILS_GET_HIGH_SPEED_PLAY_DURATION.sample(value);
+
+        value
+    }
+}
+
+// Item 90: `TimelineTrainingCuttController::Init/9`, where a caller wires that controller's clock: the
+// preload, start, stop and per frame delegates, the `Action<float>` that pushes current time, and the
+// `Func<bool>` that says the cut is over. Every argument is a reference handed straight back (A5).
+type TimelineCuttInitFn = extern "C" fn(
+    this: *mut Il2CppObject,
+    preload: *mut Il2CppObject,
+    request_stop: *mut Il2CppObject,
+    stop: *mut Il2CppObject,
+    start: *mut Il2CppObject,
+    fixed_update: *mut Il2CppObject,
+    update: *mut Il2CppObject,
+    late_update: *mut Il2CppObject,
+    set_current_time: *mut Il2CppObject,
+    is_cutt_end: *mut Il2CppObject,
+);
+def_detour! {
+    TimelineTrainingCuttController_Init(this: *mut Il2CppObject, preload: *mut Il2CppObject, request_stop: *mut Il2CppObject, stop: *mut Il2CppObject, start: *mut Il2CppObject, fixed_update: *mut Il2CppObject, update: *mut Il2CppObject, late_update: *mut Il2CppObject, set_current_time: *mut Il2CppObject, is_cutt_end: *mut Il2CppObject) {
+            TIMELINE_CUTT_INIT.count();
+
+        get_orig_fn!(TimelineTrainingCuttController_Init, TimelineCuttInitFn)(this, preload, request_stop, stop, start, fixed_update, update, late_update, set_current_time, is_cutt_end);
+    }
+    bail {
+                get_orig_fn!(TimelineTrainingCuttController_Init, TimelineCuttInitFn)(this, preload, request_stop, stop, start, fixed_update, update, late_update, set_current_time, is_cutt_end)
+    }
+}
+
 type CuttVoidFn = extern "C" fn(this: *mut Il2CppObject);
 // The three drivers the cut-in runs through. Counted rather than sampled: these are the frames the
 // animation actually spends, and a run's cost is the count of them.
@@ -2841,6 +2918,10 @@ pub fn init(umamusume: *const Il2CppImage) {
     // The class that owns the stat change presentation for a training turn: its coroutine
     // `PlayParameterChangeAsync/2` is the level above the plate list door.
     let story_view = class_for_label(umamusume, "Gallop.StoryViewController");
+    // Item 89 and item 90: the class the training cut's scale door already lives on, which also holds the
+    // duration door nothing has asked yet, and the cutt controller whose clock fields no run has read.
+    let single_mode_utils = class_for_label(umamusume, "Gallop.SingleModeUtils");
+    let timeline_cutt_controller = class_for_label(umamusume, "Gallop.TimelineTrainingCuttController");
 
     // The plate UI keeps its cascade timing in four instance floats. They are resolved next to the door
     // that reads them, and nothing here writes them: a duration hook has to know which number the
@@ -2948,6 +3029,13 @@ pub fn init(umamusume: *const Il2CppImage) {
 
     // `SingleModeUtils::GetTrainingCutTimeScale` is armed by `AnimationSpeed` now, which is where a lever can
     // sit on it without waiting for debug_mode; its census pair arrives through `note_cut_clock` (item 77).
+
+    // Items 88 to 90, the three doors the introspect dump named and no hook file ever reached. All three are
+    // census only in this build: they print in the totals line when the game reaches them and they are absent
+    // when it does not, which is what a lever on any of them has to be priced against.
+    probe!(story_view, StoryViewController_SkipTrainingCutt, "SkipTrainingCutt", NO_PARAMS, VOID, "StoryViewController::SkipTrainingCutt");
+    static_probe!(single_mode_utils, SingleModeUtils_GetHighSpeedPlayDuration, "GetHighSpeedPlayDuration", NO_PARAMS, R4, "SingleModeUtils::GetHighSpeedPlayDuration");
+    generic_probe!(timeline_cutt_controller, TimelineTrainingCuttController_Init, "Init", NINE_REFERENCES, VOID, "TimelineTrainingCuttController::Init");
 
     probe!(cut_in_helper, TrainingCuttHelper_SkipRuntime, "SkipRuntime", NO_PARAMS, VOID, "SingleModeTrainingCutInHelper::SkipRuntime");
     probe!(cut_in_helper, TrainingCuttHelper_GetTargetSpeed, "GetTargetSpeed", NO_PARAMS, R4, "SingleModeTrainingCutInHelper::GetTargetSpeed");
