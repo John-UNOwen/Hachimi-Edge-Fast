@@ -102,7 +102,13 @@ static TRAINING_CUT_IN_CLEANUP_PLAYING: CutProbe = CutProbe::counted("SingleMode
 static TRAINING_CUT_IN_ON_TERMINATE_RUNTIME: CutProbe = CutProbe::counted("SingleModeTrainingCutInHelper::OnTerminateRuntime(controller)");
 static TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST: CutProbe = CutProbe::peaked("SingleModeTrainingCutInHelper::OnTimelineUpdatePost(time)");
 
-static PROBES: [&CutProbe; 30] = [
+// Dumped on `Gallop.StoryViewController`: `SkipStory/0 -> void()` at introspect dump line 25504, the game's
+// own skip button for a story or event scene. This fork has never named it. It is counted before it is driven:
+// the run has to say whether this client walks its own story skip door at all, and how often, before a mod
+// call on it means anything. Item 94.
+static STORY_SKIP_STORY: CutProbe = CutProbe::counted("StoryViewController::SkipStory()");
+
+static PROBES: [&CutProbe; 31] = [
     &CUT_IN_PLAY,
     &CUT_IN_ON_PLAY_CUT_IN,
     &CUT_IN_IS_PLAYING,
@@ -133,6 +139,7 @@ static PROBES: [&CutProbe; 30] = [
     &TRAINING_CUT_IN_CLEANUP_PLAYING,
     &TRAINING_CUT_IN_ON_TERMINATE_RUNTIME,
     &TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST,
+    &STORY_SKIP_STORY,
 ];
 
 // The pairing is stated from dump doors, not inferred from a class name, and each run records which door
@@ -633,6 +640,19 @@ def_detour! {
     }
 }
 
+type StorySkipStoryFn = extern "C" fn(this: *mut Il2CppObject);
+// Counted, not driven. The call is handed to the game exactly as it arrived.
+def_detour! {
+    StoryViewController_SkipStory(this: *mut Il2CppObject) {
+            STORY_SKIP_STORY.count();
+
+        get_orig_fn!(StoryViewController_SkipStory, StorySkipStoryFn)(this);
+    }
+    bail {
+                get_orig_fn!(StoryViewController_SkipStory, StorySkipStoryFn)(this)
+    }
+}
+
 pub fn init(umamusume: *const Il2CppImage) {
     if !Hachimi::instance().config.load().debug_mode {
         return;
@@ -643,6 +663,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     let cut_in_helper = class_for_label(umamusume, "Gallop.CutInHelper");
     let training_cut_in_helper = class_for_label(umamusume, "Gallop.SingleModeTrainingCutInHelper");
     let context_extension = class_for_label(umamusume, "Gallop.SingleModeTrainingCutHelperExtension.ContextExtension");
+    let story_view = class_for_label(umamusume, "Gallop.StoryViewController");
 
     let mut missing: Vec<&str> = Vec::new();
     let mut installed = 0usize;
@@ -710,6 +731,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(training_cut_in_helper, TrainingCutInHelper_CleanupPlaying, "CleanupPlaying", NO_PARAMS, VOID, "SingleModeTrainingCutInHelper::CleanupPlaying");
     probe!(training_cut_in_helper, TrainingCutInHelper_OnTerminateRuntime, "OnTerminateRuntime", ONE_CLASS, VOID, "SingleModeTrainingCutInHelper::OnTerminateRuntime");
     probe!(training_cut_in_helper, TrainingCutInHelper_OnTimelineUpdatePost, "OnTimelineUpdatePost", ONE_FLOAT, VOID, "SingleModeTrainingCutInHelper::OnTimelineUpdatePost");
+
+    probe!(story_view, StoryViewController_SkipStory, "SkipStory", NO_PARAMS, VOID, "StoryViewController::SkipStory");
 
     static_generic_probe!(context_extension, ContextExtension_SkipRuntimeAll, "SkipRuntimeAll", HELPERS, VOID, "ContextExtension::SkipRuntimeAll");
     static_generic_probe!(context_extension, ContextExtension_SkipPause, "SkipPause", HELPERS, VOID, "ContextExtension::SkipPause");
@@ -851,6 +874,20 @@ mod tests {
         // have to cover every door the pairing uses and the tests have to say how many that is.
         assert_eq!(OPEN_DOOR_NAMES.len(), 5);
         assert_eq!(CLOSE_DOOR_NAMES.len(), 6);
-        assert_eq!(PROBES.len(), OPEN_DOOR_NAMES.len() + CLOSE_DOOR_NAMES.len() + 19);
+        // The 20 that are neither open nor close is the cut-in and context census set plus
+        // `StoryViewController::SkipStory`, which is counted on its own and takes part in no pairing (item 94).
+        assert_eq!(PROBES.len(), OPEN_DOOR_NAMES.len() + CLOSE_DOOR_NAMES.len() + 20);
+    }
+
+    #[test]
+    fn the_story_skip_door_is_counted_as_itself_and_closes_nothing() {
+        // Item 94 measures `StoryViewController::SkipStory` before anything drives it, so its number has to be
+        // readable on its own in the totals line and must not be folded into a cut-in open or close, which is
+        // what would happen if a pairing table named it.
+        let labels: Vec<&str> = PROBES.iter().map(|probe| probe.label()).collect();
+        let paired: Vec<&str> = OPEN_DOOR_NAMES.iter().chain(CLOSE_DOOR_NAMES.iter()).copied().collect();
+
+        assert!(labels.contains(&"StoryViewController::SkipStory()"));
+        assert!(!paired.contains(&"StoryViewController::SkipStory()"));
     }
 }
