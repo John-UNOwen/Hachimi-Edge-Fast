@@ -80,6 +80,17 @@ const FRAMES_AND_FLAG: &[Il2CppTypeEnum] = &[I4, BOOL];
 const LIST_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, CLASS];
 // `PlayOut/2 -> void(bool, class<System.Action>)`.
 const FLAG_AND_ACTION: &[Il2CppTypeEnum] = &[BOOL, CLASS];
+// `CoroutinePlayIn/2 -> IEnumerator(float, int)`, the door run 26 named as where the status panel actually
+// runs, and `PlayInRootMotion/1 -> void(float)` next door on the frame class.
+const INTERVAL_AND_FRAME: &[Il2CppTypeEnum] = &[R4, I4];
+// `SingleModeMainViewTrainingCutStatusFrame::PlayOut/3 -> void(bool, float, class<System.Action>)`.
+const FLAG_TIME_AND_ACTION: &[Il2CppTypeEnum] = &[BOOL, R4, CLASS];
+// `SingleModeMainViewTrainingCutStatus::PlayIn/4 -> void(float, int, bool, class<System.Action>)`.
+const INTERVAL_FRAME_FLAG_AND_ACTION: &[Il2CppTypeEnum] = &[R4, I4, BOOL, CLASS];
+// `SingleModeMainViewTrainingCutStatusFrame::PlayIn/9 -> void(int, int, int, int, int, int, float, int, bool)`
+// and `Skip/5 -> void(int, int, int, int, int)`, nine and five plain arguments and no struct among them (A5).
+const FRAME_PLAY_IN_ARGS: &[Il2CppTypeEnum] = &[I4, I4, I4, I4, I4, I4, R4, I4, BOOL];
+const FIVE_INTS: &[Il2CppTypeEnum] = &[I4, I4, I4, I4, I4];
 // `InitializeFlash/4 -> void(generic<List<ChangeParameterInfo>>, float, bool, class<Canvas>)` and
 // `PlayParameterChangeAsync/2 -> IEnumerator(generic<List<ChangeParameterInfo>>, float)`. Both are
 // reference plus float doors, and the generic half only resolves through the generic matcher (C48).
@@ -354,9 +365,11 @@ static CUTT_GET_CURRENT_TIME_SCALE: CutProbe = CutProbe::peaked("CutInTimelineCo
 static CUTT_GET_WAITING_TIME: CutProbe = CutProbe::peaked("CutInTimelineController::get_WaitingTime()");
 static CUTT_SET_SPEED: CutProbe = CutProbe::peaked("CutInTimelineController::SetSpeed(speed)");
 static CUTT_UPDATE_SPEED: CutProbe = CutProbe::counted("CutInTimelineController::UpdateSpeed()");
-static CUTT_SKIP_RUNTIME_TIME: CutProbe = CutProbe::counted("CutInTimelineController::SkipRuntime(time)");
+// Peaked rather than counted: an auto skip of a training cut (item 70) has to be asked for in the unit the
+// game's own skip takes, and run 39 counted 12 of these calls without ever recording what time was passed.
+static CUTT_SKIP_RUNTIME_TIME: CutProbe = CutProbe::peaked("CutInTimelineController::SkipRuntime(time)");
 static CUTT_SKIP_RUNTIME_FRAMES: CutProbe = CutProbe::counted("CutInTimelineController::SkipRuntime(frames, keep)");
-static CUTT_SKIP_TIME_DIRECT: CutProbe = CutProbe::counted("CutInTimelineController::SkipTimeDirect(time)");
+static CUTT_SKIP_TIME_DIRECT: CutProbe = CutProbe::peaked("CutInTimelineController::SkipTimeDirect(time)");
 static CUT_STATUS_SKIP: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::Skip(skip)");
 static CUTT_WAIT_TAP_ASYNC: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::WaitTapAsync()");
 static CUTT_FADE_OUT_RESULT_FLASH: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::FadeOutResultFlash()");
@@ -405,6 +418,25 @@ static STATUS_PLAY_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTraining
 static STATUS_INTERVAL_OUT: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::GetIntervalOutBegine(time)");
 static STATUS_RANK_UP_HIGH_SPEED: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::WillRankUpInHighSpeedMode()");
 static STATUS_EXIST_PLAYING_FRAME: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::ExistPlayingFrame()");
+// The doors the friendship cut actually spends its wall inside. Run 26 is why these are here and
+// `PlayIn/4` alone was not enough: it read `PlayIn 2.4 -> 0.12` and the status panel still held 7866,
+// 8182 and 7866 ms in the same session, because the animation runs on `CoroutinePlayIn/2 ->
+// IEnumerator(float, int)` next door. A friendship cut (2.0 to 2.2 s of animation in every arm of
+// `training_cut_speed`) plays through the tag cut-in player's own effect doors and this frame class, and
+// none of them had ever been counted. Every one is observed only: the float is handed back as the game
+// computed it, and the ledger needs a run to say which of these doors a lever belongs on (item 79).
+static STATUS_PLAY_IN: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::PlayIn(interval, frame, flag, action)");
+static STATUS_COROUTINE_PLAY_IN: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatus::CoroutinePlayIn(interval, frame)");
+static STATUS_FRAME_PLAY_IN: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatusFrame::PlayIn(int, int, int, int, int, int, time, int, flag)");
+static STATUS_FRAME_PLAY_IN_ROOT_MOTION: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatusFrame::PlayInRootMotion(time)");
+static STATUS_FRAME_PLAY_OUT: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatusFrame::PlayOut(flag, time, action)");
+static STATUS_FRAME_PRE_IN: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatusFrame::PlayPreIn()");
+static STATUS_FRAME_SKIP: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatusFrame::Skip(int, int, int, int, int)");
+static TAG_PLAYER_CREATE_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::CreateLineEffect(transform)");
+static TAG_PLAYER_PLAY_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayLineEffect()");
+static TAG_PLAYER_STOP_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect()");
+static TAG_PLAYER_DESTROY_BUTTON_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect()");
+static TAG_PLAYER_PLAY_SUCCESS_TEXT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect()");
 // The friendship split v1 could not make. `IsValidTag` answers whether the cards a training produced
 // carry a friendship, and the tag cut-in player is the door a friendship cut-in is played through.
 static TAG_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::IsValidTag(result, cards)");
@@ -412,7 +444,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 71] = [
+static PROBES: [&CutProbe; 83] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -455,10 +487,22 @@ static PROBES: [&CutProbe; 71] = [
     &STATUS_INTERVAL_OUT,
     &STATUS_RANK_UP_HIGH_SPEED,
     &STATUS_EXIST_PLAYING_FRAME,
+    &STATUS_PLAY_IN,
+    &STATUS_COROUTINE_PLAY_IN,
+    &STATUS_FRAME_PLAY_IN,
+    &STATUS_FRAME_PLAY_IN_ROOT_MOTION,
+    &STATUS_FRAME_PLAY_OUT,
+    &STATUS_FRAME_PRE_IN,
+    &STATUS_FRAME_SKIP,
     &TAG_IS_VALID_TAG,
     &TAG_PLAYER_IS_VALID_TAG,
     &TAG_PLAYER_PLAY_CUT_IN,
     &TAG_PLAYER_PLAY_CUT_OUT,
+    &TAG_PLAYER_CREATE_LINE_EFFECT,
+    &TAG_PLAYER_PLAY_LINE_EFFECT,
+    &TAG_PLAYER_STOP_LINE_EFFECT,
+    &TAG_PLAYER_DESTROY_BUTTON_EFFECT,
+    &TAG_PLAYER_PLAY_SUCCESS_TEXT,
     &HP_GAUGE_PLAY_IN,
     &HP_GAUGE_PLAY_VALUE,
     &HP_GAUGE_PLAY_OUT,
@@ -1195,7 +1239,7 @@ def_detour! {
 type CuttSkipRuntimeTimeFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
 def_detour! {
     CuttTimeline_SkipRuntimeTime(this: *mut Il2CppObject, time: f32) {
-            CUTT_SKIP_RUNTIME_TIME.observe(&[time as f64]);
+            CUTT_SKIP_RUNTIME_TIME.observe_peak(&[time as f64], time);
 
         get_orig_fn!(CuttTimeline_SkipRuntimeTime, CuttSkipRuntimeTimeFn)(this, time);
     }
@@ -1219,7 +1263,7 @@ def_detour! {
 type CuttSkipTimeDirectFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
 def_detour! {
     CuttTimeline_SkipTimeDirect(this: *mut Il2CppObject, time: f32) {
-            CUTT_SKIP_TIME_DIRECT.observe(&[time as f64]);
+            CUTT_SKIP_TIME_DIRECT.observe_peak(&[time as f64], time);
 
         get_orig_fn!(CuttTimeline_SkipTimeDirect, CuttSkipTimeDirectFn)(this, time);
     }
@@ -2061,6 +2105,67 @@ def_detour! {
     }
 }
 
+// The friendship cut-in's own effect doors (`introspect.log:23801` to `23813`). A friendship cut has never
+// answered to `training_cut_speed` in any arm, and these are the doors its animation is actually played
+// through: an `Animator` line effect (`_topLineAnimator`, `_bottomLineAnimator`) and three `FlashPlayer`
+// effects, none of which takes a duration. They are counted so a run can say whether the wall a friendship
+// cut spends is inside this class at all before a lever is put anywhere near it (item 79).
+type TagCreateLineEffectFn = extern "C" fn(this: *mut Il2CppObject, transform: *mut Il2CppObject) -> *mut Il2CppObject;
+def_detour! {
+    TagCutInPlayer_CreateLineEffect(this: *mut Il2CppObject, transform: *mut Il2CppObject) -> *mut Il2CppObject {
+            TAG_PLAYER_CREATE_LINE_EFFECT.count();
+
+        get_orig_fn!(TagCutInPlayer_CreateLineEffect, TagCreateLineEffectFn)(this, transform)
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_CreateLineEffect, TagCreateLineEffectFn)(this, transform)
+    }
+}
+
+def_detour! {
+    TagCutInPlayer_PlayLineEffect(this: *mut Il2CppObject) {
+            TAG_PLAYER_PLAY_LINE_EFFECT.count();
+
+        get_orig_fn!(TagCutInPlayer_PlayLineEffect, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_PlayLineEffect, CuttVoidFn)(this)
+    }
+}
+
+def_detour! {
+    TagCutInPlayer_StopLineEffect(this: *mut Il2CppObject) {
+            TAG_PLAYER_STOP_LINE_EFFECT.count();
+
+        get_orig_fn!(TagCutInPlayer_StopLineEffect, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_StopLineEffect, CuttVoidFn)(this)
+    }
+}
+
+def_detour! {
+    TagCutInPlayer_DestroyButtonEffect(this: *mut Il2CppObject) {
+            TAG_PLAYER_DESTROY_BUTTON_EFFECT.count();
+
+        get_orig_fn!(TagCutInPlayer_DestroyButtonEffect, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_DestroyButtonEffect, CuttVoidFn)(this)
+    }
+}
+
+def_detour! {
+    TagCutInPlayer_PlaySuccessTextEffect(this: *mut Il2CppObject) {
+            TAG_PLAYER_PLAY_SUCCESS_TEXT.count();
+
+        get_orig_fn!(TagCutInPlayer_PlaySuccessTextEffect, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_PlaySuccessTextEffect, CuttVoidFn)(this)
+    }
+}
+
 type StaticIsValidTagFn = extern "C" fn(cards: *mut Il2CppObject) -> bool;
 // Dumped: `IsValidTag/1 -> static bool(generic<List<SupportCardData>>)`. A static target has no hidden
 // `this`, so this wrapper declares only the dumped argument (A3).
@@ -2191,6 +2296,100 @@ def_detour! {
     }
 }
 
+type StatusPlayInFn = extern "C" fn(this: *mut Il2CppObject, interval: f32, frame: i32, flag: bool, action: *mut Il2CppObject);
+// `PlayIn/4 -> void(float, int, bool, class<System.Action>)`. Run 26 read 2.4 arrive on this float and the
+// panel still held 7866, 8182 and 7866 ms in the same session, so the door is counted and its value kept and
+// nothing is written back: what fills the wall is the coroutine below it, not this setup call.
+def_detour! {
+    TrainingCutStatus_PlayIn(this: *mut Il2CppObject, interval: f32, frame: i32, flag: bool, action: *mut Il2CppObject) {
+            STATUS_PLAY_IN.observe_peak(&[interval as f64, frame as f64, bit(flag)], interval);
+
+        get_orig_fn!(TrainingCutStatus_PlayIn, StatusPlayInFn)(this, interval, frame, flag, action);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatus_PlayIn, StatusPlayInFn)(this, interval, frame, flag, action)
+    }
+}
+
+type StatusCoroutinePlayInFn = extern "C" fn(this: *mut Il2CppObject, interval: f32, frame: i32) -> *mut Il2CppObject;
+// `CoroutinePlayIn/2 -> IEnumerator(float, int)`, the door run 26 named as where the panel's animation
+// actually runs. The interval and the coroutine pointer go back exactly as the game made them.
+def_detour! {
+    TrainingCutStatus_CoroutinePlayIn(this: *mut Il2CppObject, interval: f32, frame: i32) -> *mut Il2CppObject {
+            STATUS_COROUTINE_PLAY_IN.observe_peak(&[interval as f64, frame as f64], interval);
+
+        get_orig_fn!(TrainingCutStatus_CoroutinePlayIn, StatusCoroutinePlayInFn)(this, interval, frame)
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatus_CoroutinePlayIn, StatusCoroutinePlayInFn)(this, interval, frame)
+    }
+}
+
+type StatusFramePlayInFn = extern "C" fn(this: *mut Il2CppObject, first: i32, second: i32, third: i32, fourth: i32, fifth: i32, sixth: i32, time: f32, index: i32, flag: bool);
+// `PlayIn/9 -> void(int, int, int, int, int, int, float, int, bool)` on the frame class: nine arguments and
+// no struct among them, which is what makes a wrapper of this shape safe to declare (A5).
+def_detour! {
+    TrainingCutStatusFrame_PlayIn(this: *mut Il2CppObject, first: i32, second: i32, third: i32, fourth: i32, fifth: i32, sixth: i32, time: f32, index: i32, flag: bool) {
+            STATUS_FRAME_PLAY_IN.observe_peak(&[time as f64, index as f64, bit(flag)], time);
+
+        get_orig_fn!(TrainingCutStatusFrame_PlayIn, StatusFramePlayInFn)(this, first, second, third, fourth, fifth, sixth, time, index, flag);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatusFrame_PlayIn, StatusFramePlayInFn)(this, first, second, third, fourth, fifth, sixth, time, index, flag)
+    }
+}
+
+type StatusFrameRootMotionFn = extern "C" fn(this: *mut Il2CppObject, time: f32);
+// `PlayInRootMotion/1 -> void(float)`, the float the frame's own root motion is set up with.
+def_detour! {
+    TrainingCutStatusFrame_PlayInRootMotion(this: *mut Il2CppObject, time: f32) {
+            STATUS_FRAME_PLAY_IN_ROOT_MOTION.observe_peak(&[time as f64], time);
+
+        get_orig_fn!(TrainingCutStatusFrame_PlayInRootMotion, StatusFrameRootMotionFn)(this, time);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatusFrame_PlayInRootMotion, StatusFrameRootMotionFn)(this, time)
+    }
+}
+
+type StatusFramePlayOutFn = extern "C" fn(this: *mut Il2CppObject, flag: bool, time: f32, action: *mut Il2CppObject);
+// `PlayOut/3 -> void(bool, float, class<System.Action>)`, the frame's own out motion.
+def_detour! {
+    TrainingCutStatusFrame_PlayOut(this: *mut Il2CppObject, flag: bool, time: f32, action: *mut Il2CppObject) {
+            STATUS_FRAME_PLAY_OUT.observe_peak(&[time as f64, bit(flag)], time);
+
+        get_orig_fn!(TrainingCutStatusFrame_PlayOut, StatusFramePlayOutFn)(this, flag, time, action);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatusFrame_PlayOut, StatusFramePlayOutFn)(this, flag, time, action)
+    }
+}
+
+def_detour! {
+    TrainingCutStatusFrame_PlayPreIn(this: *mut Il2CppObject) {
+            STATUS_FRAME_PRE_IN.count();
+
+        get_orig_fn!(TrainingCutStatusFrame_PlayPreIn, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatusFrame_PlayPreIn, CuttVoidFn)(this)
+    }
+}
+
+type StatusFrameSkipFn = extern "C" fn(this: *mut Il2CppObject, first: i32, second: i32, third: i32, fourth: i32, fifth: i32);
+// `Skip/5 -> void(int, int, int, int, int)`: the game's own way of putting a frame straight at its end
+// state, counted here because a friendship cut skip has to be asked for in this door's shape (item 79).
+def_detour! {
+    TrainingCutStatusFrame_Skip(this: *mut Il2CppObject, first: i32, second: i32, third: i32, fourth: i32, fifth: i32) {
+            STATUS_FRAME_SKIP.observe(&[first as f64, second as f64, third as f64, fourth as f64, fifth as f64]);
+
+        get_orig_fn!(TrainingCutStatusFrame_Skip, StatusFrameSkipFn)(this, first, second, third, fourth, fifth);
+    }
+    bail {
+                get_orig_fn!(TrainingCutStatusFrame_Skip, StatusFrameSkipFn)(this, first, second, third, fourth, fifth)
+    }
+}
+
 type StatusIntervalFn = extern "C" fn(this: *mut Il2CppObject, time: f32) -> f32;
 // `GetIntervalOutBegine/1 -> float(float)`, with no setter sibling in the dump. Sampled as a peak because
 // it is the gap the status panel waits before it plays out.
@@ -2260,6 +2459,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     let cut_in_helper = class_for_label(umamusume, "Gallop.SingleModeTrainingCutInHelper");
     let timeline = class_for_label(umamusume, "Gallop.CutIn.Cutt.CutInTimelineController");
     let cut_status = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatus");
+    let cut_status_frame = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatusFrame");
     let cutt_controller = class_for_label(umamusume, "Gallop.SingleModeMainTrainingCuttController");
     let plate_ui = class_for_label(umamusume, "Gallop.TrainingParamChangeUI");
     let hp_gauge = class_for_label(umamusume, "Gallop.SingleModeMainViewHpGauge");
@@ -2404,12 +2604,26 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_GetIsAutoPlay, "get_IsAutoPlay", NO_PARAMS, BOOL, "CutInTimelineController::get_IsAutoPlay");
 
     probe!(cut_status, TrainingCutStatus_Skip, "Skip", ONE_FLAG, VOID, "SingleModeMainViewTrainingCutStatus::Skip");
-    // `PlayIn` is not probed here any more: AnimationSpeed scales it, and its count and its raw value
-    // reach this report through TRAINING_HIT_SLOTS (C51).
+    // `PlayIn/4` was last armed as a scaling door and run 26 is why it is not: its float is the play in the
+    // caller sets up, while the animation runs on `CoroutinePlayIn/2 -> IEnumerator(float, int)` next door.
+    // Both are observed here now, the value kept and nothing written back, because a friendship cut's wall
+    // (1943 to 2235 ms in every arm of `training_cut_speed`) is close to the 1792 and 2042 ms those two doors
+    // were left with, and item 79 needs a run to say which of them a lever belongs on.
+    probe!(cut_status, TrainingCutStatus_PlayIn, "PlayIn", INTERVAL_FRAME_FLAG_AND_ACTION, VOID, "SingleModeMainViewTrainingCutStatus::PlayIn");
+    probe!(cut_status, TrainingCutStatus_CoroutinePlayIn, "CoroutinePlayIn", INTERVAL_AND_FRAME, CLASS, "SingleModeMainViewTrainingCutStatus::CoroutinePlayIn");
     probe!(cut_status, TrainingCutStatus_PlayOut, "PlayOut", FLAG_AND_ACTION, VOID, "SingleModeMainViewTrainingCutStatus::PlayOut");
     probe!(cut_status, TrainingCutStatus_GetIntervalOutBegine, "GetIntervalOutBegine", ONE_FLOAT, R4, "SingleModeMainViewTrainingCutStatus::GetIntervalOutBegine");
     probe!(cut_status, TrainingCutStatus_WillRankUpInHighSpeedMode, "WillRankUpInHighSpeedMode", NO_PARAMS, BOOL, "SingleModeMainViewTrainingCutStatus::WillRankUpInHighSpeedMode");
     probe!(cut_status, TrainingCutStatus_ExistPlayingFrame, "ExistPlayingFrame", NO_PARAMS, BOOL, "SingleModeMainViewTrainingCutStatus::ExistPlayingFrame");
+
+    // The panel's own frame class (`introspect.log:23857`). Three of these doors take a float the panel is
+    // set up with and one is the game's own way of putting a frame straight at its end state. All five are
+    // observed only, with every argument handed back untouched.
+    probe!(cut_status_frame, TrainingCutStatusFrame_PlayIn, "PlayIn", FRAME_PLAY_IN_ARGS, VOID, "SingleModeMainViewTrainingCutStatusFrame::PlayIn");
+    probe!(cut_status_frame, TrainingCutStatusFrame_PlayInRootMotion, "PlayInRootMotion", ONE_FLOAT, VOID, "SingleModeMainViewTrainingCutStatusFrame::PlayInRootMotion");
+    probe!(cut_status_frame, TrainingCutStatusFrame_PlayOut, "PlayOut", FLAG_TIME_AND_ACTION, VOID, "SingleModeMainViewTrainingCutStatusFrame::PlayOut");
+    probe!(cut_status_frame, TrainingCutStatusFrame_PlayPreIn, "PlayPreIn", NO_PARAMS, VOID, "SingleModeMainViewTrainingCutStatusFrame::PlayPreIn");
+    probe!(cut_status_frame, TrainingCutStatusFrame_Skip, "Skip", FIVE_INTS, VOID, "SingleModeMainViewTrainingCutStatusFrame::Skip");
 
     probe!(cutt_controller, TrainingCutt_WaitTapAsync, "WaitTapAsync", NO_PARAMS, CLASS, "SingleModeMainTrainingCuttController::WaitTapAsync");
     probe!(cutt_controller, TrainingCutt_FadeOutResultFlash, "FadeOutResultFlash", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::FadeOutResultFlash");
@@ -2436,6 +2650,14 @@ pub fn init(umamusume: *const Il2CppImage) {
     generic_probe!(tag_player, TagCutInPlayer_PlayCutIn, "PlayCutIn", LIST_AND_ACTION, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn");
     probe!(tag_player, TagCutInPlayer_PlayCutInOut, "PlayCutInOut", ONE_ACTION, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut");
     static_generic_probe!(tag_player, TagCutInPlayer_IsValidTag, "IsValidTag", ONE_INFO, BOOL, "SingleModeMainViewTagTrainingCutInPlayer::IsValidTag");
+    // The friendship cut-in's effect doors (`introspect.log:23805` to `23811`). `PlayButtonEffect/3` is not
+    // among them: its second parameter is a 12 byte struct and A5 only allows structs a run has proved travel
+    // in a general register, so the four doors around it are counted instead of guessing at that one.
+    probe!(tag_player, TagCutInPlayer_CreateLineEffect, "CreateLineEffect", ONE_INFO, CLASS, "SingleModeMainViewTagTrainingCutInPlayer::CreateLineEffect");
+    probe!(tag_player, TagCutInPlayer_PlayLineEffect, "PlayLineEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayLineEffect");
+    probe!(tag_player, TagCutInPlayer_StopLineEffect, "StopLineEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect");
+    probe!(tag_player, TagCutInPlayer_DestroyButtonEffect, "DestroyButtonEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect");
+    probe!(tag_player, TagCutInPlayer_PlaySuccessTextEffect, "PlaySuccessTextEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect");
 
     // Run 9's one install failure: the parameter is a generic instantiation, which the exact walk has never
     // answered (C48). The wrapper declares a pointer for it and never reads through it.
@@ -3134,6 +3356,44 @@ mod tests {
 
         assert_eq!(names.len(), total);
         assert_eq!(names.len(), PROBES.len());
+    }
+
+    #[test]
+    fn the_friendship_cut_pacing_doors_are_counted_and_the_skip_doors_keep_the_time_they_are_handed() {
+        // A friendship cut has never answered to `training_cut_speed` (2043, 2072, 2235 ms off against 2053,
+        // 2129, 2044 ms armed), so its pacing doors are now in the census before anything is scaled on them:
+        // the status panel's play in and the coroutine run 26 named as where the panel actually runs, its
+        // frame class's three float doors and its own skip, and the tag cut-in player's effect doors.
+        let labels: Vec<&str> = PROBES.iter().map(|probe| probe.name).collect();
+
+        for want in [
+            "SingleModeMainViewTrainingCutStatus::PlayIn(interval, frame, flag, action)",
+            "SingleModeMainViewTrainingCutStatus::CoroutinePlayIn(interval, frame)",
+            "SingleModeMainViewTrainingCutStatusFrame::PlayIn(int, int, int, int, int, int, time, int, flag)",
+            "SingleModeMainViewTrainingCutStatusFrame::PlayInRootMotion(time)",
+            "SingleModeMainViewTrainingCutStatusFrame::PlayOut(flag, time, action)",
+            "SingleModeMainViewTrainingCutStatusFrame::PlayPreIn()",
+            "SingleModeMainViewTrainingCutStatusFrame::Skip(int, int, int, int, int)",
+            "SingleModeMainViewTagTrainingCutInPlayer::CreateLineEffect(transform)",
+            "SingleModeMainViewTagTrainingCutInPlayer::PlayLineEffect()",
+            "SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect()",
+            "SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect()",
+            "SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect()",
+        ] {
+            assert!(labels.contains(&want), "the census has no door for {want}");
+        }
+
+        // An auto skip of a training cut has to be asked for in the unit the game's own skip takes, and until
+        // now these two doors were counted without ever keeping the time passed to them (item 70).
+        assert!(CUTT_SKIP_RUNTIME_TIME.peaked, "SkipRuntime(time) no longer reports the time it was handed");
+        assert!(CUTT_SKIP_TIME_DIRECT.peaked, "SkipTimeDirect(time) no longer reports the time it was handed");
+        assert!(!CUTT_SKIP_RUNTIME_FRAMES.peaked, "the frames overload was swapped for the time overload it is not");
+
+        let door = CutProbe::peaked("CutInTimelineController::SkipRuntime(time)");
+        door.observe_peak(&[2.4], 2.4);
+
+        assert_eq!(door.calls(), 1, "a peaked door counted its call twice (C53)");
+        assert_eq!(f32::from_bits(door.peak_bits()), 2.4, "the skip door did not keep the time it was handed");
     }
 
     #[test]
