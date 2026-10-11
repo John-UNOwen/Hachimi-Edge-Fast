@@ -114,13 +114,18 @@ const FULL_DUMP_NAMES: &[&str] = &[
     // next lever has to be written against gets its own block, along with the member cut-in door's owner and the
     // plate class whose `TYPEWRITE_DURATION` / `NEXT_WAIT_DURATION` / `_typewriteDuration` the cascade reads.
     "FlashPlayer", "FlashActionPlayer", "TrainingParamChangeSupportMemberA2U", "TrainingParamChangePlate",
+    // `FlashPlayer`'s `_motion` and `_root` are AnimateToUnity objects (`introspect.log:26507` to `26508`) and the
+    // flash player's own surface names no speed door of its own, so the class that actually advances a cut-in
+    // effect has to be read before a lever is written on it.
+    "AnMotion", "AnRoot",
 ];
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
-/// is bounded, so the log grows by these classes and not by whatever else matches a filter. The budget
-/// carries headroom over the list: a client that renames a state machine takes the slot rather than crowding a
-/// name this fork is measured against out.
-const MAX_ALLOWLIST_CLASSES: usize = 48;
+/// is bounded, so the log grows by these classes and not by whatever else matches a filter. One simple name can
+/// match in more than one image, so 44 names spent 48 blocks on the Global client (`introspect.log:27687`), and the
+/// budget is sized over that: a client that renames a state machine takes the slot rather than crowding a name this
+/// fork is measured against out.
+const MAX_ALLOWLIST_CLASSES: usize = 56;
 
 /// Shape of the dump itself, stamped into the file. Bump it when the log gains or loses a
 /// kind of line so an older file fails the comparison and is rewritten rather than reused as

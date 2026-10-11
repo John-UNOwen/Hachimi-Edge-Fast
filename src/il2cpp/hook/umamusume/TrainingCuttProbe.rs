@@ -10,6 +10,7 @@ use once_cell::sync::Lazy;
 use crate::{
     core::{hachimi::recover_lock, settings_preset, Hachimi},
     il2cpp::{
+        api::{il2cpp_string_chars, il2cpp_string_length},
         hook::umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager},
         symbols::{get_class, get_field_from_name},
         types::*,
@@ -99,6 +100,11 @@ const FIVE_INTS: &[Il2CppTypeEnum] = &[I4, I4, I4, I4, I4];
 const MEMBER_CUTIN_ARGS: &[Il2CppTypeEnum] = &[CLASS, CLASS, CLASS];
 const SOUL_CUTIN_ARGS: &[Il2CppTypeEnum] = &[I4, CLASS, CLASS, CLASS];
 const PLAYER_INDEX_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, I4, CLASS];
+// `FlashPlayer::Play/3 -> void(string<System.String>, class<System.Action>, int)` and the same door spelled with a
+// float (`introspect.log:26462` to `26463`): a label, a callback, and the number this run has to identify as a
+// speed or a duration. Two overloads of one name and one arity, which is what resolving by signature is for (A2).
+const LABEL_ACTION_AND_INT: &[Il2CppTypeEnum] = &[CLASS, CLASS, I4];
+const LABEL_ACTION_AND_FLOAT: &[Il2CppTypeEnum] = &[CLASS, CLASS, R4];
 // `InitializeFlash/4 -> void(generic<List<ChangeParameterInfo>>, float, bool, class<Canvas>)` and
 // `PlayParameterChangeAsync/2 -> IEnumerator(generic<List<ChangeParameterInfo>>, float)`. Both are
 // reference plus float doors, and the generic half only resolves through the generic matcher (C48).
@@ -460,6 +466,24 @@ static TAG_PLAYER_SET_RESULT_FLASH: CutProbe = CutProbe::counted("SingleModeMain
 static SUPPORT_MEMBER_LAST_FLASH_PLAYER: AtomicUsize = AtomicUsize::new(0);
 static TAG_PLAYER_RESULT_FLASH_PLAYER: AtomicUsize = AtomicUsize::new(0);
 static FLASH_PLAYER_MATCH_LOGGED: AtomicUsize = AtomicUsize::new(0);
+// `Gallop.FlashPlayer` is the class a training cut-in effect is played on (`introspect.log:26446`): it wraps an
+// `AnimateToUnity.AnMotion` and its `Play` doors are the only ones on that class that take a number. Run 42 handed
+// the tag cut-in player 167 flash players through `SetResultFlashPlayer` and reached none of these doors, because
+// no build had armed them yet, so the 1.2 s effect leg has never been measured from the object that runs it.
+static FLASH_PLAY_ACTION: CutProbe = CutProbe::counted("FlashPlayer::Play(action)");
+static FLASH_PLAY_LABEL_AND_INT: CutProbe = CutProbe::counted("FlashPlayer::Play(label, action, int)");
+static FLASH_PLAY_LABEL_AND_FLOAT: CutProbe = CutProbe::counted("FlashPlayer::Play(label, action, float)");
+static FLASH_PAUSE: CutProbe = CutProbe::counted("FlashPlayer::Pause(flag)");
+static FLASH_RESUME: CutProbe = CutProbe::counted("FlashPlayer::Resume()");
+static FLASH_STOP: CutProbe = CutProbe::counted("FlashPlayer::Stop()");
+static FLASH_END: CutProbe = CutProbe::counted("FlashPlayer::End()");
+static GRAPHIC_SETTINGS_EFFECT_TIME_SCALE: CutProbe = CutProbe::counted("GraphicSettings::SetEffectTimeScale(scale)");
+// `field _lastMotionSpeed [float]` on the flash player (`introspect.log:26509`): the speed the wrapper last played
+// its motion at, read with the same field accessor the plate UI's cascade floats use, so a run reports the number
+// the game holds instead of inferring it from a wall. A client with no such field reads a zero, which is reported
+// as a zero and not as a value this build never read.
+def_field_value_accessors!(get flash_last_motion_speed, FLASH_LAST_MOTION_SPEED_FIELD, f32);
+static FLASH_PLAY_LOGGED: AtomicUsize = AtomicUsize::new(0);
 // The friendship split v1 could not make. `IsValidTag` answers whether the cards a training produced
 // carry a friendship, and the tag cut-in player is the door a friendship cut-in is played through.
 static TAG_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::IsValidTag(result, cards)");
@@ -467,7 +491,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 87] = [
+static PROBES: [&CutProbe; 95] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -530,6 +554,14 @@ static PROBES: [&CutProbe; 87] = [
     &SUPPORT_MEMBER_PLAY_SP_SOUL_CUTIN,
     &SUPPORT_MEMBER_PLAY_OUT_CUTIN,
     &TAG_PLAYER_SET_RESULT_FLASH,
+    &FLASH_PLAY_ACTION,
+    &FLASH_PLAY_LABEL_AND_INT,
+    &FLASH_PLAY_LABEL_AND_FLOAT,
+    &FLASH_PAUSE,
+    &FLASH_RESUME,
+    &FLASH_STOP,
+    &FLASH_END,
+    &GRAPHIC_SETTINGS_EFFECT_TIME_SCALE,
     &HP_GAUGE_PLAY_IN,
     &HP_GAUGE_PLAY_VALUE,
     &HP_GAUGE_PLAY_OUT,
@@ -2213,6 +2245,141 @@ fn note_flash_player_pair(door: &str) {
     }
 }
 
+// The label a flash player was told to play, read out of the managed string and cut short. Only reached on the
+// bounded print lines, so a door the game plays every frame never formats anything.
+unsafe fn flash_label_text(label: *mut Il2CppString) -> String {
+    if label.is_null() {
+        return "none".to_string();
+    }
+
+    let length = il2cpp_string_length(label).clamp(0, 32) as usize;
+    let chars = il2cpp_string_chars(label);
+
+    if chars.is_null() || length == 0 {
+        return "none".to_string();
+    }
+
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(chars as *const u16, length) })
+}
+
+fn note_flash_label(door: &str, label: *mut Il2CppString) {
+    let seen = FLASH_PLAY_LOGGED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+    if seen <= PROBE_DETAIL_LIMIT {
+        let text = unsafe { flash_label_text(label) };
+
+        info!("Cutt probe: {door} call {seen} plays label {text}");
+    }
+}
+
+type FlashPlayActionFn = extern "C" fn(this: *mut Il2CppObject, on_end: *mut Il2CppObject);
+// `Play/1 -> void(class<System.Action>)` (`introspect.log:26461`), the play with no number on it.
+def_detour! {
+    FlashPlayer_PlayAction(this: *mut Il2CppObject, on_end: *mut Il2CppObject) {
+            get_orig_fn!(FlashPlayer_PlayAction, FlashPlayActionFn)(this, on_end);
+
+        FLASH_PLAY_ACTION.observe(&[flash_last_motion_speed(this) as f64]);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_PlayAction, FlashPlayActionFn)(this, on_end)
+    }
+}
+
+type FlashPlayLabelIntFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: i32);
+// `Play/3 -> void(string<System.String>, class<System.Action>, int)` (`introspect.log:26462`). Which number this
+// door is handed is the question the run answers, so the value and `_lastMotionSpeed` after the play are both
+// recorded and the label is named, and every argument goes back untouched.
+def_detour! {
+    FlashPlayer_PlayLabelAndInt(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: i32) {
+            get_orig_fn!(FlashPlayer_PlayLabelAndInt, FlashPlayLabelIntFn)(this, label, on_end, value);
+
+        FLASH_PLAY_LABEL_AND_INT.observe(&[value as f64, flash_last_motion_speed(this) as f64]);
+        note_flash_label("FlashPlayer::Play(label, action, int)", label);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_PlayLabelAndInt, FlashPlayLabelIntFn)(this, label, on_end, value)
+    }
+}
+
+type FlashPlayLabelFloatFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: f32);
+// `Play/3 -> void(string<System.String>, class<System.Action>, float)` (`introspect.log:26463`), the same door
+// with a float instead of an int. Two overloads of one name and one arity, which is exactly what resolving by
+// signature is for (A2).
+def_detour! {
+    FlashPlayer_PlayLabelAndFloat(this: *mut Il2CppObject, label: *mut Il2CppString, on_end: *mut Il2CppObject, value: f32) {
+            get_orig_fn!(FlashPlayer_PlayLabelAndFloat, FlashPlayLabelFloatFn)(this, label, on_end, value);
+
+        FLASH_PLAY_LABEL_AND_FLOAT.observe(&[value as f64, flash_last_motion_speed(this) as f64]);
+        note_flash_label("FlashPlayer::Play(label, action, float)", label);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_PlayLabelAndFloat, FlashPlayLabelFloatFn)(this, label, on_end, value)
+    }
+}
+
+type FlashPauseFn = extern "C" fn(this: *mut Il2CppObject, pause: bool);
+// `Pause/1 -> void(bool)`, `Resume/0`, `Stop/0` and `End/0` (`introspect.log:26465` to `26468`): whether the game
+// ever parks a cut-in effect instead of letting it run out. Counted, arguments untouched.
+def_detour! {
+    FlashPlayer_Pause(this: *mut Il2CppObject, pause: bool) {
+            get_orig_fn!(FlashPlayer_Pause, FlashPauseFn)(this, pause);
+
+        FLASH_PAUSE.count();
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_Pause, FlashPauseFn)(this, pause)
+    }
+}
+
+def_detour! {
+    FlashPlayer_Resume(this: *mut Il2CppObject) {
+            FLASH_RESUME.count();
+
+        get_orig_fn!(FlashPlayer_Resume, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_Resume, CuttVoidFn)(this)
+    }
+}
+
+def_detour! {
+    FlashPlayer_Stop(this: *mut Il2CppObject) {
+            FLASH_STOP.count();
+
+        get_orig_fn!(FlashPlayer_Stop, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_Stop, CuttVoidFn)(this)
+    }
+}
+
+def_detour! {
+    FlashPlayer_End(this: *mut Il2CppObject) {
+            FLASH_END.count();
+
+        get_orig_fn!(FlashPlayer_End, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(FlashPlayer_End, CuttVoidFn)(this)
+    }
+}
+
+type SetEffectTimeScaleFn = extern "C" fn(scale: f32);
+// `Gallop.GraphicSettings::SetEffectTimeScale/1 -> static void(float)` with `DefaultEffectTimeScale [public
+// static const float]` next to it (`introspect.log:26517` to `26520`): the one game owned time scale knob that
+// names cut-in effects at all. Static, so the wrapper declares only the float (A3), and it is written back
+// untouched.
+def_detour! {
+    GraphicSettings_SetEffectTimeScale(scale: f32) {
+            GRAPHIC_SETTINGS_EFFECT_TIME_SCALE.observe(&[scale as f64]);
+
+        get_orig_fn!(GraphicSettings_SetEffectTimeScale, SetEffectTimeScaleFn)(scale);
+    }
+    bail {
+                get_orig_fn!(GraphicSettings_SetEffectTimeScale, SetEffectTimeScaleFn)(scale)
+    }
+}
+
 type MemberCutinFn = extern "C" fn(ids: *mut Il2CppObject, parent: *mut Il2CppObject, on_end: *mut Il2CppObject) -> *mut Il2CppObject;
 // `PlayMemberCutin/3 -> static class<Gallop.FlashPlayer>(generic<List<int>:24B>, class<Transform>, class<Action>)`
 // (`introspect.log:25120`). The generic half is a pointer this wrapper never reads through (C48) and the door is
@@ -2569,6 +2736,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     let main_view = class_for_label(umamusume, "Gallop.SingleModeMainViewController");
     let tag_player = class_for_label(umamusume, "Gallop.SingleModeMainViewTagTrainingCutInPlayer");
     let support_member = class_for_label(umamusume, "Gallop.TrainingParamChangeSupportMemberA2U");
+    let flash_player = class_for_label(umamusume, "Gallop.FlashPlayer");
+    let graphic_settings = class_for_label(umamusume, "Gallop.GraphicSettings");
     // The class that owns the stat change presentation for a training turn: its coroutine
     // `PlayParameterChangeAsync/2` is the level above the plate list door.
     let story_view = class_for_label(umamusume, "Gallop.StoryViewController");
@@ -2771,6 +2940,25 @@ pub fn init(umamusume: *const Il2CppImage) {
     static_probe!(support_member, SupportMemberA2U_PlayAoharuSoulCutin, "PlayAoharuSoulCutin", SOUL_CUTIN_ARGS, CLASS, "TrainingParamChangeSupportMemberA2U::PlayAoharuSoulCutin");
     static_probe!(support_member, SupportMemberA2U_PlayAoharuSpSoulCutin, "PlayAoharuSpSoulCutin", SOUL_CUTIN_ARGS, CLASS, "TrainingParamChangeSupportMemberA2U::PlayAoharuSpSoulCutin");
     static_probe!(support_member, SupportMemberA2U_PlayOutMemberCutin, "PlayOutMemberCutin", PLAYER_INDEX_AND_ACTION, VOID, "TrainingParamChangeSupportMemberA2U::PlayOutMemberCutin");
+
+    // The class a training cut-in effect is played on (`introspect.log:26446`): it wraps an
+    // `AnimateToUnity.AnMotion`, and its `Play` doors are the only ones on it that take a number. Run 42 handed the
+    // tag cut-in player 167 flash players through `SetResultFlashPlayer` and reached none of these doors because no
+    // build had armed them, so this is the first measurement taken on the object the 1.2 s effect leg runs on.
+    unsafe {
+        if let Some(class) = flash_player {
+            FLASH_LAST_MOTION_SPEED_FIELD = get_field_from_name(class, c"_lastMotionSpeed");
+        }
+    }
+
+    probe!(flash_player, FlashPlayer_PlayAction, "Play", ONE_ACTION, VOID, "FlashPlayer::Play(action)");
+    probe!(flash_player, FlashPlayer_PlayLabelAndInt, "Play", LABEL_ACTION_AND_INT, VOID, "FlashPlayer::Play(label, action, int)");
+    probe!(flash_player, FlashPlayer_PlayLabelAndFloat, "Play", LABEL_ACTION_AND_FLOAT, VOID, "FlashPlayer::Play(label, action, float)");
+    probe!(flash_player, FlashPlayer_Pause, "Pause", ONE_FLAG, VOID, "FlashPlayer::Pause(flag)");
+    probe!(flash_player, FlashPlayer_Resume, "Resume", NO_PARAMS, VOID, "FlashPlayer::Resume");
+    probe!(flash_player, FlashPlayer_Stop, "Stop", NO_PARAMS, VOID, "FlashPlayer::Stop");
+    probe!(flash_player, FlashPlayer_End, "End", NO_PARAMS, VOID, "FlashPlayer::End");
+    static_probe!(graphic_settings, GraphicSettings_SetEffectTimeScale, "SetEffectTimeScale", ONE_FLOAT, VOID, "GraphicSettings::SetEffectTimeScale");
 
     // Run 9's one install failure: the parameter is a generic instantiation, which the exact walk has never
     // answered (C48). The wrapper declares a pointer for it and never reads through it.
@@ -3496,6 +3684,14 @@ mod tests {
             "TrainingParamChangeSupportMemberA2U::PlayAoharuSoulCutin(index, parent, action, action)",
             "TrainingParamChangeSupportMemberA2U::PlayAoharuSpSoulCutin(index, parent, action, action)",
             "TrainingParamChangeSupportMemberA2U::PlayOutMemberCutin(player, index, action)",
+            "FlashPlayer::Play(action)",
+            "FlashPlayer::Play(label, action, int)",
+            "FlashPlayer::Play(label, action, float)",
+            "FlashPlayer::Pause(flag)",
+            "FlashPlayer::Resume()",
+            "FlashPlayer::Stop()",
+            "FlashPlayer::End()",
+            "GraphicSettings::SetEffectTimeScale(scale)",
         ] {
             assert!(labels.contains(&want), "the census has no door for {want}");
         }
