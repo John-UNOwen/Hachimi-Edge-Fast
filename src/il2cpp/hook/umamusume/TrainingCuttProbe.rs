@@ -1352,53 +1352,49 @@ def_detour! {
     }
 }
 
-// The call side of the cut-in skip lever (`skip_training_cut`): this build advances the cut-in
-// timeline through the door it already counts rather than shortening the cut from outside it.
-// `def_method_wrapper_fn!` keeps it inert while the address never arrived, which is the same case the
-// census reports as a missing door (A4).
-def_method_wrapper_fn!(skip_cutt_frames, TRAINING_CUT_SKIP_ADDR, (), this: *mut Il2CppObject, frames: i32, keep: bool);
+// The call side of the cut-in skip lever (`skip_training_cut`): this build asks the client's own
+// cut-in timeline to skip, through the door the client is measured using. `def_method_wrapper_fn!`
+// keeps it inert while the address never arrived, which is the same case the census reports as a
+// missing door (A4).
+def_method_wrapper_fn!(skip_cutt_time, TRAINING_CUT_SKIP_ADDR, (), this: *mut Il2CppObject, time: f32);
 
-// The game's own playing flag, mirrored from `set_IsPlayingCutt` instead of inferred from a door count:
-// the lever runs only while the client itself says a training cut is playing. That is also the
-// condition C57 wants before a high speed settings write, and it is the gate item 95 points at on the
-// story side.
-static PLAYING_CUTT: AtomicBool = AtomicBool::new(false);
-// How far the cut in flight has advanced through the door, the visit the last step was priced from, and
-// whether this build is inside the skip door right now. The last one is the re-entrancy guard: the skip
-// advances the timeline, the timeline reaches `UpdateSpeed`, and the pump must not answer that.
-static SKIP_SPENT_FRAMES: AtomicI32 = AtomicI32::new(0);
-static SKIP_LAST_MS: AtomicI64 = AtomicI64::new(-1);
+// Which cut run this build has already asked for, stamped by that run's open marker, and whether it is
+// inside the skip door right now: the skip advances the timeline, the timeline reaches `UpdateSpeed`,
+// and the lever must not answer that. The gate that used to be here was `set_IsPlayingCutt(playing)`,
+// and runs 43 to 48 install that hook while recording no call to it, so a lever gated on it cannot run
+// at all (item 100).
+static SKIP_RUN_STAMP: AtomicI64 = AtomicI64::new(-1);
 static SKIP_INSIDE_DOOR: AtomicBool = AtomicBool::new(false);
-static CUTT_LEVER_SKIP_STEPS: CutProbe = CutProbe::counted("CutInTimelineController::SkipRuntime(lever steps)");
+static CUTT_LEVER_SKIP_STEPS: CutProbe = CutProbe::counted("CutInTimelineController::SkipRuntime(lever calls)");
 
-/// One pump step, taken at the door the client reaches every frame of a cut-in (`UpdateSpeed`, 226
-/// calls across the three cuts of run 48) on the instance the client is already handing us, so no
-/// pointer outlives the call that got it. Nothing happens unless the switch is on, the client says a
-/// training cut is playing, and this build is not already inside the skip door. The step is priced in
-/// the door's own unit and bounded per cut by `AnimationSpeed::training_cut_skip_frames`, and it asks
-/// the door to keep the cut's runtime alive rather than end it: a sub-step, not a jump.
+/// The lever, taken at the door the client reaches every frame of a cut-in (`UpdateSpeed`, 62 to 1276
+/// calls across runs 43 to 48) on the instance that door is already handing us, so no pointer outlives
+/// the call that got it. It runs only when the switch is on, when the probe has a training-screen cut
+/// run open, and when this build has not already asked for that run. What it asks for is
+/// `AnimationSpeed::TRAINING_CUT_SKIP_TIME_SEC`, the value the client is measured handing this door, and
+/// the ask is held until `MIN_CUTT_OPEN_MS_BEFORE_SKIP` after the run opened rather than landing in the
+/// frame the timeline resets.
 fn pump_training_cut_cutt(this: *mut Il2CppObject, now: i64) {
-    if !AnimationSpeed::skip_training_cut() || this.is_null() || !PLAYING_CUTT.load(atomic::Ordering::Relaxed) {
-        return;
-    }
-    if SKIP_INSIDE_DOOR.swap(true, atomic::Ordering::AcqRel) {
+    if !AnimationSpeed::skip_training_cut() || this.is_null() {
         return;
     }
 
-    let last = SKIP_LAST_MS.load(atomic::Ordering::Relaxed);
-    let gap = if last < 0 { 0 } else { now - last };
-    SKIP_LAST_MS.store(now, atomic::Ordering::Relaxed);
+    let open = RUN_OPENED_MS.load(atomic::Ordering::Relaxed);
+    if open < 0 || RUN_BUCKET.load(atomic::Ordering::Relaxed) != ViewBucket::Training as usize {
+        return;
+    }
 
-    let spent = SKIP_SPENT_FRAMES.load(atomic::Ordering::Relaxed);
-    if let Some(frames) =
-        AnimationSpeed::training_cut_skip_frames(gap, AnimationSpeed::training_cut_lever(), spent)
-    {
-        SKIP_SPENT_FRAMES.store(spent + frames, atomic::Ordering::Relaxed);
+    let asked = SKIP_RUN_STAMP.load(atomic::Ordering::Relaxed);
+    if AnimationSpeed::training_cut_skip_time(open, now, asked == open).is_some() {
+        if SKIP_INSIDE_DOOR.swap(true, atomic::Ordering::AcqRel) {
+            return;
+        }
+
+        SKIP_RUN_STAMP.store(open, atomic::Ordering::Relaxed);
         CUTT_LEVER_SKIP_STEPS.count();
-        skip_cutt_frames(this, frames, true);
+        skip_cutt_time(this, AnimationSpeed::TRAINING_CUT_SKIP_TIME_SEC);
+        SKIP_INSIDE_DOOR.store(false, atomic::Ordering::Release);
     }
-
-    SKIP_INSIDE_DOOR.store(false, atomic::Ordering::Release);
 }
 
 type CuttSkipRuntimeFramesFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, keep: bool);
@@ -2037,19 +2033,12 @@ def_detour! {
 
 type SetIsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
 // Dumped: `set_IsPlayingCutt/1 -> void(bool)` on the training cutt controller. Run 10 installed it and it
-// printed nothing for a whole career (C49), so it no longer drives the run. It stays counted because a
-// client that does use the flag would show up here, and the value is handed back exactly as it arrived.
+// printed nothing for a whole career (C49), so it no longer drives the run, and runs 46 to 48 install it
+// while carrying no totals line for it: a lever gated on this door cannot run (item 100). It stays counted
+// because a client that does use the flag would show up here, and the value is handed back exactly as it arrived.
 def_detour! {
     TrainingCutt_SetIsPlayingCutt(this: *mut Il2CppObject, playing: bool) {
             CUTT_SET_IS_PLAYING_CUTT.count();
-
-        // Mirrored for the cut-in skip lever: it is the client's own statement that a training cut is
-        // playing, and a cut that starts over gets its bound back.
-        PLAYING_CUTT.store(playing, atomic::Ordering::Relaxed);
-        if playing {
-            SKIP_SPENT_FRAMES.store(0, atomic::Ordering::Relaxed);
-            SKIP_LAST_MS.store(-1, atomic::Ordering::Relaxed);
-        }
 
         get_orig_fn!(TrainingCutt_SetIsPlayingCutt, SetIsPlayingCuttFn)(this, playing);
     }
@@ -3112,12 +3101,14 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_SkipRuntimeFrames, "SkipRuntime", FRAMES_AND_FLAG, VOID, "CutInTimelineController::SkipRuntime(frames, keep)");
 
     // The call side, held apart from the census arm above: the same door resolved once more so the
-    // lever has an address to call, and armed only once (A4). It stays 0, and the lever stays inert,
-    // on a client that has no such method.
+    // lever has an address to call, and armed only once (A4). It is the door the client is measured
+    // using, `SkipRuntime(time)` at 2.667 s in runs 43 to 48, and not `SkipRuntime(frames, keep)` or
+    // `SkipTimeDirect(time)`, which carry no totals line in any of those runs. It stays 0, and the lever
+    // stays inert, on a client that has no such method.
     if let Some(controller) = timeline {
         unsafe {
             TRAINING_CUT_SKIP_ADDR =
-                AnimationSpeed::resolve_method(controller, "SkipRuntime", FRAMES_AND_FLAG, VOID);
+                AnimationSpeed::resolve_method(controller, "SkipRuntime", ONE_FLOAT, VOID);
         }
     }
     probe!(timeline, CuttTimeline_SkipTimeDirect, "SkipTimeDirect", ONE_FLOAT, VOID, "CutInTimelineController::SkipTimeDirect");
