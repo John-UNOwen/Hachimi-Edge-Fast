@@ -58,6 +58,95 @@ fn hook_ids() -> MutexGuard<'static, Vec<&'static str>> {
     HOOK_IDS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Item 91: the game address every hook this build armed on, collected while hooking.
+///
+/// The introspect dump names 23,128 classes and their methods and carries no address at all, so it
+/// cannot point a decompiler at a function body. This fork already reads `methodPointer` for every
+/// target it resolves (`il2cpp::symbols`), so writing the address beside the id is the same artifact
+/// a metadata dumper's name to RVA map is, restricted to the doors this build actually arms on, and
+/// it needs no third-party dumper and no metadata version decision. `debug_mode` only, one push per
+/// armed hook while hooking, never on a call path.
+static ARMED_TARGETS: Mutex<Vec<(&'static str, usize)>> = Mutex::new(Vec::new());
+
+fn armed_targets() -> MutexGuard<'static, Vec<(&'static str, usize)>> {
+    ARMED_TARGETS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Record one armed hook for the map. Inert unless `debug_mode` is on, which is the same gate the
+/// dump uses, so a normal run pays nothing.
+pub(crate) fn record_armed_target(id: &'static str, addr: usize) {
+    if addr == 0 || !crate::core::Hachimi::instance().config.load().debug_mode {
+        return;
+    }
+
+    armed_targets().push((id, addr));
+}
+
+/// How far above the module base an address may sit and still be reported as an RVA in it. This fork
+/// does not read the module's `SizeOfImage`, and `GameAssembly.dll` on the Global client is 96 MiB, so a
+/// window this wide admits every real method and still refuses the targets that are not in that module:
+/// an icall resolved out of the game executable, or a native hook on `LoadLibraryW`, sits terabytes
+/// away from a module loaded at `0x140000000`, and an RVA computed off the wrong base is worse than none.
+const MAX_RVA_SPAN: usize = 1 << 30;
+
+/// The map as log lines, ordered by address so a reader walking a decompiler's listing walks the
+/// same order. `base` is the module the addresses were loaded at; with no base, or with a target outside
+/// the window above it, the line carries the absolute address and says no RVA.
+pub(crate) fn speed_map_lines(entries: &[(&'static str, usize)], base: usize) -> Vec<String> {
+    let mut ordered: Vec<(&'static str, usize)> = entries.to_vec();
+    ordered.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+
+    let mut lines = Vec::with_capacity(ordered.len());
+    for (id, addr) in ordered {
+        if base != 0 && addr >= base && addr - base <= MAX_RVA_SPAN {
+            lines.push(format!("Speed map: {} target {:#x} rva {:#x}", id, addr, addr - base));
+        }
+        else {
+            lines.push(format!("Speed map: {} target {:#x}", id, addr));
+        }
+    }
+
+    lines
+}
+
+/// Where the IL2CPP method bodies live on Windows. An icall or a native hook answers outside this
+/// module, which the map line says by carrying no RVA for it.
+#[cfg(target_os = "windows")]
+fn il2cpp_module_base() -> usize {
+    use windows::core::w;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+
+    unsafe { GetModuleHandleW(w!("GameAssembly.dll")).map(|handle| handle.0 as usize).unwrap_or(0) }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn il2cpp_module_base() -> usize {
+    0
+}
+
+/// Write the map once hooking is over. Cold: it runs after `finish_batch`, never from a detour.
+fn print_speed_map() {
+    if !crate::core::Hachimi::instance().config.load().debug_mode {
+        return;
+    }
+
+    let entries = armed_targets().clone();
+    if entries.is_empty() {
+        return;
+    }
+
+    let base = il2cpp_module_base();
+    info!(
+        "Speed map: {} armed targets, GameAssembly.dll base {:#x}",
+        entries.len(),
+        base
+    );
+
+    for line in speed_map_lines(&entries, base) {
+        info!("{}", line);
+    }
+}
+
 /// The half of a hook id this option matched on before ids were keys: the wrapper name, what sits
 /// after the last `::`. In a config written under that rule this is what a bare key is.
 #[inline]
@@ -206,6 +295,9 @@ macro_rules! new_hook {
             // before the null check, so a target that never resolved was counted as installed.
             if ($orig != 0) {
                 info!("new_hook!: {}", hook_id);
+                // Item 91: the address this hook was created on, for the map the log writes after
+                // hooking. Cold, and inert unless `debug_mode`.
+                $crate::il2cpp::hook::record_armed_target(hook_id, $orig as usize);
                 let res = hachimi.interceptor.hook($orig as usize, $hook as *const () as usize);
                 if let Err(e) = res {
                     error!("{}", e);
@@ -2159,6 +2251,10 @@ pub fn init() {
     // debug_mode only: writes the game's own method and field names to
     // <data dir>/introspect.log so hooks can be aimed at real names.
     crate::il2cpp::introspect::dump_if_enabled();
+
+    // debug_mode only: the addresses those names were armed on, so the dump and the map line up on
+    // one build (item 91).
+    print_speed_map();
 }
 
 #[cfg(test)]
@@ -2167,7 +2263,7 @@ mod tests {
     // site in `il2cpp/hook/` has. A run that wrote `X_addr is null` left that site's address at 0,
     // and mod code - the GUI, `il2cpp::sql.rs`, `il2cpp::ext.rs`, the IPC plane - still calls into
     // them, which is why "inert" and "quiet" both have to hold here.
-    use super::UnresolvedMarker;
+    use super::{speed_map_lines, UnresolvedMarker};
 
     // Tags the linker cannot merge onto each other, the way a wrapper's own address keeps one
     // macro's marker from landing on another wrapper's.
@@ -2178,6 +2274,26 @@ mod tests {
 
     static mut PROBE_IMPL_ADDR: usize = 0;
     impl_addr_wrapper_fn!(probe_impl_wrapper, PROBE_IMPL_ADDR, *mut u8,);
+
+    #[test]
+    fn the_speed_map_orders_by_address_and_only_states_an_rva_it_can_prove() {
+        // The shape a decompiler reads: one line per armed hook, walking the binary in address order.
+        // The last entry sits far above the module base it was not loaded from - an icall, or a native
+        // hook in a system module - and gets no RVA rather than a number off a wrong base.
+        let entries = [
+            ("umamusume::AnimationSpeed::GetTrainingCutTimeScale", 0x14000_1230usize),
+            ("DOTween::TweenManager::Update", 0x14000_0010),
+            ("UnityEngine_CoreModule::Time::SetTimeScale", 0x7ff0_0000_0000),
+        ];
+        let lines = speed_map_lines(&entries, 0x14000_0000);
+
+        assert_eq!(lines[0], "Speed map: DOTween::TweenManager::Update target 0x140000010 rva 0x10");
+        assert_eq!(
+            lines[1],
+            "Speed map: umamusume::AnimationSpeed::GetTrainingCutTimeScale target 0x140001230 rva 0x1230"
+        );
+        assert_eq!(lines[2], "Speed map: UnityEngine_CoreModule::Time::SetTimeScale target 0x7ff000000000");
+    }
 
     #[test]
     fn a_wrapper_with_no_resolved_target_never_calls_through_zero() {
