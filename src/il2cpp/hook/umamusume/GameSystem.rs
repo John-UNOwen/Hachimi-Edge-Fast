@@ -97,6 +97,8 @@ def_detour! {
         crate::il2cpp::hook::UnityEngine_CoreModule::WaitProbe::report_if_due();
         super::StoryEventProbe::report_if_due();
         super::GameFrameProbe::report_if_due();
+        // The dialog and skill screen census, on the same tick and the same quiet path rule.
+        super::DialogProbe::report_if_due();
 
         #[cfg(target_os = "windows")]
         {
