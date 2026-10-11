@@ -788,6 +788,20 @@ pub fn delta_clock() -> f32 { delta_clock_of(ui_animation_scale(), time_scale_pr
 /// the game rather than beside it (C58, item 62). A mirror that is not a number - which this module never
 /// stores - is read as the neutral 1.0, the way `duration_factor` reads it.
 pub fn tween_clocks(delta_time: f32, independent_time: f32) -> (f32, f32) {
+    tween_clocks_holding(delta_time, independent_time, TrainingCuttProbe::cut_gate_engaged())
+}
+
+/// The same pair with the training cut gate handed in as an argument, which is the half a test can drive
+/// (C1). A training cut holds this lever off the channel for as long as it is playing (item 106): runs 52,
+/// 53 and 56 each stalled a turn at `ui_animation_scale 20.0` with the cut coroutine parked on
+/// `UnityEngine.WaitForFixedUpdate` while the animation it was waiting on had already finished on the
+/// multiplied clock, and runs 54 and 55 ran the same turn whole at 1.0. What the hold covers is one cut, so
+/// every other screen keeps the speed the lever was bought for.
+pub fn tween_clocks_holding(delta_time: f32, independent_time: f32, cut_holds_the_clock: bool) -> (f32, f32) {
+    if cut_holds_the_clock {
+        return (delta_time, independent_time);
+    }
+
     let scale = ui_clock_of(ui_animation_scale(), time_scale_produced());
 
     // Fast exit at the neutral setting: no work on a tween tick that nothing speeds up.
@@ -4230,6 +4244,40 @@ mod tests {
             "tween clock at ui_animation {}x: delta tick {} s -> {} s, independent tick {} s -> {} s (MAX_UI_ANIMATION_SCALE {})",
             ui_animation_scale(), frame, delta, real_time_tick, independent, MAX_UI_ANIMATION_SCALE,
         );
+    }
+
+    // Ledger item 106: the ui clock is this fork's lever on the tween channel, and a training cut holds it
+    // off that channel for as long as it plays. Runs 52, 53 and 56 each stalled a training turn at
+    // `ui_animation_scale 20.0` with the game's cut coroutine parked in one branch yielding
+    // `UnityEngine.WaitForFixedUpdate` (1,766 steps in 34 s on run 56) while the animation that wait was
+    // watching for had already finished on the multiplied clock; runs 54 and 55 ran the same turn whole at
+    // 1.0, with the cut's own levers the same in each pair. The hold is one cut wide, so every other screen
+    // keeps the speed the lever was bought for.
+    #[test]
+    fn a_training_cut_hold_leaves_the_tween_clock_on_the_games_own_rate() {
+        let _turn = pass_turn();
+
+        let frame = 1.0 / 60.0;
+        let real_time_tick = 1.0 / 60.0;
+
+        mirror_config(&timing_config(1.0, 1.0, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        let (held_delta, held_independent) = tween_clocks_holding(frame, real_time_tick, true);
+        assert_eq!(held_delta, frame, "the ui clock multiplied the tween clock while a training cut was playing");
+        assert_eq!(held_independent, real_time_tick);
+
+        // The hold is per cut and not per session: the same mirror with no cut playing scales the channel
+        // the lever is for again.
+        let (delta, independent) = tween_clocks_holding(frame, real_time_tick, false);
+        assert_eq!(delta, frame * MAX_UI_ANIMATION_SCALE, "the hold outlasted the cut it was covering");
+        assert_eq!(independent, real_time_tick);
+
+        // What the hold costs at the ceiling: the cut's tweens take their own length instead of a twentieth
+        // of it, which is the difference between a completion the cut's wait can still see and one it has
+        // already missed.
+        let wall_ms_for_one_second_of_tween = |channel: f32| 1000.0 / (channel * 60.0);
+        assert!(ms_is(wall_ms_for_one_second_of_tween(held_delta), 1000.0), "a held tween still ran fast");
+        assert!(ms_is(wall_ms_for_one_second_of_tween(delta), 1000.0 / MAX_UI_ANIMATION_SCALE), "a released tween stopped being the one the lever speeds up");
     }
 
     // C58 / ledger item 62, spelled on the quantity the game waits on. Each layer has its own

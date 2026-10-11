@@ -1004,6 +1004,157 @@ fn window_line(window: usize, name: &str, agg: &WindowAgg) -> String {
     )
 }
 
+// The ui clock interlock (item 106). Runs 52, 53 and 56 each stalled a training turn with
+// `ui_animation_scale 20.0` and runs 54 and 55 ran the same turn whole at 1.0, with `time_scale` and the
+// two cut levers held the same inside each pair. A stalled cut is the coroutine `<PlayTrainingCut>d__70`
+// parked in one branch yielding `UnityEngine.WaitForFixedUpdate` about 30 times a second - 1,766 steps in
+// 34 s on run 56 - while the animation it is waiting on has already finished on the multiplied tween
+// clock, so the completion arrived before the wait that was going to watch for it. This gate keeps the
+// lever off the tween channel for the length of one training cut, which is where the stall lives, and
+// leaves it on everywhere else.
+//
+// The close door is not trusted on its own: in every stalled session measured so far `CleanUpCutt` is
+// never called, so a hold only that door could end would leave the lever off for the rest of the session.
+// The hold therefore also expires on the game thread's own tick count. At the 33.1 ms mean frame runs 54
+// and 56 measured, 900 ticks is about 30 s of wall clock: past the longest closed cut run any run has
+// measured (8,232 ms on run 55) and past the 28 s one career spread over 19 cuts (run 10), and short
+// enough that a cut the game never cleaned up costs one bounded window instead of the rest of the day.
+const CUT_GATE_HOLD_TICKS: usize = 900;
+
+#[derive(Debug)]
+struct CutGate {
+    open: AtomicBool,
+    ticks: AtomicUsize,
+    holds: AtomicUsize,
+    expiries: AtomicUsize,
+}
+
+impl CutGate {
+    const fn new() -> Self {
+        Self {
+            open: AtomicBool::new(false),
+            ticks: AtomicUsize::new(0),
+            holds: AtomicUsize::new(0),
+            expiries: AtomicUsize::new(0),
+        }
+    }
+
+    /// The cut start doors call this. It answers which hold of the session this is, so the caller can stop
+    /// naming them after the first few. Opening a cut re-arms the clock, so a hold that expired while the
+    /// game was waiting for a tap does not shorten the one that follows it.
+    fn engage(&self) -> usize {
+        self.open.store(true, atomic::Ordering::Release);
+        self.ticks.store(0, atomic::Ordering::Relaxed);
+
+        self.holds.fetch_add(1, atomic::Ordering::Relaxed) + 1
+    }
+
+    /// `CleanUpCutt` calls this. It ends a hold long before its bound, which is the ordinary case: run 10
+    /// measured 35 closes against 19 starts.
+    fn release(&self) {
+        self.open.store(false, atomic::Ordering::Release);
+    }
+
+    /// One game tick. Answers the tick count when this tick ended a hold by reaching the bound and `None`
+    /// otherwise, so the caller only ever logs an expiry.
+    fn tick(&self) -> Option<usize> {
+        if !self.open.load(atomic::Ordering::Acquire) {
+            return None;
+        }
+
+        let ticks = self.ticks.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        if ticks < CUT_GATE_HOLD_TICKS {
+            return None;
+        }
+
+        self.open.store(false, atomic::Ordering::Release);
+        self.expiries.fetch_add(1, atomic::Ordering::Relaxed);
+
+        Some(ticks)
+    }
+
+    fn engaged(&self) -> bool {
+        self.open.load(atomic::Ordering::Acquire)
+    }
+}
+
+static CUT_GATE: CutGate = CutGate::new();
+
+// The census half of the two doors the gate arms is only asked for when the probe was installed, so a
+// build played without `debug_mode` pays two atomic stores per cut and writes no census lines.
+static CENSUS_ON: AtomicBool = AtomicBool::new(false);
+
+// Armed whatever `debug_mode` says, for the same reason `AnimationSpeed` owns the plate interval door: a
+// bound on a lever this fork owns has to stand where the game is actually played, not only where a probe
+// happens to be installed. The pair is the boundary the census already measures - `PlayTrainingCut` opens
+// a run and `CleanUpCutt` closes it - and both wrappers hand their arguments and the coroutine the
+// original built to the game untouched.
+fn arm_cut_gate(cutt_controller: Option<*mut Il2CppClass>) -> usize {
+    let Some(class) = cutt_controller else {
+        return 0;
+    };
+
+    let mut armed = 0usize;
+    let open = unsafe { AnimationSpeed::resolve_method(class, "PlayTrainingCut", ONE_INFO, CLASS) };
+
+    if open != 0 {
+        new_hook!(open, TrainingCutt_PlayTrainingCut);
+        armed += 1;
+    }
+
+    // The scenario sibling opens a cut run the same way and is closed by the same door, so it holds the ui
+    // clock the same way. Run 56's stalled cut came through `PlayTrainingCut`; this door is covered so the
+    // hold does not depend on which of the two the game played through.
+    let scenario = unsafe { AnimationSpeed::resolve_method(class, "PlayScenarioTrainingCut", ONE_INFO, CLASS) };
+
+    if scenario != 0 {
+        new_hook!(scenario, TrainingCutt_PlayScenarioTrainingCut);
+        armed += 1;
+    }
+
+    let close = unsafe { AnimationSpeed::resolve_method(class, "CleanUpCutt", NO_PARAMS, VOID) };
+
+    if close != 0 {
+        new_hook!(close, TrainingCutt_CleanUpCutt);
+        armed += 1;
+    }
+
+    armed
+}
+
+/// Once per game tick from `GameSystem_Update`, where a per frame door already exists. A tick with no
+/// hold open is one atomic load.
+pub fn tick_cut_gate() {
+    let Some(ticks) = CUT_GATE.tick() else {
+        return;
+    };
+
+    if CUT_GATE.expiries.load(atomic::Ordering::Relaxed) <= PROBE_DETAIL_LIMIT {
+        info!("Cutt gate: the training cut never reached its close door, the ui clock hold ends after {ticks} game ticks");
+    }
+}
+
+/// True while a training cut holds this fork's ui clock off the tween channel. Read once per tween tick.
+pub(crate) fn cut_gate_engaged() -> bool {
+    CUT_GATE.engaged()
+}
+
+fn log_cut_gate_hold(hold: usize) {
+    if hold > PROBE_DETAIL_LIMIT {
+        return;
+    }
+
+    let ui = AnimationSpeed::ui_animation_scale();
+
+    // Nothing to say about a hold that is covering a lever nobody turned on.
+    if ui <= 1.0 {
+        return;
+    }
+
+    info!("Cutt gate: training cut {hold} playing, ui clock held at 1.0 instead of {ui}");
+}
+
 // Called from the door run 10 measured 19 times in a career that produced 35 `CleanUpCutt` calls:
 // `PlayTrainingCut` is where the game starts a training cut. The run before is closed first, so a cut that
 // was never cleaned up is still measured instead of silently merged with the next one. C47 and C49 are the
@@ -2163,8 +2314,14 @@ def_detour! {
 
 def_detour! {
     TrainingCutt_CleanUpCutt(this: *mut Il2CppObject) {
+        // The gate belongs to the door, not to the census: this wrapper is armed whether or not the probe
+        // was installed, and a cut the game cleaned is a cut that no longer holds the ui clock off.
+        CUT_GATE.release();
+
+        if CENSUS_ON.load(atomic::Ordering::Relaxed) {
             CUTT_CLEAN_UP_CUTT.count();
-        close_cut_run();
+            close_cut_run();
+        }
 
         get_orig_fn!(TrainingCutt_CleanUpCutt, CuttVoidFn)(this);
     }
@@ -2201,14 +2358,25 @@ type PlayTrainingCutFn = extern "C" fn(this: *mut Il2CppObject, info: *mut Il2Cp
 // the game ends up playing.
 def_detour! {
     TrainingCutt_PlayTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
+        // The hold opens here, before the cut starts playing, because the animations the coroutine later
+        // waits on are started by the cut itself and a tween clock that is already multiplied is what
+        // finishes them out from under that wait.
+        let hold = CUT_GATE.engage();
+        log_cut_gate_hold(hold);
+
+        if CENSUS_ON.load(atomic::Ordering::Relaxed) {
             CUTT_PLAY_TRAINING_CUT.count();
-        open_cut_run();
+            open_cut_run();
+        }
 
         // The coroutine the game just built is the state machine of the whole cut, and the values it captured
         // are the ones the game computed for this cut. They are read after the original ran, and the object is
         // handed back exactly as it came (CutStateProbe).
         let coroutine = get_orig_fn!(TrainingCutt_PlayTrainingCut, PlayTrainingCutFn)(this, info);
-        super::CutStateProbe::note_play_training_cut(coroutine);
+
+        if CENSUS_ON.load(atomic::Ordering::Relaxed) {
+            super::CutStateProbe::note_play_training_cut(coroutine);
+        }
 
         coroutine
     }
@@ -2216,8 +2384,13 @@ def_detour! {
 
 def_detour! {
     TrainingCutt_PlayScenarioTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
+        let hold = CUT_GATE.engage();
+        log_cut_gate_hold(hold);
+
+        if CENSUS_ON.load(atomic::Ordering::Relaxed) {
             CUTT_PLAY_SCENARIO_TRAINING_CUT.count();
-        open_cut_run();
+            open_cut_run();
+        }
 
         get_orig_fn!(TrainingCutt_PlayScenarioTrainingCut, PlayTrainingCutFn)(this, info)
     }
@@ -2944,17 +3117,30 @@ pub(crate) fn class_for_label(image: *const Il2CppImage, label: &str) -> Option<
 }
 
 pub fn init(umamusume: *const Il2CppImage) {
-    if !Hachimi::instance().config.load().debug_mode {
+    let debug_mode = Hachimi::instance().config.load().debug_mode;
+
+    // The gate's pair is resolved and armed before the debug gate returns: the bound it keeps sits on a
+    // lever this fork owns, and a player who has no probe installed still has that lever turned on. The
+    // class lookup is the one the census below reuses, so the two halves still resolve the same class the
+    // scaling modules resolved.
+    let cutt_controller = class_for_label(umamusume, "Gallop.SingleModeMainTrainingCuttController");
+    let gate_doors = arm_cut_gate(cutt_controller);
+
+    if !debug_mode {
+        if gate_doors > 0 {
+            info!("Cutt gate: ui clock held at 1.0 while a training cut plays, armed on {gate_doors} of 3 doors");
+        }
+
         return;
     }
 
+    CENSUS_ON.store(true, atomic::Ordering::Release);
     let _ = START.set(Instant::now());
 
     let cut_in_helper = class_for_label(umamusume, "Gallop.SingleModeTrainingCutInHelper");
     let timeline = class_for_label(umamusume, "Gallop.CutIn.Cutt.CutInTimelineController");
     let cut_status = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatus");
     let cut_status_frame = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatusFrame");
-    let cutt_controller = class_for_label(umamusume, "Gallop.SingleModeMainTrainingCuttController");
     let plate_ui = class_for_label(umamusume, "Gallop.TrainingParamChangeUI");
     let hp_gauge = class_for_label(umamusume, "Gallop.SingleModeMainViewHpGauge");
     let main_view = class_for_label(umamusume, "Gallop.SingleModeMainViewController");
@@ -2989,7 +3175,9 @@ pub fn init(umamusume: *const Il2CppImage) {
     }
 
     let mut missing: Vec<&str> = Vec::new();
-    let mut installed = 0usize;
+    // The gate's pair is already armed by the time the census is armed, so it counts here too: the totals
+    // line answers how many of the doors this module measures are live in the build the run used.
+    let mut installed = gate_doors;
 
     // Instance candidates go through the same matcher the scaling hooks use: the dumped parameter
     // types, the return type, the generic check, and reference flags. Nothing is installed on a name
@@ -3156,14 +3344,15 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(cutt_controller, TrainingCutt_UpdateTrainingCutIn, "UpdateTrainingCutIn", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::UpdateTrainingCutIn");
     probe!(cutt_controller, TrainingCutt_FixedUpdateTrainingCutIn, "FixedUpdateTrainingCutIn", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::FixedUpdateTrainingCutIn");
     probe!(cutt_controller, TrainingCutt_LateUpdateTrainingCutIn, "LateUpdateTrainingCutIn", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::LateUpdateTrainingCutIn");
-    probe!(cutt_controller, TrainingCutt_PlayTrainingCut, "PlayTrainingCut", ONE_INFO, CLASS, "SingleModeMainTrainingCuttController::PlayTrainingCut");
-    probe!(cutt_controller, TrainingCutt_PlayScenarioTrainingCut, "PlayScenarioTrainingCut", ONE_INFO, CLASS, "SingleModeMainTrainingCuttController::PlayScenarioTrainingCut");
+    // The three doors `arm_cut_gate` already armed above the debug gate are not armed a second time here:
+    // `PlayTrainingCut` and `PlayScenarioTrainingCut` open a cut run and `CleanUpCutt` closes one, and the
+    // ui clock hold they carry has to stand in a build with no probe installed. Their counting and the run
+    // clocks still run in the same wrappers, guarded by `CENSUS_ON`.
     probe!(cutt_controller, TrainingCutt_PlayTrainingSaboriAsync, "PlayTrainingSaboriAsync", ONE_ID, CLASS, "SingleModeMainTrainingCuttController::PlayTrainingSaboriAsync");
     probe!(cutt_controller, TrainingCutt_PlayTrainingCutEndAsync, "PlayTrainingCutEndAsync", ID_AND_FLAGS, CLASS, "SingleModeMainTrainingCuttController::PlayTrainingCutEndAsync");
     probe!(cutt_controller, TrainingCutt_TrainingAsync, "TrainingAsync", ONE_ID, CLASS, "SingleModeMainTrainingCuttController::TrainingAsync");
     probe!(cutt_controller, TrainingCutt_PlayInTrainingStatus, "PlayInTrainingStatus", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::PlayInTrainingStatus");
     probe!(cutt_controller, TrainingCutt_PlayOutTrainingStatus, "PlayOutTrainingStatus", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::PlayOutTrainingStatus");
-    probe!(cutt_controller, TrainingCutt_CleanUpCutt, "CleanUpCutt", NO_PARAMS, VOID, "SingleModeMainTrainingCuttController::CleanUpCutt");
     generic_probe!(cutt_controller, TrainingCutt_IsValidTag, "IsValidTag", RESULT_AND_LIST, BOOL, "SingleModeMainTrainingCuttController::IsValidTag");
 
     // The friendship door (A28). `PlayCutIn` and the static `IsValidTag` are the two places a tag cut-in is
@@ -4047,5 +4236,59 @@ mod tests {
 
         assert!(line.contains("a training cut run has been open for 61000 ms"), "{line}");
         assert!(line.contains("Time.timeScale reads unread"), "{line}");
+    }
+
+    // Item 106: the hold that keeps `ui_animation_scale` off the tween channel while a training cut plays.
+    // The bound is the part a test can prove, because every stalled session measured so far (runs 52, 53
+    // and 56) is one where `CleanUpCutt` was never called at all, so a hold that only that door could end
+    // would leave the lever off for the rest of the day.
+    #[test]
+    fn a_cut_gate_hold_ends_at_its_tick_bound_when_the_close_door_never_arrives() {
+        let gate = CutGate::new();
+
+        assert!(!gate.engaged(), "a gate nobody opened is already holding the ui clock off");
+        assert_eq!(gate.engage(), 1, "the first hold of a session is not counted as the first");
+
+        for _ in 0..CUT_GATE_HOLD_TICKS - 1 {
+            assert_eq!(gate.tick(), None, "the hold ended before its bound");
+        }
+
+        assert!(gate.engaged(), "the hold let go of the ui clock early");
+        assert_eq!(gate.tick(), Some(CUT_GATE_HOLD_TICKS), "the hold never ended on its own clock");
+        assert!(!gate.engaged(), "an expired hold still has the ui clock off");
+        assert_eq!(gate.tick(), None, "a closed hold is still counting ticks");
+    }
+
+    #[test]
+    fn a_close_door_ends_a_cut_gate_hold_long_before_its_bound() {
+        let gate = CutGate::new();
+
+        gate.engage();
+        gate.release();
+
+        assert!(!gate.engaged(), "the close door let the hold run on");
+        assert_eq!(gate.tick(), None, "a cut the game cleaned up still took a hold");
+    }
+
+    #[test]
+    fn the_next_cut_rearms_the_cut_gate_clock() {
+        let gate = CutGate::new();
+
+        gate.engage();
+
+        for _ in 0..CUT_GATE_HOLD_TICKS / 2 {
+            gate.tick();
+        }
+
+        assert_eq!(gate.engage(), 2, "the second hold was counted as the first");
+        assert!(gate.engaged());
+
+        // The clock restarts with the cut, so a hold that expired while the game was waiting for a tap
+        // does not shorten the one that follows it.
+        for _ in 0..CUT_GATE_HOLD_TICKS - 1 {
+            assert_eq!(gate.tick(), None, "the previous cut's ticks were carried into this one");
+        }
+
+        assert_eq!(gate.tick(), Some(CUT_GATE_HOLD_TICKS));
     }
 }

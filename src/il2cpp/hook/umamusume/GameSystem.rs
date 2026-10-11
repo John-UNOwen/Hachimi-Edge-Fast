@@ -88,6 +88,10 @@ def_detour! {
         crate::il2cpp::hook::UnityEngine_CoreModule::Time::apply_if_dirty();
         crate::il2cpp::hook::umamusume::AnimationSpeed::apply_if_dirty();
         crate::il2cpp::hook::umamusume::StoryTimelineController::engage_high_speed_mode();
+        // The ui clock hold a training cut is keeping has to age on a clock this fork owns, because the
+        // game's own close door is exactly the one a stalled cut never reaches. One atomic load on a tick
+        // with nothing held.
+        super::TrainingCuttProbe::tick_cut_gate();
         super::StoryFrameProbe::report_if_due();
         // The training cut-in measurement reports on the same tick and on the same quiet path rule.
         super::TrainingCuttProbe::report_if_due();
