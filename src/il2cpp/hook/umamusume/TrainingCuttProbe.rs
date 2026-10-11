@@ -3003,6 +3003,12 @@ pub fn init(umamusume: *const Il2CppImage) {
     unsafe {
         if let Some(class) = flash_player {
             FLASH_LAST_MOTION_SPEED_FIELD = get_field_from_name(class, c"_lastMotionSpeed");
+
+            // The accessor answers a missing field with a zero, and a run that reads 0.0 cannot tell that from a
+            // field the game holds at 0.0. Saying which one it is costs one line at init.
+            if FLASH_LAST_MOTION_SPEED_FIELD.is_null() {
+                info!("Cutt probe: FlashPlayer has no _lastMotionSpeed field, so every speed read on that door is a zero this build never read");
+            }
         }
     }
 

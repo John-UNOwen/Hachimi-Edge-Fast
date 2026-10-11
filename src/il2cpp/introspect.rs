@@ -120,6 +120,17 @@ const FULL_DUMP_NAMES: &[&str] = &[
     "AnMotion", "AnRoot",
 ];
 
+/// A field whose held class the walk cannot reach by name. `AnimateToUnity.AnMotion` and `AnRoot` are in no image
+/// `IMAGE_FILTERS` matches, and no loaded image carries a name that would say so (`introspect.log` names 102 images
+/// out of scope, none of them AnimateToUnity), so an allowlist entry for them can never fire. A field type is a
+/// pointer into the metadata that no image filter hides, and an `Il2CppClass` carries its own image, so the walk
+/// reaches the class from the class it already dumped and prints the image it came from (A8).
+const REACHED_VIA_FIELDS: &[(&str, &str)] = &[
+    ("Gallop.FlashPlayer", "_motion"),
+    ("Gallop.FlashPlayer", "_root"),
+    ("Gallop.FlashActionPlayer", "_flashPlayer"),
+];
+
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
 /// is bounded, so the log grows by these classes and not by whatever else matches a filter. One simple name can
 /// match in more than one image, so 44 names spent 48 blocks and 46 names spent the whole 56 block budget on the
@@ -225,6 +236,11 @@ fn fold_dump_rules(hash: &mut u64) {
     for filter in FIELD_FILTERS { fold(hash, filter); }
     fold(hash, "|");
     for name in FULL_DUMP_NAMES { fold(hash, name); }
+    fold(hash, "|");
+    for (holder, field_name) in REACHED_VIA_FIELDS {
+        fold(hash, holder);
+        fold(hash, field_name);
+    }
 
     fold(hash, &MAX_HITS.to_string());
     fold(hash, &MAX_FULL_CLASSES.to_string());
@@ -705,6 +721,7 @@ fn scan_class<W: Write>(
 
 fn dump_inner<W: Write>(w: &mut W, scope: &Scope) -> Counts {
     let mut counts = Counts { classes: 0, methods: 0, fields: 0, allowlisted: 0, skipped_full: 0 };
+    let mut reached: Vec<*mut Il2CppClass> = Vec::new();
 
     if let Some(reason) = scope.missing {
         let _ = writeln!(w, "{reason}");
@@ -726,6 +743,10 @@ fn dump_inner<W: Write>(w: &mut W, scope: &Scope) -> Counts {
 
             let allowlisted = FULL_DUMP_NAMES.iter().any(|allowed| allowed.eq_ignore_ascii_case(&name));
 
+            if REACHED_VIA_FIELDS.iter().any(|(holder, _)| *holder == label) {
+                collect_field_classes(klass as *mut Il2CppClass, &label, &mut reached);
+            }
+
             if !scan_class(w, klass as *mut Il2CppClass, &label, &mut counts, allowlisted) {
                 let _ = writeln!(w, "\n[truncated at {MAX_HITS} matches]");
                 return counts;
@@ -733,7 +754,65 @@ fn dump_inner<W: Write>(w: &mut W, scope: &Scope) -> Counts {
         }
     }
 
+    // The classes those fields hold, printed after the images that name them. Their image is outside the scope, so
+    // this is the only route to their surface, and the image name goes into the log so the scope can be told about
+    // it once it is known instead of guessed at.
+    for class in reached {
+        if counts.allowlisted >= MAX_ALLOWLIST_CLASSES {
+            break;
+        }
+
+        let name = as_string(il2cpp_class_get_name(class)).unwrap_or_default();
+        let namespace = as_string(il2cpp_class_get_namespace(class)).unwrap_or_default();
+        let label = if namespace.is_empty() { name } else { format!("{namespace}.{name}") };
+        let image_name = as_string(il2cpp_image_get_name(il2cpp_class_get_image(class))).unwrap_or_default();
+
+        info!("introspect: {label} reached from a field of a class in scope, its image is {image_name}");
+        counts.allowlisted += 1;
+
+        if !dump_full_class(w, class, &label, &mut counts) {
+            let _ = writeln!(w, "\n[truncated at {MAX_HITS} matches]");
+            return counts;
+        }
+    }
+
     counts
+}
+
+/// The class held by each field named in `REACHED_VIA_FIELDS` on one in-scope class. Deduplicated by address,
+/// because the same class is held by more than one field and a surface printed twice reads as two classes.
+fn collect_field_classes(klass: *mut Il2CppClass, holder: &str, reached: &mut Vec<*mut Il2CppClass>) {
+    let mut iter: *mut c_void = ptr::null_mut();
+
+    loop {
+        let field = il2cpp_class_get_fields(klass, &mut iter);
+        if field.is_null() {
+            break;
+        }
+
+        let name = match as_string(unsafe { (*field).name }) {
+            Some(name) => name,
+            None => continue
+        };
+
+        if !REACHED_VIA_FIELDS.iter().any(|(owner, field_name)| *owner == holder && *field_name == name) {
+            continue;
+        }
+
+        let field_type = il2cpp_field_get_type(field);
+        if field_type.is_null() {
+            continue;
+        }
+
+        let class = il2cpp_type_get_class_or_element_class(field_type);
+        if class.is_null() {
+            continue;
+        }
+
+        if !reached.contains(&class) {
+            reached.push(class);
+        }
+    }
 }
 
 /// Write `<data dir>/introspect.log` when `debug_mode` is on and no current dump of this
