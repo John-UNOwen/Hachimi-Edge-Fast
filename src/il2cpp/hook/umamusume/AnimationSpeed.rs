@@ -3214,9 +3214,10 @@ fn install_getters(umamusume: *const Il2CppImage) {
     }
 }
 
-// The tag cut-in player's own `static readonly` cut-in constants (`introspect.log:23818`), read once at init so a
-// run knows whether the effect's length is a constant this fork could rewrite or a cue length it cannot reach.
-// Read only; nothing on this page writes a static.
+// The tag cut-in player's own `static readonly` cut-in constants, read once at init so a run knows whether the
+// effect's length is a constant this fork could rewrite or a cue length it cannot reach. This client spells them
+// `CUT_IN_MIN [static const int]` and `CUT_IN_MAX [public static const int]` (`introspect.log:23816`), so the read
+// takes the type the field actually reports instead of assuming a float. Read only; nothing here writes a static.
 unsafe fn note_tag_cut_statics(class: *mut Il2CppClass) {
     for name in [c"CUT_IN_MIN", c"CUT_IN_MAX"] {
         let field = il2cpp_class_get_field_from_name(class, name.as_ptr());
@@ -3228,15 +3229,26 @@ unsafe fn note_tag_cut_statics(class: *mut Il2CppClass) {
 
         let field_type = il2cpp_field_get_type(field);
 
-        if field_type.is_null() || (*field_type).type_() != Il2CppTypeEnum_IL2CPP_TYPE_R4 {
-            debug!("AnimationSpeed: tag cut-in constant {} is not a float this build can read", name.to_string_lossy());
+        if field_type.is_null() {
+            debug!("AnimationSpeed: tag cut-in constant {} has no type this build can read", name.to_string_lossy());
             continue;
         }
 
-        let mut value: f32 = 0.0;
-        il2cpp_field_static_get_value(field, &mut value as *mut f32 as *mut c_void);
+        let type_enum = (*field_type).type_();
 
-        debug!("AnimationSpeed: tag cut-in constant {} reads {}", name.to_string_lossy(), value);
+        if type_enum == Il2CppTypeEnum_IL2CPP_TYPE_R4 {
+            let mut value: f32 = 0.0;
+            il2cpp_field_static_get_value(field, &mut value as *mut f32 as *mut c_void);
+
+            debug!("AnimationSpeed: tag cut-in constant {} reads {} as a float", name.to_string_lossy(), value);
+        } else if type_enum == Il2CppTypeEnum_IL2CPP_TYPE_I4 {
+            let mut value: i32 = 0;
+            il2cpp_field_static_get_value(field, &mut value as *mut i32 as *mut c_void);
+
+            debug!("AnimationSpeed: tag cut-in constant {} reads {} as an int", name.to_string_lossy(), value);
+        } else {
+            debug!("AnimationSpeed: tag cut-in constant {} is a type this build does not read", name.to_string_lossy());
+        }
     }
 }
 

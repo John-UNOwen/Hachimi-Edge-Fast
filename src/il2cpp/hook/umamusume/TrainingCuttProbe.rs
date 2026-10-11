@@ -91,6 +91,14 @@ const INTERVAL_FRAME_FLAG_AND_ACTION: &[Il2CppTypeEnum] = &[R4, I4, BOOL, CLASS]
 // and `Skip/5 -> void(int, int, int, int, int)`, nine and five plain arguments and no struct among them (A5).
 const FRAME_PLAY_IN_ARGS: &[Il2CppTypeEnum] = &[I4, I4, I4, I4, I4, I4, R4, I4, BOOL];
 const FIVE_INTS: &[Il2CppTypeEnum] = &[I4, I4, I4, I4, I4];
+// `PlayMemberCutin/3 -> static class<Gallop.FlashPlayer>(generic<List<int>>, class<Transform>, class<Action>)`,
+// `PlayAoharuSoulCutin/4 -> static class<FlashPlayer>(int, class<Transform>, class<Action>, class<Action>)` and
+// `PlayOutMemberCutin/3 -> static void(class<FlashPlayer>, int, class<Action>)` (`introspect.log:25120` to
+// `25123`): the doors that hand a `FlashPlayer` to a support member cut-in, which is what a friendship cut-in is.
+// No struct travels through any of them that A5 has not already cleared (A5, C48).
+const MEMBER_CUTIN_ARGS: &[Il2CppTypeEnum] = &[CLASS, CLASS, CLASS];
+const SOUL_CUTIN_ARGS: &[Il2CppTypeEnum] = &[I4, CLASS, CLASS, CLASS];
+const PLAYER_INDEX_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, I4, CLASS];
 // `InitializeFlash/4 -> void(generic<List<ChangeParameterInfo>>, float, bool, class<Canvas>)` and
 // `PlayParameterChangeAsync/2 -> IEnumerator(generic<List<ChangeParameterInfo>>, float)`. Both are
 // reference plus float doors, and the generic half only resolves through the generic matcher (C48).
@@ -439,6 +447,19 @@ static STATUS_FRAME_SKIP: CutProbe = CutProbe::counted("SingleModeMainViewTraini
 static TAG_PLAYER_STOP_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect()");
 static TAG_PLAYER_DESTROY_BUTTON_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect()");
 static TAG_PLAYER_PLAY_SUCCESS_TEXT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect()");
+static TAG_PLAYER_DESTROY_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::DestroyLineEffect()");
+// The doors that hand a `FlashPlayer` to a support member cut-in. Run 41 proved the tag cut-in's `Animator` is not
+// what paces its 1.2 s effect leg, and a friendship cut-in is built on the object these doors return.
+static SUPPORT_MEMBER_PLAY_CUTIN: CutProbe = CutProbe::counted("TrainingParamChangeSupportMemberA2U::PlayMemberCutin(ids, parent, action)");
+static SUPPORT_MEMBER_PLAY_SOUL_CUTIN: CutProbe = CutProbe::counted("TrainingParamChangeSupportMemberA2U::PlayAoharuSoulCutin(index, parent, action, action)");
+static SUPPORT_MEMBER_PLAY_SP_SOUL_CUTIN: CutProbe = CutProbe::counted("TrainingParamChangeSupportMemberA2U::PlayAoharuSpSoulCutin(index, parent, action, action)");
+static SUPPORT_MEMBER_PLAY_OUT_CUTIN: CutProbe = CutProbe::counted("TrainingParamChangeSupportMemberA2U::PlayOutMemberCutin(player, index, action)");
+static TAG_PLAYER_SET_RESULT_FLASH: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::SetResultFlashPlayer(player)");
+// The `FlashPlayer` the last member cut-in door handed back, and the one the tag cut-in player was set up with.
+// The addresses are compared in `note_flash_player_pair`, which is bounded so this stays a census.
+static SUPPORT_MEMBER_LAST_FLASH_PLAYER: AtomicUsize = AtomicUsize::new(0);
+static TAG_PLAYER_RESULT_FLASH_PLAYER: AtomicUsize = AtomicUsize::new(0);
+static FLASH_PLAYER_MATCH_LOGGED: AtomicUsize = AtomicUsize::new(0);
 // The friendship split v1 could not make. `IsValidTag` answers whether the cards a training produced
 // carry a friendship, and the tag cut-in player is the door a friendship cut-in is played through.
 static TAG_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::IsValidTag(result, cards)");
@@ -446,7 +467,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 81] = [
+static PROBES: [&CutProbe; 87] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -503,6 +524,12 @@ static PROBES: [&CutProbe; 81] = [
     &TAG_PLAYER_STOP_LINE_EFFECT,
     &TAG_PLAYER_DESTROY_BUTTON_EFFECT,
     &TAG_PLAYER_PLAY_SUCCESS_TEXT,
+    &TAG_PLAYER_DESTROY_LINE_EFFECT,
+    &SUPPORT_MEMBER_PLAY_CUTIN,
+    &SUPPORT_MEMBER_PLAY_SOUL_CUTIN,
+    &SUPPORT_MEMBER_PLAY_SP_SOUL_CUTIN,
+    &SUPPORT_MEMBER_PLAY_OUT_CUTIN,
+    &TAG_PLAYER_SET_RESULT_FLASH,
     &HP_GAUGE_PLAY_IN,
     &HP_GAUGE_PLAY_VALUE,
     &HP_GAUGE_PLAY_OUT,
@@ -2143,6 +2170,105 @@ def_detour! {
     }
 }
 
+def_detour! {
+    TagCutInPlayer_DestroyLineEffect(this: *mut Il2CppObject) {
+            TAG_PLAYER_DESTROY_LINE_EFFECT.count();
+
+        get_orig_fn!(TagCutInPlayer_DestroyLineEffect, CuttVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_DestroyLineEffect, CuttVoidFn)(this)
+    }
+}
+
+type SetResultFlashPlayerFn = extern "C" fn(this: *mut Il2CppObject, player: *mut Il2CppObject);
+// `SetResultFlashPlayer/1 -> void(class<Gallop.FlashPlayer>)` (`introspect.log:23812`): the tag cut-in player is
+// handed the flash player it plays its cut-in on. The address is kept so a run can tell whether it is the same
+// object the support member cut-in door returned, which is what the next lever has to be written on.
+def_detour! {
+    TagCutInPlayer_SetResultFlashPlayer(this: *mut Il2CppObject, player: *mut Il2CppObject) {
+            get_orig_fn!(TagCutInPlayer_SetResultFlashPlayer, SetResultFlashPlayerFn)(this, player);
+
+        TAG_PLAYER_SET_RESULT_FLASH.count();
+        TAG_PLAYER_RESULT_FLASH_PLAYER.store(player as usize, atomic::Ordering::Relaxed);
+        note_flash_player_pair("SetResultFlashPlayer");
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_SetResultFlashPlayer, SetResultFlashPlayerFn)(this, player)
+    }
+}
+
+// Said a few times per run: the address the last member cut-in door handed back, and the address the tag cut-in
+// player was set up with. Equal says the friendship cut-in's effect runs on the object `PlayMemberCutin` made;
+// different says the two effects are separate objects and the lever has to reach the tag player's own.
+fn note_flash_player_pair(door: &str) {
+    let seen = FLASH_PLAYER_MATCH_LOGGED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+    if seen <= PROBE_DETAIL_LIMIT {
+        let member = SUPPORT_MEMBER_LAST_FLASH_PLAYER.load(atomic::Ordering::Relaxed);
+        let tag = TAG_PLAYER_RESULT_FLASH_PLAYER.load(atomic::Ordering::Relaxed);
+        let tail = if member != 0 && member == tag { " (the same object)" } else { "" };
+
+        info!("Cutt probe: {door} flash player pair: member cutin {member:x}, tag cut-in {tag:x}{tail}");
+    }
+}
+
+type MemberCutinFn = extern "C" fn(ids: *mut Il2CppObject, parent: *mut Il2CppObject, on_end: *mut Il2CppObject) -> *mut Il2CppObject;
+// `PlayMemberCutin/3 -> static class<Gallop.FlashPlayer>(generic<List<int>:24B>, class<Transform>, class<Action>)`
+// (`introspect.log:25120`). The generic half is a pointer this wrapper never reads through (C48) and the door is
+// observed only: the ids list, the parent, the callback and the returned player all go back untouched.
+def_detour! {
+    SupportMemberA2U_PlayMemberCutin(ids: *mut Il2CppObject, parent: *mut Il2CppObject, on_end: *mut Il2CppObject) -> *mut Il2CppObject {
+            let player = get_orig_fn!(SupportMemberA2U_PlayMemberCutin, MemberCutinFn)(ids, parent, on_end);
+
+        SUPPORT_MEMBER_PLAY_CUTIN.count();
+        SUPPORT_MEMBER_LAST_FLASH_PLAYER.store(player as usize, atomic::Ordering::Relaxed);
+
+        player
+    }
+}
+
+type SoulCutinFn = extern "C" fn(index: i32, parent: *mut Il2CppObject, first: *mut Il2CppObject, second: *mut Il2CppObject) -> *mut Il2CppObject;
+// `PlayAoharuSoulCutin/4 -> static class<FlashPlayer>(int, class<Transform>, class<Action>, class<Action>)`
+// (`introspect.log:25121`) and the same shape next door at `25122`: four plain int and reference arguments, which
+// is what makes declaring the wrapper safe (A5).
+def_detour! {
+    SupportMemberA2U_PlayAoharuSoulCutin(index: i32, parent: *mut Il2CppObject, first: *mut Il2CppObject, second: *mut Il2CppObject) -> *mut Il2CppObject {
+            let player = get_orig_fn!(SupportMemberA2U_PlayAoharuSoulCutin, SoulCutinFn)(index, parent, first, second);
+
+        SUPPORT_MEMBER_PLAY_SOUL_CUTIN.count();
+        SUPPORT_MEMBER_LAST_FLASH_PLAYER.store(player as usize, atomic::Ordering::Relaxed);
+
+        player
+    }
+}
+
+def_detour! {
+    SupportMemberA2U_PlayAoharuSpSoulCutin(index: i32, parent: *mut Il2CppObject, first: *mut Il2CppObject, second: *mut Il2CppObject) -> *mut Il2CppObject {
+            let player = get_orig_fn!(SupportMemberA2U_PlayAoharuSpSoulCutin, SoulCutinFn)(index, parent, first, second);
+
+        SUPPORT_MEMBER_PLAY_SP_SOUL_CUTIN.count();
+        SUPPORT_MEMBER_LAST_FLASH_PLAYER.store(player as usize, atomic::Ordering::Relaxed);
+
+        player
+    }
+}
+
+type OutMemberCutinFn = extern "C" fn(player: *mut Il2CppObject, index: i32, on_end: *mut Il2CppObject);
+// `PlayOutMemberCutin/3 -> static void(class<Gallop.FlashPlayer>, int, class<Action>)` (`introspect.log:25123`),
+// the cut-out half, which takes the player back as an argument so the address it is handed is counted too.
+def_detour! {
+    SupportMemberA2U_PlayOutMemberCutin(player: *mut Il2CppObject, index: i32, on_end: *mut Il2CppObject) {
+            get_orig_fn!(SupportMemberA2U_PlayOutMemberCutin, OutMemberCutinFn)(player, index, on_end);
+
+        SUPPORT_MEMBER_PLAY_OUT_CUTIN.count();
+        SUPPORT_MEMBER_LAST_FLASH_PLAYER.store(player as usize, atomic::Ordering::Relaxed);
+    }
+    bail {
+                get_orig_fn!(SupportMemberA2U_PlayOutMemberCutin, OutMemberCutinFn)(player, index, on_end)
+    }
+}
+
 type StaticIsValidTagFn = extern "C" fn(cards: *mut Il2CppObject) -> bool;
 // Dumped: `IsValidTag/1 -> static bool(generic<List<SupportCardData>>)`. A static target has no hidden
 // `this`, so this wrapper declares only the dumped argument (A3).
@@ -2442,6 +2568,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     let hp_gauge = class_for_label(umamusume, "Gallop.SingleModeMainViewHpGauge");
     let main_view = class_for_label(umamusume, "Gallop.SingleModeMainViewController");
     let tag_player = class_for_label(umamusume, "Gallop.SingleModeMainViewTagTrainingCutInPlayer");
+    let support_member = class_for_label(umamusume, "Gallop.TrainingParamChangeSupportMemberA2U");
     // The class that owns the stat change presentation for a training turn: its coroutine
     // `PlayParameterChangeAsync/2` is the level above the plate list door.
     let story_view = class_for_label(umamusume, "Gallop.StoryViewController");
@@ -2634,6 +2761,16 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(tag_player, TagCutInPlayer_StopLineEffect, "StopLineEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect");
     probe!(tag_player, TagCutInPlayer_DestroyButtonEffect, "DestroyButtonEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect");
     probe!(tag_player, TagCutInPlayer_PlaySuccessTextEffect, "PlaySuccessTextEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect");
+    probe!(tag_player, TagCutInPlayer_DestroyLineEffect, "DestroyLineEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::DestroyLineEffect");
+    probe!(tag_player, TagCutInPlayer_SetResultFlashPlayer, "SetResultFlashPlayer", ONE_INFO, VOID, "SingleModeMainViewTagTrainingCutInPlayer::SetResultFlashPlayer");
+
+    // The doors that hand a `FlashPlayer` to a support member cut-in (`introspect.log:25120` to `25123`). Run 41
+    // proved the tag cut-in's `Animator` is not what paces its 1.2 s effect leg, and a friendship cut-in is built
+    // on the object these doors return. Observed only: every argument and the returned player go back untouched.
+    static_generic_probe!(support_member, SupportMemberA2U_PlayMemberCutin, "PlayMemberCutin", MEMBER_CUTIN_ARGS, CLASS, "TrainingParamChangeSupportMemberA2U::PlayMemberCutin");
+    static_probe!(support_member, SupportMemberA2U_PlayAoharuSoulCutin, "PlayAoharuSoulCutin", SOUL_CUTIN_ARGS, CLASS, "TrainingParamChangeSupportMemberA2U::PlayAoharuSoulCutin");
+    static_probe!(support_member, SupportMemberA2U_PlayAoharuSpSoulCutin, "PlayAoharuSpSoulCutin", SOUL_CUTIN_ARGS, CLASS, "TrainingParamChangeSupportMemberA2U::PlayAoharuSpSoulCutin");
+    static_probe!(support_member, SupportMemberA2U_PlayOutMemberCutin, "PlayOutMemberCutin", PLAYER_INDEX_AND_ACTION, VOID, "TrainingParamChangeSupportMemberA2U::PlayOutMemberCutin");
 
     // Run 9's one install failure: the parameter is a generic instantiation, which the exact walk has never
     // answered (C48). The wrapper declares a pointer for it and never reads through it.
@@ -3353,6 +3490,12 @@ mod tests {
             "SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect()",
             "SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect()",
             "SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect()",
+            "SingleModeMainViewTagTrainingCutInPlayer::DestroyLineEffect()",
+            "SingleModeMainViewTagTrainingCutInPlayer::SetResultFlashPlayer(player)",
+            "TrainingParamChangeSupportMemberA2U::PlayMemberCutin(ids, parent, action)",
+            "TrainingParamChangeSupportMemberA2U::PlayAoharuSoulCutin(index, parent, action, action)",
+            "TrainingParamChangeSupportMemberA2U::PlayAoharuSpSoulCutin(index, parent, action, action)",
+            "TrainingParamChangeSupportMemberA2U::PlayOutMemberCutin(player, index, action)",
         ] {
             assert!(labels.contains(&want), "the census has no door for {want}");
         }

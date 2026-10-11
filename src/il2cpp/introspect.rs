@@ -107,13 +107,20 @@ const FULL_DUMP_NAMES: &[&str] = &[
     "<InitializeEachPlayIn>d__14", "<PlayTrainingTipsEventWipe>d__52", "<PlayGaugeUpAnimation>d__33",
     "<PlayGaugeUpAnimation>d__38", "<CoroutineGaugeUpAnimation>d__21", "<CoroutineGaugeUpAnimation>d__43",
     "<CoroutineAppendParamUpResultSequence>d__8", "<PlayResultCutinCoroutine>d__46",
+    // The object a training cut-in effect is built on. Run 41 proved the tag cut-in's `Animator` is not what paces
+    // its 1.2 s effect leg, and the doors that hand out the effect return a `Gallop.FlashPlayer`
+    // (`PlayMemberCutin/3 -> static class<Gallop.FlashPlayer>(...)`, `introspect.log:25120`). No dump has ever
+    // printed that class's own surface, and a lever on a guessed signature measures nothing (C47), so the class the
+    // next lever has to be written against gets its own block, along with the member cut-in door's owner and the
+    // plate class whose `TYPEWRITE_DURATION` / `NEXT_WAIT_DURATION` / `_typewriteDuration` the cascade reads.
+    "FlashPlayer", "FlashActionPlayer", "TrainingParamChangeSupportMemberA2U", "TrainingParamChangePlate",
 ];
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
-/// is bounded, so the log grows by these classes and not by whatever else matches a filter. It is now the
-/// whole list, so the budget carries a little headroom: a client that renames a state machine takes the
-/// slot rather than crowding a name this fork is measured against out.
-const MAX_ALLOWLIST_CLASSES: usize = 44;
+/// is bounded, so the log grows by these classes and not by whatever else matches a filter. The budget
+/// carries headroom over the list: a client that renames a state machine takes the slot rather than crowding a
+/// name this fork is measured against out.
+const MAX_ALLOWLIST_CLASSES: usize = 48;
 
 /// Shape of the dump itself, stamped into the file. Bump it when the log gains or loses a
 /// kind of line so an older file fails the comparison and is rewritten rather than reused as
