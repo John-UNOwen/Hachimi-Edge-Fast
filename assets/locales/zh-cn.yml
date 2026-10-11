@@ -212,6 +212,7 @@ config_editor:
   story_speed: "剧情过场动画速度"
   training_plate_speed: "Training stat plate animation speed"
   training_cut_speed: "Training cut-in animation speed"
+  training_tag_cut_speed: "训练标签 cut-in 效果速度"
   auto_skip_result_screens: "自动跳过结算画面动画"
   high_speed_settings: "将剧情与训练的高速设置提升到游戏最大值"
   story_high_speed_mode: "将剧情播放切换为游戏自身的高速模式"

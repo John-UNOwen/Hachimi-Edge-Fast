@@ -25,7 +25,7 @@ use crate::il2cpp::{
     api::{
         il2cpp_class_from_name, il2cpp_class_get_field_from_name, il2cpp_class_get_method_from_name,
         il2cpp_class_instance_size,
-        il2cpp_field_get_flags, il2cpp_field_get_type, il2cpp_field_is_literal,
+        il2cpp_field_get_flags, il2cpp_field_get_type, il2cpp_field_get_value_object, il2cpp_field_is_literal,
         il2cpp_field_static_get_value, il2cpp_field_static_set_value, il2cpp_method_get_param,
         il2cpp_method_get_return_type, il2cpp_type_get_class_or_element_class, il2cpp_type_get_name,
     },
@@ -319,6 +319,23 @@ static PLATE_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 // and this value is not measured on the ui clock (ledger item 77). Its own ceiling is
 // `MAX_TRAINING_CUT_TIME_SCALE`.
 static TRAINING_CUT_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+// The tag cut-in effect lever. Run 40 measured 1214 and 1223 ms between `PlayCutIn` and its `done` action
+// coming back as `PlayCutInOut`, which is the whole difference between a friendship cut (1931, 2239 ms) and a
+// tag answer cut (1430, 1365, 1965 ms) on the same arm, and nothing in this fork reaches that leg: the effect
+// is an `Animator` (`CreateLineEffect/1 -> Animator(class<Transform>)`, `_topLineAnimator`, `_bottomLineAnimator`,
+// `PlayLineEffect/0`), so there is no duration argument to shorten and no scale door to raise. This lever
+// writes the Animator's own speed, on the two doors that hand an Animator into the effect.
+static TAG_CUT_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+// `UnityEngine.Animator::set_speed(System.Single)`, resolved once out of `UnityEngine.AnimationModule.dll`, and
+// the two line animator fields of the tag cut-in player as `FieldInfo` addresses. A zero here means the lever
+// has nowhere to write, which is the same inert shape as a hook that never resolved (never call address 0).
+static ANIMATOR_SET_SPEED_ADDR: AtomicUsize = AtomicUsize::new(0);
+static ANIMATOR_GET_SPEED_ADDR: AtomicUsize = AtomicUsize::new(0);
+static TAG_CUT_TOP_ANIMATOR_FIELD: AtomicUsize = AtomicUsize::new(0);
+static TAG_CUT_BOTTOM_ANIMATOR_FIELD: AtomicUsize = AtomicUsize::new(0);
+// The first few writes are printed, so a run can tell "the lever is neutral" from "the Animator was not in hand"
+// from "the game never reached the door" (A4). Counted, not locked, because this door runs on the cut path.
+static TAG_CUT_WRITES_LOGGED: AtomicUsize = AtomicUsize::new(0);
 static STORY_FACTOR: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static TIME_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static UI_ANIMATION_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
@@ -427,6 +444,14 @@ pub const MAX_TIME_SCALE: f32 = 5.0;
 // config asking for one falls back to doing nothing instead of multiplying the game's own fast
 // forward down (C40).
 pub const MIN_TIME_SCALE: f32 = 1.0;
+
+// The ceiling on the speed this fork writes onto a training tag cut-in `Animator`. It is a rate on an animation
+// Unity advances on `Time.timeScale`, which this fork's write layer already holds raised, so the pair is priced
+// the way C58 prices the ui clock: the value written stops at `MAX_TWEEN_SPEED_PRODUCT` over the scale last
+// handed to Unity's setter, and at this ceiling, and never below the neutral 1.0. The ceiling is `MAX_TIME_SCALE`
+// because an Animator already playing at the game's own speed has no use for plate-lever speed, and because a
+// speed this fork writes is a request to play faster, not a request to skip frames.
+pub const MAX_TAG_CUT_ANIMATOR_SPEED: f32 = MAX_TIME_SCALE;
 
 // The ceiling on the training cut-in's own speed channel, stated rather than inherited from
 // `MAX_TIME_SCALE` (the decision A17 asks for before a lever sits on a value that is already above
@@ -773,6 +798,7 @@ pub fn plate_factor() -> f32 { f32::from_bits(PLATE_FACTOR.load(Ordering::Relaxe
 /// run 11 counted 220 calls of this door across a whole career, and the per frame door beside it
 /// (`CutInTimelineController::UpdateSpeed`) stays untouched.
 fn training_cut_factor() -> f32 { f32::from_bits(TRAINING_CUT_FACTOR.load(Ordering::Relaxed)) }
+fn tag_cut_factor() -> f32 { f32::from_bits(TAG_CUT_FACTOR.load(Ordering::Relaxed)) }
 
 // Most of Gallop's durations are `const`, which IL2CPP folds into the call sites, so
 // the value has no writable storage (see the init log). The methods that play the
@@ -1711,6 +1737,11 @@ fn mirror_config(config: &Config) {
     // is its neutral 1.0 and a hand edited config asking for 0.1 cannot turn a training cut into a slow motion
     // (C40). What it may raise that scale *to* is capped by `MAX_TRAINING_CUT_TIME_SCALE` in the door, not here.
     TRAINING_CUT_FACTOR.store(normalize_time_scale(config.training_cut_speed).to_bits(), Ordering::Release);
+    // The tag cut-in Animator lever takes the same clamp: it is a rate, so its floor is its neutral 1.0 and a
+    // hand edited config asking for 0.1 cannot slow a training cut-in down. What it may raise to is bounded in
+    // `tag_cut_animator_speed`, next to the write, because the bound reads the scale this layer put into
+    // `Time.timeScale`.
+    TAG_CUT_FACTOR.store(normalize_time_scale(config.training_tag_cut_speed).to_bits(), Ordering::Release);
     // Clamped here so neither story choice site divides by the delay itself: `CheckChoiceAutoTap`
     // runs while a choice is up and `GetTimeScaleByHighSpeedType` is a story path getter, so both
     // read this mirror instead of the config (C24).
@@ -2806,6 +2837,142 @@ def_detour! {
     }
 }
 
+/// The speed the tag cut-in lever writes onto an Animator, priced against the scale this layer last handed
+/// Unity's `Time.timeScale` setter. An Animator advances on that scale, so the lever and the scale multiply on
+/// one completion and `MAX_TWEEN_SPEED_PRODUCT` is the ceiling on the pair, the way C58 bounds the ui clock. At
+/// the neutral lever this returns 1.0, and 1.0 means "write nothing" at both doors.
+pub fn tag_cut_animator_speed() -> f32 {
+    let lever = tag_cut_factor();
+
+    if lever == 1.0 {
+        return 1.0;
+    }
+
+    let produced = f32::from_bits(TIME_SCALE_PRODUCED.load(Ordering::Relaxed)).max(1.0);
+    let pair_bound = (MAX_TWEEN_SPEED_PRODUCT / produced).max(1.0);
+
+    lever.max(1.0).min(MAX_TAG_CUT_ANIMATOR_SPEED).min(pair_bound)
+}
+
+type AnimatorGetSpeedFn = extern "C" fn(animator: *mut Il2CppObject) -> f32;
+type AnimatorSetSpeedFn = extern "C" fn(animator: *mut Il2CppObject, speed: f32);
+
+/// Reads the speed the Animator is actually at and writes only a higher one, because this lever is raise-only
+/// like the cut scale door: a cut-in Animator the game already put at 8.48 must not be pulled back to 4.0 by
+/// this fork. The read is also the measurement the friendship cut owes, since it says what the game set on the
+/// object the effect runs on. `None` is "nothing here to write on", which covers a null Animator and a door
+/// whose `get_speed` / `set_speed` pair never resolved.
+unsafe fn raise_animator_speed(animator: *mut Il2CppObject, target: f32) -> Option<(f32, bool)> {
+    let get_addr = ANIMATOR_GET_SPEED_ADDR.load(Ordering::Relaxed);
+    let set_addr = ANIMATOR_SET_SPEED_ADDR.load(Ordering::Relaxed);
+
+    if animator.is_null() || get_addr == 0 || set_addr == 0 {
+        return None;
+    }
+
+    let get_speed: AnimatorGetSpeedFn = std::mem::transmute(get_addr);
+    let current = get_speed(animator);
+
+    if !(current < target) {
+        return Some((current, false));
+    }
+
+    let set_speed: AnimatorSetSpeedFn = std::mem::transmute(set_addr);
+    set_speed(animator, target);
+
+    Some((current, true))
+}
+
+/// The Animator held in one of the tag cut-in player's line animator fields. A field that did not resolve at
+/// init reads as null here, and a null Animator is a no-op.
+unsafe fn read_line_animator(this: *mut Il2CppObject, field: usize) -> *mut Il2CppObject {
+    if this.is_null() || field == 0 {
+        return std::ptr::null_mut();
+    }
+
+    il2cpp_field_get_value_object(field as *mut FieldInfo, this)
+}
+
+// Named as `TrainingCuttProbe` names these doors, so a run can match the write lines to the census counts.
+pub const TAG_CUT_DOOR: &str = "SingleModeMainViewTagTrainingCutInPlayer.CreateLineEffect";
+pub const TAG_CUT_LINE_DOOR: &str = "SingleModeMainViewTagTrainingCutInPlayer.PlayLineEffect";
+const TAG_CUT_SLOT: usize = 14;
+const TAG_CUT_LINE_SLOT: usize = 15;
+
+// The first few writes on both doors are printed, then counted: at the neutral lever the line says so, with the
+// lever up it names the speed the Animator was at and whether the lever raised it, and a door the game never
+// reached prints nothing at all (A4).
+fn note_tag_cut_write(door: &str, slot: usize, current: Option<(f32, bool)>, target: f32) {
+    let (raw, wrote) = match current {
+        Some((current, wrote)) => (current, wrote),
+        None => (0.0, false),
+    };
+    let seen = TAG_CUT_WRITES_LOGGED.fetch_add(1, Ordering::Relaxed) + 1;
+
+    if seen <= HIT_DETAIL_LIMIT {
+        let tail = match current {
+            Some((_, true)) => " raised",
+            Some((_, false)) => " already at or above the lever",
+            None => " no Animator in hand",
+        };
+
+        debug!("AnimationSpeed: {door} call {seen}: Animator {raw} -> {target}{tail}");
+    }
+
+    hit(slot, door, raw, if wrote { target } else { raw });
+}
+
+type TagCutCreateLineEffectFn = extern "C" fn(this: *mut Il2CppObject, transform: *mut Il2CppObject) -> *mut Il2CppObject;
+// `CreateLineEffect/1 -> class<UnityEngine.Animator>(class<Transform>)` (`introspect.log:23805`): the door hands
+// the line effect's Animator back, so the write goes on the object the game actually made rather than on a guess
+// about which field the class plays with. Both parameters are references held as addresses and passed back, and
+// the Animator returned is handed back untouched (A5, C48).
+def_detour! {
+    TagCutInPlayer_CreateLineEffectSpeed(this: *mut Il2CppObject, transform: *mut Il2CppObject) -> *mut Il2CppObject {
+            let animator = get_orig_fn!(TagCutInPlayer_CreateLineEffectSpeed, TagCutCreateLineEffectFn)(this, transform);
+        let speed = tag_cut_animator_speed();
+        let at = unsafe { raise_animator_speed(animator, speed) };
+
+        note_tag_cut_write(TAG_CUT_DOOR, TAG_CUT_SLOT, at, speed);
+
+        animator
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_CreateLineEffectSpeed, TagCutCreateLineEffectFn)(this, transform)
+    }
+}
+
+type TagCutPlayLineEffectFn = extern "C" fn(this: *mut Il2CppObject);
+// `PlayLineEffect/0 -> void()` (`introspect.log:23809`), the door the class plays `_topLineAnimator` and
+// `_bottomLineAnimator` through. The speed is an absolute value this fork holds rather than a multiple of what
+// the Animator already had, so a cut that reaches this door and `CreateLineEffect` is not written twice (C22).
+def_detour! {
+    TagCutInPlayer_PlayLineEffectSpeed(this: *mut Il2CppObject) {
+            let speed = tag_cut_animator_speed();
+
+        get_orig_fn!(TagCutInPlayer_PlayLineEffectSpeed, TagCutPlayLineEffectFn)(this);
+
+        let at = unsafe {
+            let top = read_line_animator(this, TAG_CUT_TOP_ANIMATOR_FIELD.load(Ordering::Relaxed));
+            let wrote = match raise_animator_speed(top, speed) {
+                Some((_, wrote)) => wrote,
+                None => false,
+            };
+            let bottom = read_line_animator(this, TAG_CUT_BOTTOM_ANIMATOR_FIELD.load(Ordering::Relaxed));
+
+            match raise_animator_speed(bottom, speed) {
+                Some((current, bottom_wrote)) => Some((current, wrote || bottom_wrote)),
+                None => None,
+            }
+        };
+
+        note_tag_cut_write(TAG_CUT_LINE_DOOR, TAG_CUT_LINE_SLOT, at, speed);
+    }
+    bail {
+                get_orig_fn!(TagCutInPlayer_PlayLineEffectSpeed, TagCutPlayLineEffectFn)(this)
+    }
+}
+
 // The training stat plate cascade. Run 13 measured 10,324 ms inside one training cut, of which 439 ms
 // waited for a tap and 10,034 ms was the cut playing before it asked, while the cut's own timeline
 // reported 2.4 s of total length. The door on that path carrying a duration is `InitializePlateList`,
@@ -2988,6 +3155,88 @@ fn install_getters(umamusume: *const Il2CppImage) {
         ) };
 
         if addr != 0 { new_hook!(addr, SingleModeUtils_GetTrainingCutTimeScaleSpeed); }
+    }
+
+    // The training tag cut-in effect, the leg run 40 measured at 1214 and 1223 ms between `PlayCutIn` and its
+    // `done` action coming back as `PlayCutInOut`. `CreateLineEffect/1 -> class<UnityEngine.Animator>(class<Transform>)`
+    // (`introspect.log:23805`) hands the effect's Animator back, and `PlayLineEffect/0 -> void()`
+    // (`introspect.log:23809`) is the door the class plays its own `_topLineAnimator` / `_bottomLineAnimator`
+    // through, so both doors hand the lever a live object instead of an address guessed from a field. Nothing is
+    // armed unless `UnityEngine.Animator`'s getter and setter pair resolved as well: a lever that cannot read the
+    // speed it is about to raise cannot honour the raise-only rule, and 0 is never called (AGENTS section 2).
+    if let Some(class) = TrainingCuttProbe::class_for_label(umamusume, "Gallop.SingleModeMainViewTagTrainingCutInPlayer") {
+        let (get_addr, set_addr) = unsafe {
+            match crate::il2cpp::symbols::get_assembly_image(c"UnityEngine.AnimationModule.dll") {
+                Ok(image) if !image.is_null() => {
+                    let animator = il2cpp_class_from_name(image, c"UnityEngine".as_ptr(), c"Animator".as_ptr());
+
+                    if animator.is_null() {
+                        (0usize, 0usize)
+                    } else {
+                        (
+                            resolve_method(animator, "get_speed", &[], Il2CppTypeEnum_IL2CPP_TYPE_R4),
+                            resolve_method(animator, "set_speed", &[Il2CppTypeEnum_IL2CPP_TYPE_R4], Il2CppTypeEnum_IL2CPP_TYPE_VOID),
+                        )
+                    }
+                }
+                Ok(_) => (0usize, 0usize),
+                Err(_) => (0usize, 0usize),
+            }
+        };
+
+        ANIMATOR_GET_SPEED_ADDR.store(get_addr, Ordering::Release);
+        ANIMATOR_SET_SPEED_ADDR.store(set_addr, Ordering::Release);
+
+        let top = il2cpp_class_get_field_from_name(class, c"_topLineAnimator".as_ptr());
+        let bottom = il2cpp_class_get_field_from_name(class, c"_bottomLineAnimator".as_ptr());
+        TAG_CUT_TOP_ANIMATOR_FIELD.store(top as usize, Ordering::Release);
+        TAG_CUT_BOTTOM_ANIMATOR_FIELD.store(bottom as usize, Ordering::Release);
+
+        if get_addr == 0 || set_addr == 0 {
+            warn!(
+                "AnimationSpeed: tag cut-in lever stays inert: UnityEngine.Animator get_speed {} and set_speed {} did not resolve, so {} and {} are not armed",
+                get_addr, set_addr, TAG_CUT_DOOR, TAG_CUT_LINE_DOOR
+            );
+        } else {
+            debug!(
+                "AnimationSpeed: tag cut-in lever armed on {} and {}: Animator get_speed {get_addr} set_speed {set_addr}, line animator fields {top:p} / {bottom:p}",
+                TAG_CUT_DOOR, TAG_CUT_LINE_DOOR
+            );
+
+            unsafe { note_tag_cut_statics(class) };
+
+            let create = unsafe { resolve_method(class, "CreateLineEffect", &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS], Il2CppTypeEnum_IL2CPP_TYPE_CLASS) };
+            let play = unsafe { resolve_method(class, "PlayLineEffect", &[], Il2CppTypeEnum_IL2CPP_TYPE_VOID) };
+
+            if create != 0 { new_hook!(create, TagCutInPlayer_CreateLineEffectSpeed); }
+            if play != 0 { new_hook!(play, TagCutInPlayer_PlayLineEffectSpeed); }
+        }
+    }
+}
+
+// The tag cut-in player's own `static readonly` cut-in constants (`introspect.log:23818`), read once at init so a
+// run knows whether the effect's length is a constant this fork could rewrite or a cue length it cannot reach.
+// Read only; nothing on this page writes a static.
+unsafe fn note_tag_cut_statics(class: *mut Il2CppClass) {
+    for name in [c"CUT_IN_MIN", c"CUT_IN_MAX"] {
+        let field = il2cpp_class_get_field_from_name(class, name.as_ptr());
+
+        if field.is_null() {
+            debug!("AnimationSpeed: tag cut-in constant {} is not in this client", name.to_string_lossy());
+            continue;
+        }
+
+        let field_type = il2cpp_field_get_type(field);
+
+        if field_type.is_null() || (*field_type).type_() != Il2CppTypeEnum_IL2CPP_TYPE_R4 {
+            debug!("AnimationSpeed: tag cut-in constant {} is not a float this build can read", name.to_string_lossy());
+            continue;
+        }
+
+        let mut value: f32 = 0.0;
+        il2cpp_field_static_get_value(field, &mut value as *mut f32 as *mut c_void);
+
+        debug!("AnimationSpeed: tag cut-in constant {} reads {}", name.to_string_lossy(), value);
     }
 }
 
@@ -3206,7 +3455,7 @@ mod tests {
 
     struct PassTurn {
         _turn: MutexGuard<'static, ()>,
-        saved_mirrors: [u32; 10],
+        saved_mirrors: [u32; 11],
         saved_applied: [u32; 4],
         saved_training_note: bool,
         saved_countup: CountupBracketState,
@@ -3226,6 +3475,7 @@ mod tests {
             TIME_SCALE_PRODUCED.load(Ordering::Relaxed),
             PLATE_FACTOR.load(Ordering::Relaxed),
             TRAINING_CUT_FACTOR.load(Ordering::Relaxed),
+            TAG_CUT_FACTOR.load(Ordering::Relaxed),
         ];
         let saved_applied = [
             APPLIED_FACTORS[0].load(Ordering::Relaxed),
@@ -3267,6 +3517,7 @@ mod tests {
             TIME_SCALE_PRODUCED.store(self.saved_mirrors[7], Ordering::Release);
             PLATE_FACTOR.store(self.saved_mirrors[8], Ordering::Release);
             TRAINING_CUT_FACTOR.store(self.saved_mirrors[9], Ordering::Release);
+            TAG_CUT_FACTOR.store(self.saved_mirrors[10], Ordering::Release);
             TRAINING_DOORS_NOTE_LOGGED.store(self.saved_training_note, Ordering::Release);
             restore_countup_bracket(&self.saved_countup);
 
@@ -4914,6 +5165,66 @@ mod tests {
         mirror_config(&broken);
         assert_eq!(training_cut_factor(), 1.0, "a cut lever that is not a number reached the cut-in engine");
         assert_eq!(training_cut_time_scale(6.080), 6.080, "a broken mirror moved the cut clock");
+    }
+
+    #[test]
+    fn the_tag_cut_lever_writes_nothing_at_neutral_and_stops_at_the_pair_bound_above_it() {
+        let _turn = pass_turn();
+
+        // Run 40 measured 1214 and 1223 ms between `PlayCutIn` and its `done` action with this lever absent, so
+        // the neutral case is the shape every recorded run was in: the doors write nothing on an Animator.
+        assert_eq!(tag_cut_factor(), 1.0, "a launch armed the tag cut-in lever");
+        assert_eq!(tag_cut_animator_speed(), 1.0, "the tag cut-in lever wrote an Animator speed at its neutral 1.0");
+
+        // With `Time.timeScale` at the neutral 1.0 the lever reaches its own ceiling.
+        let mut arm = Config::default();
+        arm.training_tag_cut_speed = MAX_TIME_SCALE;
+        mirror_config(&arm);
+
+        assert_eq!(tag_cut_factor(), MAX_TIME_SCALE, "the arm's tag cut lever did not mirror");
+        assert_eq!(tag_cut_animator_speed(), MAX_TAG_CUT_ANIMATOR_SPEED, "the tag cut lever passed the ceiling on an Animator speed");
+
+        // The pair is real: an Animator advances on the scale this layer hands Unity's setter, so with 5.0 written
+        // into `Time.timeScale` the speed stops at the product bound over it rather than at its own ceiling.
+        TIME_SCALE_PRODUCED.store(5.0f32.to_bits(), Ordering::Release);
+
+        assert_eq!(tag_cut_animator_speed(), MAX_TWEEN_SPEED_PRODUCT / 5.0, "the tag cut speed and the time-scale lever went past the pair ceiling together");
+
+        TIME_SCALE_PRODUCED.store(1.0f32.to_bits(), Ordering::Release);
+
+        // A hand edited config cannot ask for more than the slider allows, and a mirror that is not a number does
+        // nothing at all. A rate never goes down, so 0.1 is not a slow motion request.
+        let mut hand = Config::default();
+        hand.training_tag_cut_speed = 1000.0;
+        mirror_config(&hand);
+        assert_eq!(tag_cut_factor(), MAX_TIME_SCALE, "a hand edited config reached past MAX_TIME_SCALE on the Animator lever");
+
+        let mut slow = Config::default();
+        slow.training_tag_cut_speed = 0.1;
+        mirror_config(&slow);
+        assert_eq!(tag_cut_animator_speed(), 1.0, "the lever turned a training cut-in into a slow motion");
+
+        let mut broken = Config::default();
+        broken.training_tag_cut_speed = f32::NAN;
+        mirror_config(&broken);
+        assert_eq!(tag_cut_animator_speed(), 1.0, "a tag cut lever that is not a number reached an Animator");
+    }
+
+    #[test]
+    fn both_tag_cut_doors_report_where_a_run_reads_them() {
+        let _turn = pass_turn();
+
+        // Named as `TrainingCuttProbe` names these doors, so a run can match the write lines to the census counts,
+        // and each on its own slot because a door the game never reached prints nothing at all (A4).
+        assert_eq!(TAG_CUT_DOOR, "SingleModeMainViewTagTrainingCutInPlayer.CreateLineEffect");
+        assert_eq!(TAG_CUT_LINE_DOOR, "SingleModeMainViewTagTrainingCutInPlayer.PlayLineEffect");
+        assert!(TAG_CUT_SLOT < HIT_SLOTS && TAG_CUT_LINE_SLOT < HIT_SLOTS, "a tag cut door counts on a slot nothing has");
+
+        note_tag_cut_write(TAG_CUT_DOOR, TAG_CUT_SLOT, Some((1.0, true)), 4.0);
+        note_tag_cut_write(TAG_CUT_LINE_DOOR, TAG_CUT_LINE_SLOT, None, 4.0);
+
+        assert_eq!(hit_calls(TAG_CUT_SLOT), 1, "the CreateLineEffect door is not counted");
+        assert_eq!(hit_calls(TAG_CUT_LINE_SLOT), 1, "the PlayLineEffect door is not counted");
     }
 
     #[test]

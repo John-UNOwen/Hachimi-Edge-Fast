@@ -148,6 +148,7 @@ config_editor:
   story_speed: "Tốc độ cutscene cốt truyện"
   training_plate_speed: "Training stat plate animation speed"
   training_cut_speed: "Training cut-in animation speed"
+  training_tag_cut_speed: "Tốc độ hiệu ứng cut-in nhãn của huấn luyện"
   auto_skip_result_screens: "Tự động bỏ qua hoạt ảnh màn hình kết quả"
   high_speed_settings: "Nâng cài đặt Tốc độ cao của cốt truyện và luyện tập lên mức tối đa của game"
   gui_landscape_ratio: "Tỷ lệ thu phóng lớp phủ ngang"

@@ -172,6 +172,7 @@ config_editor:
   story_speed: "Bilis ng mga story cutscene"
   training_plate_speed: "Training stat plate animation speed"
   training_cut_speed: "Training cut-in animation speed"
+  training_tag_cut_speed: "Bilis ng epekto ng tag cut-in ng training"
   auto_skip_result_screens: "Awtomatikong i-skip ang mga animation ng result screen"
   high_speed_settings: "Itaas ang High Speed settings ng kwento at training hanggang sa maximum ng laro"
   story_high_speed_mode: "Ilagay ang story playback sa high speed mode ng game"

@@ -6061,6 +6061,16 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            // The tag cut-in lever raises the speed of an `Animator`, so the slider shares the time-scale range
+            // and `mirror_config` clamps a hand edited config to it. The number actually written is capped lower
+            // in `AnimationSpeed::tag_cut_animator_speed`, against `MAX_TWEEN_SPEED_PRODUCT` over the
+            // `Time.timeScale` this fork holds raised, and it never lowers a speed the game set itself.
+            if should_show_option(search, &t!("config_editor.training_tag_cut_speed")) {
+                ui.label(t!("config_editor.training_tag_cut_speed"));
+                ui.add(egui::Slider::new(&mut config.training_tag_cut_speed, AnimationSpeed::MIN_TIME_SCALE..=AnimationSpeed::MAX_TIME_SCALE).step_by(0.5));
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.auto_skip_result_screens")) {
                 ui.label(t!("config_editor.auto_skip_result_screens"));
                 ui.checkbox(&mut config.auto_skip_result_screens, "");

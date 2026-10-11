@@ -432,8 +432,10 @@ static STATUS_FRAME_PLAY_IN_ROOT_MOTION: CutProbe = CutProbe::peaked("SingleMode
 static STATUS_FRAME_PLAY_OUT: CutProbe = CutProbe::peaked("SingleModeMainViewTrainingCutStatusFrame::PlayOut(flag, time, action)");
 static STATUS_FRAME_PRE_IN: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatusFrame::PlayPreIn()");
 static STATUS_FRAME_SKIP: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatusFrame::Skip(int, int, int, int, int)");
-static TAG_PLAYER_CREATE_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::CreateLineEffect(transform)");
-static TAG_PLAYER_PLAY_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayLineEffect()");
+// `CreateLineEffect/1` and `PlayLineEffect/0` are not counted here any more: AnimationSpeed arms both addresses
+// and reports the writes it makes on them through its own hit slots, because they are where the tag cut-in lever
+// writes the Animator speed (item 79). `PlayButtonEffect/3` is not armed at all: its second parameter is a 12 byte
+// struct and A5 admits only structs a run has proved travel in a general register.
 static TAG_PLAYER_STOP_LINE_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect()");
 static TAG_PLAYER_DESTROY_BUTTON_EFFECT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect()");
 static TAG_PLAYER_PLAY_SUCCESS_TEXT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect()");
@@ -444,7 +446,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 83] = [
+static PROBES: [&CutProbe; 81] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -498,8 +500,6 @@ static PROBES: [&CutProbe; 83] = [
     &TAG_PLAYER_IS_VALID_TAG,
     &TAG_PLAYER_PLAY_CUT_IN,
     &TAG_PLAYER_PLAY_CUT_OUT,
-    &TAG_PLAYER_CREATE_LINE_EFFECT,
-    &TAG_PLAYER_PLAY_LINE_EFFECT,
     &TAG_PLAYER_STOP_LINE_EFFECT,
     &TAG_PLAYER_DESTROY_BUTTON_EFFECT,
     &TAG_PLAYER_PLAY_SUCCESS_TEXT,
@@ -2110,29 +2110,6 @@ def_detour! {
 // through: an `Animator` line effect (`_topLineAnimator`, `_bottomLineAnimator`) and three `FlashPlayer`
 // effects, none of which takes a duration. They are counted so a run can say whether the wall a friendship
 // cut spends is inside this class at all before a lever is put anywhere near it (item 79).
-type TagCreateLineEffectFn = extern "C" fn(this: *mut Il2CppObject, transform: *mut Il2CppObject) -> *mut Il2CppObject;
-def_detour! {
-    TagCutInPlayer_CreateLineEffect(this: *mut Il2CppObject, transform: *mut Il2CppObject) -> *mut Il2CppObject {
-            TAG_PLAYER_CREATE_LINE_EFFECT.count();
-
-        get_orig_fn!(TagCutInPlayer_CreateLineEffect, TagCreateLineEffectFn)(this, transform)
-    }
-    bail {
-                get_orig_fn!(TagCutInPlayer_CreateLineEffect, TagCreateLineEffectFn)(this, transform)
-    }
-}
-
-def_detour! {
-    TagCutInPlayer_PlayLineEffect(this: *mut Il2CppObject) {
-            TAG_PLAYER_PLAY_LINE_EFFECT.count();
-
-        get_orig_fn!(TagCutInPlayer_PlayLineEffect, CuttVoidFn)(this);
-    }
-    bail {
-                get_orig_fn!(TagCutInPlayer_PlayLineEffect, CuttVoidFn)(this)
-    }
-}
-
 def_detour! {
     TagCutInPlayer_StopLineEffect(this: *mut Il2CppObject) {
             TAG_PLAYER_STOP_LINE_EFFECT.count();
@@ -2650,11 +2627,10 @@ pub fn init(umamusume: *const Il2CppImage) {
     generic_probe!(tag_player, TagCutInPlayer_PlayCutIn, "PlayCutIn", LIST_AND_ACTION, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn");
     probe!(tag_player, TagCutInPlayer_PlayCutInOut, "PlayCutInOut", ONE_ACTION, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut");
     static_generic_probe!(tag_player, TagCutInPlayer_IsValidTag, "IsValidTag", ONE_INFO, BOOL, "SingleModeMainViewTagTrainingCutInPlayer::IsValidTag");
-    // The friendship cut-in's effect doors (`introspect.log:23805` to `23811`). `PlayButtonEffect/3` is not
-    // among them: its second parameter is a 12 byte struct and A5 only allows structs a run has proved travel
-    // in a general register, so the four doors around it are counted instead of guessing at that one.
-    probe!(tag_player, TagCutInPlayer_CreateLineEffect, "CreateLineEffect", ONE_INFO, CLASS, "SingleModeMainViewTagTrainingCutInPlayer::CreateLineEffect");
-    probe!(tag_player, TagCutInPlayer_PlayLineEffect, "PlayLineEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlayLineEffect");
+    // The rest of the friendship cut-in's effect doors. `CreateLineEffect` and `PlayLineEffect` are armed by
+    // AnimationSpeed, which reports the writes it makes there, and `PlayButtonEffect/3` is not armed at all: its
+    // second parameter is a 12 byte struct and A5 only allows structs a run has proved travel in a general
+    // register, so the doors around it are counted instead of guessing at that one.
     probe!(tag_player, TagCutInPlayer_StopLineEffect, "StopLineEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect");
     probe!(tag_player, TagCutInPlayer_DestroyButtonEffect, "DestroyButtonEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect");
     probe!(tag_player, TagCutInPlayer_PlaySuccessTextEffect, "PlaySuccessTextEffect", NO_PARAMS, VOID, "SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect");
@@ -3374,8 +3350,6 @@ mod tests {
             "SingleModeMainViewTrainingCutStatusFrame::PlayOut(flag, time, action)",
             "SingleModeMainViewTrainingCutStatusFrame::PlayPreIn()",
             "SingleModeMainViewTrainingCutStatusFrame::Skip(int, int, int, int, int)",
-            "SingleModeMainViewTagTrainingCutInPlayer::CreateLineEffect(transform)",
-            "SingleModeMainViewTagTrainingCutInPlayer::PlayLineEffect()",
             "SingleModeMainViewTagTrainingCutInPlayer::StopLineEffect()",
             "SingleModeMainViewTagTrainingCutInPlayer::DestroyButtonEffect()",
             "SingleModeMainViewTagTrainingCutInPlayer::PlaySuccessTextEffect()",

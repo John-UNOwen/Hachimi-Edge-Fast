@@ -1329,6 +1329,14 @@ pub struct Config {
     // (`AnimationSpeed.rs`, ledger item 77).
     #[serde(default = "Config::default_animation_speed")]
     pub training_cut_speed: f32,
+    // The training tag cut-in effect, the leg run 40 measured at 1214 and 1223 ms between `PlayCutIn` and its
+    // `done` action, which is the whole difference between a friendship cut and a tag answer cut. It raises the
+    // speed of the `Animator` the effect runs on (`CreateLineEffect`, `_topLineAnimator`, `_bottomLineAnimator`,
+    // `PlayLineEffect`) and never lowers one the game already set. The clamp is the time-scale one, and the
+    // value written is capped in `AnimationSpeed::tag_cut_animator_speed` against `MAX_TWEEN_SPEED_PRODUCT`
+    // over the `Time.timeScale` this fork holds raised (ledger item 79).
+    #[serde(default = "Config::default_animation_speed")]
+    pub training_tag_cut_speed: f32,
     #[serde(default)]
     pub auto_skip_result_screens: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
