@@ -473,6 +473,13 @@ pub const MAX_TAG_CUT_ANIMATOR_SPEED: f32 = MAX_TIME_SCALE;
 // line, so the produced scale was 1.0 and the bound stood at 20.
 pub const MAX_MOTION_SPEED: f32 = 2.0 * MAX_TIME_SCALE;
 
+// The reach of the `training_cut_speed` control itself, stated because one slider now drives two channels and
+// each caps what it hands in its own door: the cut-in scale door stops at `MAX_TRAINING_CUT_TIME_SCALE` (30.0) and
+// the cut-in motion doors stop at `MAX_MOTION_SPEED` (10.0). The slider goes as far as the further of the two
+// ceilings it feeds, so a player asking for more is not stopped by the channel with the smaller reach, and neither
+// door can be handed past its own bound by a hand edited config (`normalize_training_cut_lever`).
+pub const MAX_TRAINING_CUT_LEVER: f32 = MAX_MOTION_SPEED;
+
 // The ceiling on the training cut-in's own speed channel, stated rather than inherited from
 // `MAX_TIME_SCALE` (the decision A17 asks for before a lever sits on a value that is already above
 // the ceiling). Every recorded run read the game putting a number past 5.0 on this door by itself:
@@ -1717,6 +1724,14 @@ fn normalize_time_scale(value: f32) -> f32 {
     else { 1.0 }
 }
 
+// The cut-in lever's own clamp, wider than `normalize_time_scale` because the control feeds two doors and stops at
+// the further of their ceilings (`MAX_TRAINING_CUT_LEVER`). The floor is the neutral 1.0 for the same reason as
+// above, and a non numeric value lands on doing nothing.
+fn normalize_training_cut_lever(value: f32) -> f32 {
+    if value.is_finite() { value.clamp(MIN_TIME_SCALE, MAX_TRAINING_CUT_LEVER) }
+    else { 1.0 }
+}
+
 // The DOTween lever is bounded here, by the same argument as the group factors: it is a
 // multiplier that reaches the game's own clock, so a hand edited config or the 1000.0 the
 // sliders offer cannot take more out of an animation than MAX_FACTOR allows. Non numeric
@@ -1753,10 +1768,11 @@ fn mirror_config(config: &Config) {
     // The same ceiling as the group factors, on the one training duration this fork scales: a hand edited
     // config.json cannot ask for more than MAX_FACTOR out of a plate cascade.
     PLATE_FACTOR.store(normalize(config.training_plate_speed).to_bits(), Ordering::Release);
-    // The cut-in lever takes the time-scale clamp, not the duration one: it is a lever on a scale, so its floor
-    // is its neutral 1.0 and a hand edited config asking for 0.1 cannot turn a training cut into a slow motion
-    // (C40). What it may raise that scale *to* is capped by `MAX_TRAINING_CUT_TIME_SCALE` in the door, not here.
-    TRAINING_CUT_FACTOR.store(normalize_time_scale(config.training_cut_speed).to_bits(), Ordering::Release);
+    // The cut-in lever takes the time-scale floor, not the duration one: it is a lever on a rate, so its floor is
+    // its neutral 1.0 and a hand edited config asking for 0.1 cannot turn a training cut into a slow motion (C40).
+    // Its top is `MAX_TRAINING_CUT_LEVER`, and what each door may hand is capped there rather than here: the scale
+    // door at `MAX_TRAINING_CUT_TIME_SCALE`, the motion doors at `MAX_MOTION_SPEED`.
+    TRAINING_CUT_FACTOR.store(normalize_training_cut_lever(config.training_cut_speed).to_bits(), Ordering::Release);
     // The tag cut-in Animator lever takes the same clamp: it is a rate, so its floor is its neutral 1.0 and a
     // hand edited config asking for 0.1 cannot slow a training cut-in down. What it may raise to is bounded in
     // `tag_cut_animator_speed`, next to the write, because the bound reads the scale this layer put into
@@ -3003,14 +3019,12 @@ pub fn flash_motion_speed() -> f32 {
         return 1.0;
     }
 
-    // The slider is the arm and the reach. `training_cut_speed` mirrors at `MAX_TIME_SCALE`, while this channel is
-    // measured at twice that, so the proportion the slider sets is kept and the ceiling is where the measurement
-    // says to look next rather than where another lever had to stop.
-    let reach = lever * (MAX_MOTION_SPEED / MAX_TIME_SCALE);
+    // The slider is the rate, the ceiling is the channel's own and the pair bound is C58's, so raising the control
+    // cannot push a motion past 10.0 or past what the scale this layer hands Unity's setter leaves room for.
     let produced = f32::from_bits(TIME_SCALE_PRODUCED.load(Ordering::Relaxed)).max(1.0);
     let pair_bound = (MAX_TWEEN_SPEED_PRODUCT / produced).max(1.0);
 
-    reach.max(1.0).min(MAX_MOTION_SPEED).min(pair_bound)
+    lever.max(1.0).min(MAX_MOTION_SPEED).min(pair_bound)
 }
 
 type MotionGetSpeedFn = extern "C" fn(motion: *mut Il2CppObject) -> f32;
@@ -5407,7 +5421,12 @@ mod tests {
         let mut hand = Config::default();
         hand.training_cut_speed = 1000.0;
         mirror_config(&hand);
-        assert_eq!(training_cut_factor(), MAX_TIME_SCALE, "the cut lever reached past MAX_TIME_SCALE from a hand edited config");
+        assert_eq!(training_cut_factor(), MAX_TRAINING_CUT_LEVER, "the cut lever reached past MAX_TRAINING_CUT_LEVER from a hand edited config");
+
+        // At that reach the scale door is the one doing the capping: a 6.080 the game computed goes to the door's
+        // own ceiling, and a 2.0 the game computed goes to 20.0 rather than past it.
+        assert_eq!(training_cut_time_scale(6.080), MAX_TRAINING_CUT_TIME_SCALE, "the scale door let the full lever reach past its own ceiling");
+        assert_eq!(training_cut_time_scale(2.0), 20.0, "the scale door compounded past its ceiling on a smaller value");
 
         let mut broken = Config::default();
         broken.training_cut_speed = f32::NAN;
@@ -5485,22 +5504,27 @@ mod tests {
         assert_eq!(flash_motion_speed(), 1.0, "a launch armed the cut-in motion lever");
 
         let mut arm = Config::default();
-        arm.training_cut_speed = MAX_TIME_SCALE;
+        arm.training_cut_speed = MAX_TRAINING_CUT_LEVER;
         mirror_config(&arm);
 
         assert_eq!(flash_motion_speed(), MAX_MOTION_SPEED, "the motion lever passed its own ceiling");
 
-        // The slider is the proportion, not just the arm: the reach is twice what the slider mirrors at, so half the
-        // slider is half the motion speed and the ceiling lands where the slider max does.
+        // The control is the rate on this channel too, so the point the measurement landed on (run 46 at 5.0, both
+        // training cut walls halved) is one slider step below the ceiling and not the ceiling itself.
+        let mut measured = Config::default();
+        measured.training_cut_speed = MAX_TIME_SCALE;
+        mirror_config(&measured);
+        assert_eq!(flash_motion_speed(), MAX_TIME_SCALE, "the motion lever moved the slider position the runs measured");
+
         let mut half = Config::default();
         half.training_cut_speed = MAX_TIME_SCALE / 2.0;
         mirror_config(&half);
-        assert_eq!(flash_motion_speed(), MAX_MOTION_SPEED / 2.0, "the motion lever ignored where the slider stood");
+        assert_eq!(flash_motion_speed(), MAX_TIME_SCALE / 2.0, "the motion lever ignored where the slider stood");
 
         let mut nudge = Config::default();
         nudge.training_cut_speed = 1.5;
         mirror_config(&nudge);
-        assert_eq!(flash_motion_speed(), 3.0, "the motion lever rounded a small slider move up to its ceiling");
+        assert_eq!(flash_motion_speed(), 1.5, "the motion lever rounded a small slider move up to its ceiling");
 
         // AnimateToUnity advances its own time on Unity's clock, so with the time-scale lever written the pair stops
         // at the product bound rather than at the lever's ceiling, the way C58 prices the ui clock. On the full arm

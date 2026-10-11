@@ -237,8 +237,9 @@ impl SettingsPreset {
                 );
 
                 config.training_plate_speed = AnimationSpeed::MAX_FACTOR;
-                // A scale lever, so it takes the ceiling every other scale lever in this arm takes.
-                config.training_cut_speed = AnimationSpeed::MAX_TIME_SCALE;
+                // One control feeding two doors, so the arm takes the reach of the further one: the scale door is
+                // capped at `MAX_TRAINING_CUT_TIME_SCALE` in its own code and the motion door at `MAX_MOTION_SPEED`.
+                config.training_cut_speed = AnimationSpeed::MAX_TRAINING_CUT_LEVER;
             }),
         }
     }
@@ -410,7 +411,8 @@ mod tests {
         assert_eq!(config.time_scale, AnimationSpeed::MAX_TIME_SCALE);
         assert_eq!(config.story_choice_auto_select_delay, AnimationSpeed::MIN_STORY_CHOICE_AUTO_SELECT_DELAY);
         assert_eq!(config.training_plate_speed, AnimationSpeed::MAX_FACTOR, "an arm that leaves a timing field at its neutral value is not the all levers arm");
-        assert_eq!(config.training_cut_speed, AnimationSpeed::MAX_TIME_SCALE, "the cut-in lever takes the scale ceiling, not the duration one");
+        assert_eq!(config.training_cut_speed, AnimationSpeed::MAX_TRAINING_CUT_LEVER, "the cut-in lever stops short of the reach its further door has");
+        assert!(config.training_cut_speed <= AnimationSpeed::MAX_TRAINING_CUT_TIME_SCALE, "the cut-in arm asks the scale door for more than that door may hand");
         assert!(config.auto_skip_result_screens);
         assert!(config.high_speed_settings);
         assert!(config.story_high_speed_mode);

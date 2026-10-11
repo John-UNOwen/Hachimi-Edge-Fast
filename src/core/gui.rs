@@ -6050,14 +6050,16 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
-            // The cut-in clock lever raises a scale the game computes for itself, so its slider stops at
-            // `MAX_TIME_SCALE`, the ceiling every other time-scale lever this fork owns shares, and `mirror_config`
-            // clamps a hand edited config to the same range. The ceiling on the *value handed to the game* is
-            // `MAX_TRAINING_CUT_TIME_SCALE` in the door, above the slider's reach, because the game already puts
-            // 6.080 to 11.280 on this door and a cap at 5.0 would hand those numbers back unchanged.
+            // One control, two doors. `training_cut_speed` raises the scale the game computes for the cut-in and the
+            // speed written onto the `AnimateToUnity.AnMotion` the effect plays on, so the slider runs to the further
+            // of the two ceilings it feeds (`MAX_TRAINING_CUT_LEVER`) and each door caps what it hands in its own
+            // code: `MAX_TRAINING_CUT_TIME_SCALE` on the scale door, above the slider's reach because the game
+            // already puts 6.080 to 11.280 there and a lower cap would hand those numbers back unchanged, and
+            // `MAX_MOTION_SPEED` on the motion doors, bounded again against the `Time.timeScale` this fork holds
+            // raised (C58). `mirror_config` clamps a hand edited config to the slider's own range.
             if should_show_option(search, &t!("config_editor.training_cut_speed")) {
                 ui.label(t!("config_editor.training_cut_speed"));
-                ui.add(egui::Slider::new(&mut config.training_cut_speed, AnimationSpeed::MIN_TIME_SCALE..=AnimationSpeed::MAX_TIME_SCALE).step_by(0.5));
+                ui.add(egui::Slider::new(&mut config.training_cut_speed, AnimationSpeed::MIN_TIME_SCALE..=AnimationSpeed::MAX_TRAINING_CUT_LEVER).step_by(0.5));
                 ui.end_row();
             }
 
