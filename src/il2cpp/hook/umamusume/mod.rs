@@ -96,6 +96,9 @@ pub(crate) use TrainingCuttProbe::note_hole_census_value;
 mod CutStateProbe;
 mod StoryEventProbe;
 mod GameFrameProbe;
+// Observe only: the popups and the skill learning screen that sit between career screens and have never
+// been counted here. Item 99 and item 104.
+mod DialogProbe;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -395,4 +398,7 @@ pub fn init() {
     StoryEventProbe::init(image);
     // No hooks, only the switch the frame clock in GameSystem_Update reads.
     GameFrameProbe::init();
+    // Last, and observe only: the dialog choke points, the skill learning screen doors, and the career
+    // screen's own view lifecycle, so a popup count reads against the time the player was on the screen.
+    DialogProbe::init(image);
 }
