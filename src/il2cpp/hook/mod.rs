@@ -2170,7 +2170,7 @@ pub fn init() {
         crate::core::settings_preset::open_arm_window(preset);
 
         info!(
-            "Config snapshot: preset {} transition {} result {} story {} plate {} cut {} tag_cut {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
+            "Config snapshot: preset {} transition {} result {} story {} plate {} cut {} tag_cut {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} cut_skip {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
             preset,
             config.transition_speed,
             config.result_screen_speed,
@@ -2185,6 +2185,7 @@ pub fn init() {
             config.target_fps.unwrap_or(-1),
             target_fps_unfocused,
             config.auto_skip_result_screens,
+            config.skip_training_cut,
             config.high_speed_settings,
             config.story_high_speed_mode,
             config.hide_now_loading,

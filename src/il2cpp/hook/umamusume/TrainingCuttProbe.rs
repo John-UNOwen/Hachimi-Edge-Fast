@@ -526,7 +526,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 103] = [
+static PROBES: [&CutProbe; 104] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -630,6 +630,7 @@ static PROBES: [&CutProbe; 103] = [
     &STORY_SKIP_TRAINING_CUTT,
     &UTILS_GET_HIGH_SPEED_PLAY_DURATION,
     &TIMELINE_CUTT_INIT,
+    &CUTT_LEVER_SKIP_STEPS,
 ];
 
 // One cut-in run, opened by `ResetCurrentTime` and closed by the next one. The wall clock between the
@@ -1330,6 +1331,7 @@ type CuttUpdateSpeedFn = extern "C" fn(this: *mut Il2CppObject);
 def_detour! {
     CuttTimeline_UpdateSpeed(this: *mut Il2CppObject) {
             CUTT_UPDATE_SPEED.count();
+        pump_training_cut_cutt(this, elapsed_ms());
 
         get_orig_fn!(CuttTimeline_UpdateSpeed, CuttUpdateSpeedFn)(this);
     }
@@ -1348,6 +1350,55 @@ def_detour! {
     bail {
                 get_orig_fn!(CuttTimeline_SkipRuntimeTime, CuttSkipRuntimeTimeFn)(this, time)
     }
+}
+
+// The call side of the cut-in skip lever (`skip_training_cut`): this build advances the cut-in
+// timeline through the door it already counts rather than shortening the cut from outside it.
+// `def_method_wrapper_fn!` keeps it inert while the address never arrived, which is the same case the
+// census reports as a missing door (A4).
+def_method_wrapper_fn!(skip_cutt_frames, TRAINING_CUT_SKIP_ADDR, (), this: *mut Il2CppObject, frames: i32, keep: bool);
+
+// The game's own playing flag, mirrored from `set_IsPlayingCutt` instead of inferred from a door count:
+// the lever runs only while the client itself says a training cut is playing. That is also the
+// condition C57 wants before a high speed settings write, and it is the gate item 95 points at on the
+// story side.
+static PLAYING_CUTT: AtomicBool = AtomicBool::new(false);
+// How far the cut in flight has advanced through the door, the visit the last step was priced from, and
+// whether this build is inside the skip door right now. The last one is the re-entrancy guard: the skip
+// advances the timeline, the timeline reaches `UpdateSpeed`, and the pump must not answer that.
+static SKIP_SPENT_FRAMES: AtomicI32 = AtomicI32::new(0);
+static SKIP_LAST_MS: AtomicI64 = AtomicI64::new(-1);
+static SKIP_INSIDE_DOOR: AtomicBool = AtomicBool::new(false);
+static CUTT_LEVER_SKIP_STEPS: CutProbe = CutProbe::counted("CutInTimelineController::SkipRuntime(lever steps)");
+
+/// One pump step, taken at the door the client reaches every frame of a cut-in (`UpdateSpeed`, 226
+/// calls across the three cuts of run 48) on the instance the client is already handing us, so no
+/// pointer outlives the call that got it. Nothing happens unless the switch is on, the client says a
+/// training cut is playing, and this build is not already inside the skip door. The step is priced in
+/// the door's own unit and bounded per cut by `AnimationSpeed::training_cut_skip_frames`, and it asks
+/// the door to keep the cut's runtime alive rather than end it: a sub-step, not a jump.
+fn pump_training_cut_cutt(this: *mut Il2CppObject, now: i64) {
+    if !AnimationSpeed::skip_training_cut() || this.is_null() || !PLAYING_CUTT.load(atomic::Ordering::Relaxed) {
+        return;
+    }
+    if SKIP_INSIDE_DOOR.swap(true, atomic::Ordering::AcqRel) {
+        return;
+    }
+
+    let last = SKIP_LAST_MS.load(atomic::Ordering::Relaxed);
+    let gap = if last < 0 { 0 } else { now - last };
+    SKIP_LAST_MS.store(now, atomic::Ordering::Relaxed);
+
+    let spent = SKIP_SPENT_FRAMES.load(atomic::Ordering::Relaxed);
+    if let Some(frames) =
+        AnimationSpeed::training_cut_skip_frames(gap, AnimationSpeed::training_cut_lever(), spent)
+    {
+        SKIP_SPENT_FRAMES.store(spent + frames, atomic::Ordering::Relaxed);
+        CUTT_LEVER_SKIP_STEPS.count();
+        skip_cutt_frames(this, frames, true);
+    }
+
+    SKIP_INSIDE_DOOR.store(false, atomic::Ordering::Release);
 }
 
 type CuttSkipRuntimeFramesFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, keep: bool);
@@ -1991,6 +2042,14 @@ type SetIsPlayingCuttFn = extern "C" fn(this: *mut Il2CppObject, playing: bool);
 def_detour! {
     TrainingCutt_SetIsPlayingCutt(this: *mut Il2CppObject, playing: bool) {
             CUTT_SET_IS_PLAYING_CUTT.count();
+
+        // Mirrored for the cut-in skip lever: it is the client's own statement that a training cut is
+        // playing, and a cut that starts over gets its bound back.
+        PLAYING_CUTT.store(playing, atomic::Ordering::Relaxed);
+        if playing {
+            SKIP_SPENT_FRAMES.store(0, atomic::Ordering::Relaxed);
+            SKIP_LAST_MS.store(-1, atomic::Ordering::Relaxed);
+        }
 
         get_orig_fn!(TrainingCutt_SetIsPlayingCutt, SetIsPlayingCuttFn)(this, playing);
     }
@@ -3051,6 +3110,16 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_UpdateSpeed, "UpdateSpeed", NO_PARAMS, VOID, "CutInTimelineController::UpdateSpeed");
     probe!(timeline, CuttTimeline_SkipRuntimeTime, "SkipRuntime", ONE_FLOAT, VOID, "CutInTimelineController::SkipRuntime(time)");
     probe!(timeline, CuttTimeline_SkipRuntimeFrames, "SkipRuntime", FRAMES_AND_FLAG, VOID, "CutInTimelineController::SkipRuntime(frames, keep)");
+
+    // The call side, held apart from the census arm above: the same door resolved once more so the
+    // lever has an address to call, and armed only once (A4). It stays 0, and the lever stays inert,
+    // on a client that has no such method.
+    if let Some(controller) = timeline {
+        unsafe {
+            TRAINING_CUT_SKIP_ADDR =
+                AnimationSpeed::resolve_method(controller, "SkipRuntime", FRAMES_AND_FLAG, VOID);
+        }
+    }
     probe!(timeline, CuttTimeline_SkipTimeDirect, "SkipTimeDirect", ONE_FLOAT, VOID, "CutInTimelineController::SkipTimeDirect");
 
     // What the timeline says about its own length, and the two doors an auto skip option would have to

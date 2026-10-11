@@ -6079,6 +6079,12 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            if should_show_option(search, &t!("config_editor.skip_training_cut")) {
+                ui.label(t!("config_editor.skip_training_cut"));
+                ui.checkbox(&mut config.skip_training_cut, "");
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.high_speed_settings")) {
                 ui.label(t!("config_editor.high_speed_settings"));
                 ui.checkbox(&mut config.high_speed_settings, "");
