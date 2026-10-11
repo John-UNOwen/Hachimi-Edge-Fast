@@ -3747,16 +3747,31 @@ impl Gui {
                             }
                         });
 
-                        // Delete only appears for a name that is actually a saved snapshot. The three
-                        // built-in arms are derived from the live config, so there is nothing here to
-                        // delete and no button that would do nothing.
-                        if config.settings_presets.iter().any(|saved| saved.name == config.settings_preset_name)
-                            && ui.small_button(t!("menu.speed_preset_delete")).clicked()
-                        {
-                            let name = config.settings_preset_name.clone();
-                            SettingsPreset::remove(&mut config, &name);
-                            save_and_reload_config(config.clone());
-                            self.config = config.clone();
+                        // A saved arm you are not wearing needs a way out too. Deleting used to be
+                        // offered only for the arm in use, which meant applying an old preset before
+                        // you could drop it and overwriting the settings a comparison was reading.
+                        // The built-in arms stay out of this list: they are derived from the live
+                        // config, so there is nothing stored to delete.
+                        let saved: Vec<String> = config.settings_presets.iter().map(|preset| preset.name.clone()).collect();
+
+                        if !saved.is_empty() {
+                            ui.label(t!("menu.speed_preset_saved"));
+
+                            for name in saved {
+                                ui.horizontal(|ui| {
+                                    let worn = config.settings_preset_name == name;
+                                    let label = if worn { format!("{name} *") } else { name.clone() };
+
+                                    ui.label(label);
+
+                                    if ui.small_button(t!("menu.speed_preset_delete")).clicked() {
+                                        SettingsPreset::remove(&mut config, name.as_str());
+                                        info!("Settings preset removed: {name}");
+                                        save_and_reload_config(config.clone());
+                                        self.config = config.clone();
+                                    }
+                                });
+                            }
                         }
                     }
 

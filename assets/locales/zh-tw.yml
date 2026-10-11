@@ -34,6 +34,7 @@ menu:
   check_for_updates: "\uf0aa 檢查更新"
   speed_preset: "速度預設"
   speed_preset_none: "未套用預設"
+  speed_preset_saved: "已儲存的預設"
   speed_preset_name_hint: "命名要儲存的預設"
   speed_preset_save: "儲存目前設定"
   speed_preset_delete: "刪除已儲存的預設"

@@ -57,6 +57,7 @@ menu:
   check_for_updates: "\uf0aa Buscar atualizações"
   speed_preset: "Preset de velocidade"
   speed_preset_none: "Nenhum preset aplicado"
+  speed_preset_saved: "Predefinições salvas"
   speed_preset_name_hint: "Nomeie o preset que está salvando"
   speed_preset_save: "Salvar configurações"
   speed_preset_delete: "Excluir preset salvo"

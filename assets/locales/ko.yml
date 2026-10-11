@@ -50,6 +50,7 @@ menu:
   check_for_updates: "\uf0aa 업데이트 확인"
   speed_preset: "속도 프리셋"
   speed_preset_none: "프리셋 미적용"
+  speed_preset_saved: "저장된 프리셋"
   speed_preset_name_hint: "저장할 프리셋 이름"
   speed_preset_save: "설정 저장"
   speed_preset_delete: "저장된 프리셋 삭제"

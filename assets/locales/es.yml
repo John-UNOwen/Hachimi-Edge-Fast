@@ -50,6 +50,7 @@ menu:
   check_for_updates: "\uf0aa Buscar actualizaciones"
   speed_preset: "Preajuste de velocidad"
   speed_preset_none: "Ningún preajuste aplicado"
+  speed_preset_saved: "Preajustes guardados"
   speed_preset_name_hint: "Nombra el preajuste que guardas"
   speed_preset_save: "Guardar ajustes"
   speed_preset_delete: "Eliminar preajuste guardado"

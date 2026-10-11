@@ -41,6 +41,7 @@ menu:
   check_for_updates: "\uf0aa Cek pembaruan"
   speed_preset: "Preset kecepatan"
   speed_preset_none: "Tidak ada preset diterapkan"
+  speed_preset_saved: "Preset tersimpan"
   speed_preset_name_hint: "Beri nama preset yang disimpan"
   speed_preset_save: "Simpan pengaturan"
   speed_preset_delete: "Hapus preset tersimpan"

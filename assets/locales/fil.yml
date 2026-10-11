@@ -40,6 +40,7 @@ menu:
   check_for_updates: "\uf0aa Tignan kung may update"
   speed_preset: "Preset ng bilis"
   speed_preset_none: "Walang preset na na-apply"
+  speed_preset_saved: "Mga naka-save na preset"
   speed_preset_name_hint: "Pangalanan ang preset na ise-save"
   speed_preset_save: "I-save ang mga setting"
   speed_preset_delete: "Burahin ang naka-save na preset"

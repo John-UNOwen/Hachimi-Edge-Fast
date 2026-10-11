@@ -326,11 +326,20 @@ impl SettingsPreset {
 
     /// Removes a saved preset. The built-in arms are derived from the live config rather than
     /// stored, so deleting a saved arm that borrowed a built-in name hands the built-in back instead
-    /// of costing the player an arm.
+    /// of costing the player an arm. An arm that was the one being worn stops naming itself: the
+    /// settings stay where they are, because deleting an arm is not rolling back the settings it was
+    /// taken at, while a `Config snapshot:` line crediting a preset no list can find is a run nobody
+    /// else can reproduce.
     pub fn remove(config: &mut Config, name: &str) -> bool {
         let before = config.settings_presets.len();
         config.settings_presets.retain(|saved| saved.name != name);
-        config.settings_presets.len() != before
+        let removed = config.settings_presets.len() != before;
+
+        if removed && config.settings_preset_name == name {
+            config.settings_preset_name.clear();
+        }
+
+        removed
     }
 
     /// The fields a run is read against, printed in the same order `Config snapshot:` prints them.
@@ -493,6 +502,21 @@ mod tests {
         let presets = SettingsPreset::all_presets(&live);
         assert_eq!(presets.len(), 3, "the built-in arm is derived from the live config, so no arm was lost");
         assert_eq!(presets[0].config.transition_speed, 1.0);
+    }
+
+    #[test]
+    fn deleting_the_arm_in_use_keeps_the_settings_and_stops_crediting_the_deleted_preset() {
+        let mut live = Config::default();
+        live.transition_speed = 7.0;
+        let snapshot = SettingsPreset::capture("Off arm", &live);
+        SettingsPreset::save(&mut live, &snapshot);
+        live.settings_preset_name = "Off arm".to_string();
+
+        assert!(SettingsPreset::remove(&mut live, "Off arm"));
+
+        assert_eq!(live.transition_speed, 7.0, "deleting an arm is not rolling back the settings it was taken at");
+        assert!(live.settings_preset_name.is_empty(), "no snapshot line may credit a preset the list no longer holds");
+        assert!(!SettingsPreset::remove(&mut live, "Off arm"), "a second delete of the same name has nothing to take");
     }
 
     #[test]

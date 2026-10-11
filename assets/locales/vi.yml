@@ -34,6 +34,7 @@ menu:
   check_for_updates: "\uf0aa Kiểm tra cập nhật"
   speed_preset: "Preset tốc độ"
   speed_preset_none: "Chưa áp dụng preset"
+  speed_preset_saved: "Preset đã lưu"
   speed_preset_name_hint: "Đặt tên preset bạn đang lưu"
   speed_preset_save: "Lưu cài đặt"
   speed_preset_delete: "Xóa preset đã lưu"

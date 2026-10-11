@@ -57,6 +57,7 @@ menu:
   check_for_updates: "\uf0aa Проверить обновления"
   speed_preset: "Пресет скорости"
   speed_preset_none: "Пресет не применён"
+  speed_preset_saved: "Сохранённые пресеты"
   speed_preset_name_hint: "Назовите сохраняемый пресет"
   speed_preset_save: "Сохранить настройки"
   speed_preset_delete: "Удалить сохранённый пресет"
