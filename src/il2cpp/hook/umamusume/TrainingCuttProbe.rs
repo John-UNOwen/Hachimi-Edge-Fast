@@ -1318,16 +1318,25 @@ fn window_line(window: usize, name: &str, agg: &WindowAgg) -> String {
 //
 // The close door is not trusted on its own: in every stalled session measured so far `CleanUpCutt` is
 // never called, so a hold only that door could end would leave the lever off for the rest of the session.
-// The hold therefore also expires on the game thread's own tick count. At the 33.1 ms mean frame runs 54
-// and 56 measured, 900 ticks is about 30 s of wall clock: past the longest closed cut run any run has
-// measured (8,232 ms on run 55) and past the 28 s one career spread over 19 cuts (run 10), and short
-// enough that a cut the game never cleaned up costs one bounded window instead of the rest of the day.
-const CUT_GATE_HOLD_TICKS: usize = 900;
+// The hold therefore also expires on a wall clock bound. It was a count of game ticks (900) until run 59 read it at
+// `target_fps 200`: a 5 ms frame made that 4.5 s, short of the 8.2 s longest closed cut, and the hold let go in the
+// middle of a cut (C66). 30 s of wall clock is past the longest closed cut run any run has measured (8,232 ms on run
+// 55) and past the 28 s one career spread over 19 cuts (run 10), and short enough that a cut the game never cleaned up
+// costs one bounded window instead of the rest of the day.
+const CUT_GATE_HOLD_US: i64 = 30_000_000;
+
+// The hold's own clock. `ProbeSuite::now_us` answers -1 in a played build, because the suite only starts under
+// `debug_mode`, and the bound has to hold in a played build too. The first read sets the base.
+static GATE_BASE: OnceLock<Instant> = OnceLock::new();
+
+fn gate_clock_us() -> i64 {
+    GATE_BASE.get_or_init(Instant::now).elapsed().as_micros() as i64
+}
 
 #[derive(Debug)]
 struct CutGate {
     open: AtomicBool,
-    ticks: AtomicUsize,
+    opened_us: AtomicI64,
     holds: AtomicUsize,
     expiries: AtomicUsize,
 }
@@ -1336,7 +1345,7 @@ impl CutGate {
     const fn new() -> Self {
         Self {
             open: AtomicBool::new(false),
-            ticks: AtomicUsize::new(0),
+            opened_us: AtomicI64::new(0),
             holds: AtomicUsize::new(0),
             expiries: AtomicUsize::new(0),
         }
@@ -1346,8 +1355,12 @@ impl CutGate {
     /// naming them after the first few. Opening a cut re-arms the clock, so a hold that expired while the
     /// game was waiting for a tap does not shorten the one that follows it.
     fn engage(&self) -> usize {
+        self.engage_at(gate_clock_us())
+    }
+
+    fn engage_at(&self, now_us: i64) -> usize {
+        self.opened_us.store(now_us, atomic::Ordering::Relaxed);
         self.open.store(true, atomic::Ordering::Release);
-        self.ticks.store(0, atomic::Ordering::Relaxed);
 
         self.holds.fetch_add(1, atomic::Ordering::Relaxed) + 1
     }
@@ -1358,23 +1371,30 @@ impl CutGate {
         self.open.store(false, atomic::Ordering::Release);
     }
 
-    /// One game tick. Answers the tick count when this tick ended a hold by reaching the bound and `None`
-    /// otherwise, so the caller only ever logs an expiry.
-    fn tick(&self) -> Option<usize> {
+    /// One game tick. Answers how long the hold had run, in microseconds, when this tick ended it by reaching the
+    /// bound, and `None` otherwise, so the caller only ever logs an expiry.
+    fn tick(&self) -> Option<i64> {
         if !self.open.load(atomic::Ordering::Acquire) {
             return None;
         }
 
-        let ticks = self.ticks.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+        self.hold_expired_at(gate_clock_us())
+    }
 
-        if ticks < CUT_GATE_HOLD_TICKS {
+    fn hold_expired_at(&self, now_us: i64) -> Option<i64> {
+        if !self.open.load(atomic::Ordering::Acquire) {
+            return None;
+        }
+
+        let held_us = now_us - self.opened_us.load(atomic::Ordering::Relaxed);
+        if held_us < CUT_GATE_HOLD_US {
             return None;
         }
 
         self.open.store(false, atomic::Ordering::Release);
         self.expiries.fetch_add(1, atomic::Ordering::Relaxed);
 
-        Some(ticks)
+        Some(held_us)
     }
 
     fn engaged(&self) -> bool {
@@ -1561,7 +1581,7 @@ fn arm_cut_gate(cutt_controller: Option<*mut Il2CppClass>, disabled: &FnvHashSet
     let scenario = unsafe { AnimationSpeed::resolve_method(class, "PlayScenarioTrainingCut", ONE_INFO, CLASS) };
 
     // The close door is the miss with a cost a player pays: with no `CleanUpCutt` wrapper armed nothing
-    // calls `CutGate::release` (`:3174`), so a hold only ever ends on `tick`'s `CUT_GATE_HOLD_TICKS`
+    // calls `CutGate::release` (`:3174`), so a hold only ever ends on `tick`'s `CUT_GATE_HOLD_US` bound
     // bound, and every cut in the session costs the ~30 s window in which `Pass::Hold` refuses both a raise
     // and its owed restore. Named at install, that shape is readable before the first cut instead of after
     // one.
@@ -1729,8 +1749,8 @@ fn cut_gate_missing_line(arming: &GateArming, class_found: bool) -> String {
     }
     else if !arming.close_armed {
         line.push_str(&format!(
-            "; no close door armed, a training cut hold ends only on its {} game tick bound",
-            CUT_GATE_HOLD_TICKS,
+            "; no close door armed, a training cut hold ends only on its {} s wall bound",
+            CUT_GATE_HOLD_US / 1_000_000,
         ));
     }
 
@@ -1740,17 +1760,20 @@ fn cut_gate_missing_line(arming: &GateArming, class_found: bool) -> String {
 /// Once per game tick from `GameSystem_Update`, where a per frame door already exists. A tick with no
 /// hold open is one atomic load.
 pub fn tick_cut_gate() {
-    let Some(ticks) = CUT_GATE.tick() else {
+    let Some(held_us) = CUT_GATE.tick() else {
         return;
     };
 
     if CUT_GATE.expiries.load(atomic::Ordering::Relaxed) <= PROBE_DETAIL_LIMIT {
-        info!("Cutt gate: the training cut never reached its close door, the ui clock hold ends after {ticks} game ticks");
+        info!(
+            "Cutt gate: the training cut never reached its close door, the ui clock hold ends after {:.2} s of wall clock",
+            held_us as f64 / 1_000_000.0
+        );
     }
 }
 
 /// True while a training cut is open in the game: from `PlayTrainingCut` / `PlayScenarioTrainingCut`
-/// to `CleanUpCutt`, ending at `CUT_GATE_HOLD_TICKS` game ticks when the close door never arrives.
+/// to `CleanUpCutt`, ending at `CUT_GATE_HOLD_US` of wall clock when the close door never arrives.
 /// Read once per tween tick by `AnimationSpeed::tween_clocks`, and once per pass by
 /// `HighSpeedSetting::apply` and by both of `StoryTimelineController`'s writes to the story high speed
 /// static, which are the writes C57 measured landing inside a live cut.
@@ -6378,20 +6401,17 @@ mod tests {
     // and 56) is one where `CleanUpCutt` was never called at all, so a hold that only that door could end
     // would leave the lever off for the rest of the day.
     #[test]
-    fn a_cut_gate_hold_ends_at_its_tick_bound_when_the_close_door_never_arrives() {
+    fn a_cut_gate_hold_ends_at_its_wall_bound_when_the_close_door_never_arrives() {
         let gate = CutGate::new();
 
         assert!(!gate.engaged(), "a gate nobody opened is already holding the ui clock off");
-        assert_eq!(gate.engage(), 1, "the first hold of a session is not counted as the first");
+        assert_eq!(gate.engage_at(0), 1, "the first hold of a session is not counted as the first");
 
-        for _ in 0..CUT_GATE_HOLD_TICKS - 1 {
-            assert_eq!(gate.tick(), None, "the hold ended before its bound");
-        }
-
+        assert_eq!(gate.hold_expired_at(CUT_GATE_HOLD_US - 1), None, "the hold ended before its bound");
         assert!(gate.engaged(), "the hold let go of the ui clock early");
-        assert_eq!(gate.tick(), Some(CUT_GATE_HOLD_TICKS), "the hold never ended on its own clock");
+        assert_eq!(gate.hold_expired_at(CUT_GATE_HOLD_US), Some(CUT_GATE_HOLD_US), "the hold never ended on its own clock");
         assert!(!gate.engaged(), "an expired hold still has the ui clock off");
-        assert_eq!(gate.tick(), None, "a closed hold is still counting ticks");
+        assert_eq!(gate.tick(), None, "a closed hold is still timing the cut");
     }
 
     #[test]
@@ -6409,22 +6429,21 @@ mod tests {
     fn the_next_cut_rearms_the_cut_gate_clock() {
         let gate = CutGate::new();
 
-        gate.engage();
+        gate.engage_at(0);
 
-        for _ in 0..CUT_GATE_HOLD_TICKS / 2 {
-            gate.tick();
-        }
+        assert_eq!(gate.hold_expired_at(CUT_GATE_HOLD_US / 2), None, "the hold ended early");
 
-        assert_eq!(gate.engage(), 2, "the second hold was counted as the first");
+        // The second cut opens half way through the first hold's bound. The clock restarts with the cut, so the
+        // first hold's time is not carried into the one that follows it.
+        assert_eq!(gate.engage_at(CUT_GATE_HOLD_US / 2), 2, "the second hold was counted as the first");
         assert!(gate.engaged());
 
-        // The clock restarts with the cut, so a hold that expired while the game was waiting for a tap
-        // does not shorten the one that follows it.
-        for _ in 0..CUT_GATE_HOLD_TICKS - 1 {
-            assert_eq!(gate.tick(), None, "the previous cut's ticks were carried into this one");
-        }
-
-        assert_eq!(gate.tick(), Some(CUT_GATE_HOLD_TICKS));
+        assert_eq!(
+            gate.hold_expired_at(CUT_GATE_HOLD_US / 2 + CUT_GATE_HOLD_US - 1),
+            None,
+            "the previous cut's time was carried into this one"
+        );
+        assert_eq!(gate.hold_expired_at(CUT_GATE_HOLD_US / 2 + CUT_GATE_HOLD_US), Some(CUT_GATE_HOLD_US));
     }
 
     // The gate's arming, which is what the C57 write guard now stands on. Every one of these shapes used
@@ -6556,7 +6575,7 @@ mod tests {
         // What that costs is the tick bound, and the line says it.
         let line = cut_gate_missing_line(&arming, true);
         assert!(line.contains("armed on 2 of 3 doors"), "{line}");
-        assert!(line.contains(&format!("only on its {} game tick bound", CUT_GATE_HOLD_TICKS)), "{line}");
+        assert!(line.contains(&format!("only on its {} s wall bound", CUT_GATE_HOLD_US / 1_000_000)), "{line}");
         assert!(!line.contains("the cut gate is inert"), "{line}");
     }
 
@@ -6657,7 +6676,7 @@ mod tests {
 
         // Not the tick bound clause: with no start door there is no hold for the close door to end, and
         // the line that warns about a bounded hold would point a run at the wrong cost.
-        assert!(!line.contains("game tick bound"), "{line}");
+        assert!(!line.contains("wall bound"), "{line}");
     }
 
     #[test]
@@ -6675,7 +6694,7 @@ mod tests {
         assert!(line.contains(GATE_DOOR_LABELS[0]), "{line}");
         assert!(!line.contains(GATE_DOOR_LABELS[1]), "{line}");
         assert!(!line.contains("inert"), "{line}");
-        assert!(!line.contains("game tick bound"), "{line}");
+        assert!(!line.contains("wall bound"), "{line}");
     }
 
     #[test]
@@ -6727,7 +6746,7 @@ mod tests {
         assert!(line.contains("2 of 3 resolved"), "{line}");
         assert!(line.contains("no matching overload"), "{line}");
         assert!(line.contains("SingleModeMainTrainingCuttController::CleanUpCutt()"), "{line}");
-        assert!(line.contains(&format!("only on its {} game tick bound", CUT_GATE_HOLD_TICKS)), "{line}");
+        assert!(line.contains(&format!("only on its {} s wall bound", CUT_GATE_HOLD_US / 1_000_000)), "{line}");
         assert!(!line.contains("the cut gate is inert"), "{line}");
     }
 

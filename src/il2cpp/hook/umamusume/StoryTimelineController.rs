@@ -391,7 +391,7 @@ fn already_written_for_state(applied_generation: usize, state_generation: usize)
 // - `cut_open` is `TrainingCuttProbe::cut_gate_engaged()`: the measured boundary of a training cut in the
 //   game, open from `PlayTrainingCut` / `PlayScenarioTrainingCut`, closed by `CleanUpCutt`, aged on the game
 //   thread's own tick and ended at its 900 tick bound when the close door never arrives, armed whatever
-//   `debug_mode` says (`TrainingCuttProbe.rs`'s `CUT_GATE_HOLD_TICKS` and `arm_cut_gate`, `529e4f5`).
+//   `debug_mode` says (`TrainingCuttProbe.rs`'s `CUT_GATE_HOLD_US` and `arm_cut_gate`, `529e4f5`).
 //
 // `write_owed` is the marker that says this module has a write to undo. A pass that would touch the static
 // under either input is `Hold`: it writes nothing, and for the restore it leaves the owed marker set, so the

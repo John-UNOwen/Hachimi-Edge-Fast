@@ -209,8 +209,8 @@ fn warn_cut_hold() {
 //   refuses at least what HEAD refused is a function a test can compare against rather than a sentence.
 // - `cut_open` is `TrainingCuttProbe::cut_gate_engaged()`: the measured boundary of a training cut in the
 //   game, open from `PlayTrainingCut` / `PlayScenarioTrainingCut`, closed by `CleanUpCutt`, aged on the game
-//   thread's own tick and ended at `CUT_GATE_HOLD_TICKS 900` when the close door never arrives, armed
-//   whatever `debug_mode` says (`TrainingCuttProbe.rs`'s `CUT_GATE_HOLD_TICKS` at `:1291` and `arm_cut_gate`
+//   thread's own tick and ended at `CUT_GATE_HOLD_US` (30 s of wall clock) when the close door never arrives, armed
+//   whatever `debug_mode` says (`TrainingCuttProbe.rs`'s `CUT_GATE_HOLD_US` and `arm_cut_gate`
 //   at `:1515`, shipped by `529e4f5`).
 //
 // A pass that would write under any one of them is `Hold`: nothing is touched, and what the pass owed stays
@@ -827,7 +827,7 @@ mod tests {
     fn a_gate_that_can_never_engage_does_not_switch_the_option_off() {
         // The 0-of-3 shape C57 is about: `arm_cut_gate` armed no door that can open a hold, so the gate
         // answers closed for the whole session and its refusal half is unreachable. The two proxies are
-        // quiet too here - no career screen, and `StoryEventProbe` installs nothing without `debug_mode` -
+        // quiet too here - no career screen, and `StoryEventProbe` has not stamped yet -
         // so this is a build with no reason to hold anything, and the writes run rather than the option
         // being switched off in silence. The build says what the gate lost at install, in
         // `TrainingCuttProbe::cut_gate_missing_line`, at warn level.
