@@ -154,6 +154,14 @@ fn apply_tcps_multiplier(this: *mut Il2CppObject, mult: f32) -> i32 {
 mod tests {
     use super::*;
 
+    // C23: when the clip ends before the block's old end the block keeps its original length, and a clip that
+    // runs past that end still sets the length.
+    #[test]
+    fn a_block_never_shrinks_below_its_original_length_when_its_clip_grows() {
+        assert_eq!(block_length_after_clip(100, 19, 300), 300);
+        assert_eq!(block_length_after_clip(100, 250, 300), 351);
+    }
+
     // One call per story asset load of the same object: `shipped` is what the field holds when it is read.
     fn load(applied: &mut Option<AppliedTcps>, shipped: &mut i32, mult: f32) {
         let (target, next) = plan_tcps(*shipped, *applied, mult);
@@ -514,13 +522,21 @@ fn adjust_clips_length_with_tcps(this: *mut Il2CppObject, tcps: f32) {
     set_Length(this, total_len);
 }
 
+// C23: a clip that grows can end before the block it sits in did, because the block's other tracks may run past
+// the clip. The block keeps at least its original length, so those tracks keep their frames.
+fn block_length_after_clip(clip_start: i32, new_clip_len: i32, orig_block_len: i32) -> i32 {
+    (clip_start + new_clip_len + 1).max(orig_block_len)
+}
+
 /// Returns new block length
 fn apply_clip_length(
     clip_data: *mut Il2CppObject, orig_clip_len: i32, new_clip_len: i32,
     block_data: *mut Il2CppObject, orig_block_len: i32
 ) -> i32 {
     StoryTimelineClipData::set_ClipLength(clip_data, new_clip_len);
-    let new_block_len = StoryTimelineClipData::get_StartFrame(clip_data) + new_clip_len + 1;
+    let new_block_len = block_length_after_clip(
+        StoryTimelineClipData::get_StartFrame(clip_data), new_clip_len, orig_block_len
+    );
     StoryTimelineBlockData::set_BlockLength(block_data, new_block_len);
 
     let clip_len_diff = new_clip_len - orig_clip_len;
