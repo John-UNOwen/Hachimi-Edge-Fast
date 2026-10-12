@@ -12,7 +12,7 @@ use std::ffi::{CStr, CString};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -337,8 +337,11 @@ static TAG_CUT_BOTTOM_ANIMATOR_FIELD: AtomicUsize = AtomicUsize::new(0);
 // from "the game never reached the door" (A4). Counted, not locked, because this door runs on the cut path.
 static TAG_CUT_WRITES_LOGGED: AtomicUsize = AtomicUsize::new(0);
 // The clock the cut-in effect really runs on. Run 45 reached `AnimateToUnity.AnMotion` through
-// `Gallop.FlashPlayer._motion` (`introspect.log:28743`, image `Plugins.dll`), and its speed door is
-// `SetMotionSpeed/2 -> void(float, bool)` with `get_MotionSpeed/0 -> float()` beside it. Run 44 proved the flash
+// `Gallop.FlashPlayer._motion` (`introspect-run45.log:26507`), whose class the dump prints at
+// `introspect-run45.log:28743` and whose image the dump run names in its log (`hachimi-run45.log:847`:
+// its image is `Plugins.dll`). Its speed door is `SetMotionSpeed/2 -> void(float, bool)`
+// (`introspect-run45.log:28841`) with `get_MotionSpeed/0 -> float()` (`introspect-run45.log:28781`) beside it.
+// Run 44 proved the flash
 // player's own `Play/3` doors are hot on the training screen (1926 calls) and hand a label plus an int of 0, so the
 // speed is not an argument there and this lever has to write on the motion object instead.
 static MOTION_GET_SPEED_ADDR: AtomicUsize = AtomicUsize::new(0);
@@ -574,6 +577,85 @@ pub const MIN_UI_ANIMATION_SCALE: f32 = 0.1;
 // 100x state is reachable in a shipped config and is not a number a run measured.
 pub const MAX_TWEEN_SPEED_PRODUCT: f32 = MAX_FACTOR;
 
+// The second ceiling on the same channel, on the other quantity. `MAX_TWEEN_SPEED_PRODUCT` bounds the
+// multiplier a completion runs at. What a game flow waits on is the completion, and a multiplier is only a
+// speed if the code waiting for it gets a look at the animation in between: one
+// `DG.Tweening.Core.TweenManager::Update` tick advances every delta channel tween by the delta it is handed
+// (`tDeltaTime = (t.isIndependentUpdate ? independentTime : deltaTime) * t.timeScale`), so a tick carrying
+// more tween time than the animation it is speeding finishes that animation - its `Sequence` legs, its
+// inserted callbacks, the `OnComplete` an `Action` is waiting on - inside one step, before the coroutine
+// that was going to watch for it is parked on it. That is C58's shape, and the tick is the half of it the
+// multiplier bound cannot see: 20x is a legal multiplier at any tick length, and on run 57's measured 33.7 ms
+// tick it is 674 ms arriving at once.
+//
+// The numbers the bound is set from are the ones item 107 and item 106 measured in game, quoted from the lines
+// the runs printed. Run 57's blocked dialog turn ran at a mean frame of 33.7 ms with `ui_animation_scale 20`
+// and `target_fps -1`: `Frame clock totals at 2528 s: frames 74951 over 2527736 ms mean 33.7 ms worst 6041 ms`,
+// and every window through the blocked tail reads 33.7 to 33.8 ms (33.2 ms is what runs 54, 55 and 56 print,
+// not what run 57 printed). That tick carried about 674 ms of tween time, and the entry sequence the screen is
+// stuck behind inserts its acknowledge button 0.3 to 0.5 s into itself (`Gallop.DialogSingleModeStartConfirmEntry`
+// `field _crossFadeSeq [class<DG.Tweening.Sequence>]`). The blocked window is the 2,412 s from the log's last
+// training door call, `TrainingParamChangeUI::OnAllTypewriteEnd() call 5` at 20:45:37.757, to its last periodic
+// totals at 21:25:50.242, which read `open now 2417805 ms`, `DialogManager::get_IsShowDialog()=75614 peak 1.000`
+// and `PushDialog(data)=9`. What prints in that window is periodic totals - no door call with arguments, no
+// view change, no exception - and the tail is not literally silent either: the log's next and last door-call
+// line is `GraphicSettings::SetEffectTimeScale(scale) call 7: [1.0]` at 21:25:51.084, 40 minutes after
+// 20:45:37.757 and one line before the log ends, after `Game window teardown message 16`, so it names the
+// shutdown path and not a training flow that resumed. Runs 52, 53 and 56 stalled a training turn the
+// same way at the same setting, the cut's coroutine parked in one branch yielding `UnityEngine.WaitForFixedUpdate`
+// (run 52's last window: `MoveNext 9579 steps over 6 distinct branches`, worst hold 315,365 ms at branch 6; run
+// 56's: 1,766 steps, worst 54,402 ms at branch 6), and the longest of them - run 56b, run 56 left open after the
+// stall - held that branch over 103,833 MoveNext steps with a worst hold of 3,496,409 ms at branch 6 and 104,304
+// `CutInTimelineController::UpdateSpeed` calls pumped through the wait, while the animation that wait was
+// watching for had already closed on the multiplied clock (`allTextWaitTime peak 0.0000`); the same turns ran
+// whole at 1.0.
+//
+// 0.1 s holds one tick under the shortest leg of anything measured being waited on: the count up getter's
+// 0.16 s (run 17's `CountupModifier_getDuration 0.16 -> 0.007999999`), C62's floor on the plate cascade
+// (`MIN_PLATE_INTERVAL_SEC`, 0.25 s), and the near end of the dialog entry's own button insert (0.3 s). A
+// 0.3 to 0.5 s leg therefore spans 3 to 5 ticks instead of arriving inside one, and the 674 ms run 57's tick
+// carried at once is 6.7 of them.
+//
+// What it costs, stated as the quantity it is: a time per tick, so it bites on long ticks and not on short
+// ones. At the nominal 5 ms frame of `target_fps 200` - the bar every completion assertion in this module
+// holds, and the 5.6 ms run 17 measured - the pair ceiling's whole 20x lands at or just under the bound, so a
+// fast client loses nothing. At the 16.9 ms frame run 31 stalled on the career end at the channel is held to
+// 5.9x, and at run 57's 33.7 ms mean frame to 2.97x. Those are still speed-ups of the game's own clock, not
+// slowdowns: `tween_tick_advance` never hands back less than the delta the game wrote, so a frame already
+// longer than the bound - a hitch, or a cut running at its own 8.0000 - arrives as it arrived and the bound
+// only takes away what this fork added (AGENTS section 5).
+pub const MAX_TWEEN_TICK_ADVANCE_SEC: f32 = 0.1;
+
+// One typical animation length, for the census below: the shortest duration a bounded door has been measured
+// handing a training flow (the count up's 0.16 s), rounded up to the value this fork's own gates floor a plate
+// cascade at (`MIN_PLATE_INTERVAL_SEC`, 0.25 s), and the near end of the depth a dialog entry inserts its
+// acknowledge button at (item 107, 0.3 to 0.5 s). A tick carrying more than this has finished a whole
+// animation in one step, whatever the multiplier bound says about it.
+pub const TYPICAL_ANIMATION_SEC: f32 = MIN_PLATE_INTERVAL_SEC;
+
+/// The per tick ceiling applied to one delta channel tick. `delta_time` is what the game handed
+/// `TweenManager::Update` - `Time.deltaTime`, which already carries `Time.timeScale` - and `asked` is what
+/// this fork's ui clock multiplied it into.
+///
+/// The trim lands on `asked`, because `asked` is the half this fork put there. `delta_time.max(...)` is what
+/// keeps it off the game's own tick: where a frame is already longer than the bound the delta arrives as the
+/// game wrote it, so the ceiling removes speed this fork added and never adds time the game did not ask for.
+/// A tick the lever *slowed* rather than sped up (`asked <= delta_time`, the ui slider's 0.1 floor) is handed
+/// on as it is - a ceiling does not reach into a slow down - and so is anything not a number this module can
+/// price. The multiplier that comes out is at or above 1.0 wherever the game handed a positive delta, which is
+/// the promise `ui_clock_of` makes about the lever and this makes about the tick.
+pub fn tween_tick_advance(delta_time: f32, asked: f32) -> f32 {
+    if !delta_time.is_finite() || !asked.is_finite() {
+        return asked;
+    }
+
+    if asked <= delta_time || asked <= MAX_TWEEN_TICK_ADVANCE_SEC {
+        return asked;
+    }
+
+    MAX_TWEEN_TICK_ADVANCE_SEC.max(delta_time)
+}
+
 // The story choice auto select lever. `StoryChoiceController::CheckChoiceAutoTap` scales the
 // increment of `_choiceAutoSelectWaitTime` and `StoryViewController::GetTimeScaleByHighSpeedType`
 // scales the story time scale, both from `0.75 / delay` (C24 measured both sites multiplying by
@@ -787,6 +869,12 @@ pub fn delta_clock() -> f32 { delta_clock_of(ui_animation_scale(), time_scale_pr
 /// real elapsed time, so the multiply below sits on top of the scale the `Time.timeScale` write layer left in
 /// the game rather than beside it (C58, item 62). A mirror that is not a number - which this module never
 /// stores - is read as the neutral 1.0, the way `duration_factor` reads it.
+///
+/// The value handed back is then held under `MAX_TWEEN_TICK_ADVANCE_SEC`, the second ceiling on this channel:
+/// a multiplier says how fast a completion runs and says nothing about how much of it arrives in one step, and
+/// one call of this door is the step every delta channel tween is advanced by. Run 57's 33.7 ms tick on a 20x
+/// clock carried 674 ms, more than the whole entry sequence whose button never appeared (C58, LEDGER item 107).
+/// `tween_tick_advance` is where that lands, and it never hands back less than the delta the game wrote.
 pub fn tween_clocks(delta_time: f32, independent_time: f32) -> (f32, f32) {
     tween_clocks_holding(delta_time, independent_time, TrainingCuttProbe::cut_gate_engaged())
 }
@@ -798,7 +886,15 @@ pub fn tween_clocks(delta_time: f32, independent_time: f32) -> (f32, f32) {
 /// multiplied clock, and runs 54 and 55 ran the same turn whole at 1.0. What the hold covers is one cut, so
 /// every other screen keeps the speed the lever was bought for.
 pub fn tween_clocks_holding(delta_time: f32, independent_time: f32, cut_holds_the_clock: bool) -> (f32, f32) {
+    let census = TWEEN_TICK_CENSUS_ON.load(Ordering::Relaxed);
+
     if cut_holds_the_clock {
+        // A held tick is a tick the census is about too: it is the tick a stalled cut ran on, and a run
+        // reading a peak has to know how many of them were the game's own.
+        if census {
+            note_tween_tick(delta_time, delta_time, true);
+        }
+
         return (delta_time, independent_time);
     }
 
@@ -806,10 +902,132 @@ pub fn tween_clocks_holding(delta_time: f32, independent_time: f32, cut_holds_th
 
     // Fast exit at the neutral setting: no work on a tween tick that nothing speeds up.
     if scale == 1.0 || !scale.is_finite() {
+        if census {
+            note_tween_tick(delta_time, delta_time, false);
+        }
+
         return (delta_time, independent_time);
     }
 
-    (delta_time * scale, independent_time)
+    let asked = delta_time * scale;
+    let handed = tween_tick_advance(delta_time, asked);
+
+    if census {
+        note_tween_tick(asked, handed, false);
+    }
+
+    (handed, independent_time)
+}
+
+// The census that prices the ceiling above: how much tween time one tick actually carried, all session.
+// Item 107 names it as the reading a per tick bound needs before anyone can say what it cost - "a census of
+// how much tween time one tick actually carries, which no probe measures yet" - and a bound no run can price
+// is a bound no run can tell apart from nothing. It counts one entry per call this door answers - DOTween's
+// own update components call `TweenManager::Update` once a frame each for the update types in use, so a peak
+// here is a peak on a tween tick and not a claim about a rendered frame - and it counts the delta channel
+// only, because that is the channel this fork multiplies; the `independentTime` half is handed on as
+// `DOTweenComponent` computed it (C5) and a tween advanced on it is not a tick this fork carried anything
+// into.
+static TWEEN_TICK_CENSUS_ON: AtomicBool = AtomicBool::new(false);
+static TWEEN_TICK_CENSUS_START: OnceLock<Instant> = OnceLock::new();
+static TWEEN_TICKS: AtomicUsize = AtomicUsize::new(0);
+static TWEEN_TICK_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static TWEEN_TICK_MS_PEAK: AtomicI64 = AtomicI64::new(0);
+// What the multiplied clock asked for before the ceiling took anything off it: the 674 ms run 57's tick asked
+// for, as the run itself reads it, rather than as a number this module asserts about it.
+static TWEEN_TICK_ASKED_MS_PEAK: AtomicI64 = AtomicI64::new(0);
+static TWEEN_TICKS_OVER_TYPICAL: AtomicUsize = AtomicUsize::new(0);
+static TWEEN_TICKS_TRIMMED: AtomicUsize = AtomicUsize::new(0);
+static TWEEN_TICKS_HELD: AtomicUsize = AtomicUsize::new(0);
+static TWEEN_TICK_REPORT_SEC: AtomicI64 = AtomicI64::new(-1);
+static TWEEN_TICK_REPORT_TICKS: AtomicUsize = AtomicUsize::new(0);
+
+/// One tween tick, charged to the census. Reached only when `debug_mode` armed it, and atomics only: no
+/// format, no allocation, no lock, no game pointer (AGENTS section 6 - this sits on a path DOTween runs every
+/// tween tick). A non finite value is not a measurement and is dropped rather than becoming a peak, the way
+/// `TrainingCuttProbe::peak_merge` drops one.
+fn note_tween_tick(asked: f32, handed: f32, held: bool) {
+    if !asked.is_finite() || !handed.is_finite() {
+        return;
+    }
+
+    let _ = TWEEN_TICK_CENSUS_START.get_or_init(Instant::now);
+
+    let asked_ms = (asked * MS_PER_SECOND).round() as i64;
+    let handed_ms = (handed * MS_PER_SECOND).round() as i64;
+
+    TWEEN_TICKS.fetch_add(1, Ordering::Relaxed);
+    TWEEN_TICK_MS_TOTAL.fetch_add(handed_ms, Ordering::Relaxed);
+    TWEEN_TICK_MS_PEAK.fetch_max(handed_ms, Ordering::Relaxed);
+    TWEEN_TICK_ASKED_MS_PEAK.fetch_max(asked_ms, Ordering::Relaxed);
+
+    if handed_ms > (TYPICAL_ANIMATION_SEC * MS_PER_SECOND) as i64 {
+        TWEEN_TICKS_OVER_TYPICAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    if handed_ms < asked_ms {
+        TWEEN_TICKS_TRIMMED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    if held {
+        TWEEN_TICKS_HELD.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Whether this build counts tween ticks at all: `debug_mode`, armed by the same config pass that mirrors
+/// every other lever, so a build played without that switch pays one relaxed load on a tween tick and writes
+/// no line.
+fn tween_tick_census_armed() -> bool {
+    TWEEN_TICK_CENSUS_ON.load(Ordering::Relaxed)
+}
+
+/// The periodic rule every other census in this fork reports on - `TrainingCuttProbe::report_due`, the
+/// interval and the quiet path rule `StoryFrameProbe` runs on - from the game tick in `GameSystem::GameSystem_Update`,
+/// beside the probes that already report there. A quiet path writes nothing.
+pub fn report_if_due() {
+    if !tween_tick_census_armed() {
+        return;
+    }
+
+    let Some(start) = TWEEN_TICK_CENSUS_START.get() else {
+        return;
+    };
+
+    let ticks = TWEEN_TICKS.load(Ordering::Relaxed);
+    let now_sec = start.elapsed().as_millis() as i64 / MS_PER_SECOND as i64;
+    let last_sec = TWEEN_TICK_REPORT_SEC.load(Ordering::Relaxed);
+    let last_ticks = TWEEN_TICK_REPORT_TICKS.load(Ordering::Relaxed);
+
+    if !TrainingCuttProbe::report_due(now_sec, last_sec, ticks, last_ticks, TrainingCuttProbe::REPORT_INTERVAL_SECS) {
+        return;
+    }
+
+    TWEEN_TICK_REPORT_SEC.store(now_sec, Ordering::Relaxed);
+    TWEEN_TICK_REPORT_TICKS.store(ticks, Ordering::Relaxed);
+
+    debug!("{}", tween_tick_census_line(now_sec));
+}
+
+/// The line itself, apart from the log call and apart from any clock: what a run reads to price the per tick
+/// ceiling. The mean is over every tick counted, so a session that spent most of its ticks neutral says so.
+fn tween_tick_census_line(now_sec: i64) -> String {
+    let ticks = TWEEN_TICKS.load(Ordering::Relaxed);
+    let total_ms = TWEEN_TICK_MS_TOTAL.load(Ordering::Relaxed);
+    let mean = if ticks > 0 { total_ms as f64 / ticks as f64 } else { 0.0 };
+
+    format!(
+        "Tween clock census at {now_sec} s: {ticks} tween ticks mean {mean:.1} ms peak {} ms of tween time per tick, {} ticks carried more than one typical animation ({typical} ms), {} trimmed by the {cap} ms per tick ceiling (peak asked {} ms), {} handed on by the training cut hold; ui clock {ui}x over a {produced}x Time.timeScale is a {clock}x delta clock",
+        TWEEN_TICK_MS_PEAK.load(Ordering::Relaxed),
+        TWEEN_TICKS_OVER_TYPICAL.load(Ordering::Relaxed),
+        TWEEN_TICKS_TRIMMED.load(Ordering::Relaxed),
+        TWEEN_TICK_ASKED_MS_PEAK.load(Ordering::Relaxed),
+        TWEEN_TICKS_HELD.load(Ordering::Relaxed),
+        typical = TYPICAL_ANIMATION_SEC * MS_PER_SECOND,
+        cap = MAX_TWEEN_TICK_ADVANCE_SEC * MS_PER_SECOND,
+        ui = ui_animation_scale(),
+        produced = time_scale_produced(),
+        clock = delta_clock(),
+    )
 }
 
 // The factors are cached so a detour that runs per call reads one atomic instead of
@@ -1502,12 +1720,12 @@ unsafe fn resolve_method_any(
 
         // A2 is still open, and this is the honest shape of it: `CLASS` matches every reference type,
         // so `SingleModeResultContentBase::FadeInContentFromRight/3` taking `UnityEngine.CanvasGroup`
-        // and the one taking `UnityEngine.UI.MaskableGraphic` (`introspect.log:24167-24168`) are one
+        // and the one taking `UnityEngine.UI.MaskableGraphic` (`introspect.log:24258-24259`) are one
         // request to a matcher that compares enums. That collision is live at the site written
         // against it: `hook/umamusume/SingleModeResultContentBase.rs` asks for the `/3` pair with
         // `[class, r4, class]` and gets the ambiguity line below on every install. This file's own
         // door is the different method the dump prints once, `TeamStadiumGrandResultViewController::
-        // FadeInContentFromRight/2 -> void(class<UnityEngine.CanvasGroup>, float)` at 25842, and
+        // FadeInContentFromRight/2 -> void(class<UnityEngine.CanvasGroup>, float)` (`introspect.log:26070`), and
         // answers it uniquely. The collision is printed instead of settled in silence, and the first
         // candidate the table lists is bound as it always was: both travel as the pointer the wrapper
         // declares, so what the collision decides is which of the two calls get scaled, not whether
@@ -1806,6 +2024,12 @@ fn mirror_config(config: &Config) {
 
     note_pair_ceiling(ui, [transition, screens, story]);
     note_training_gate_levers();
+
+    // The census that prices the per tick ceiling is a measurement, so it is armed with `debug_mode` and
+    // costs a build played without that switch one relaxed load on a tween tick. The ceiling itself is
+    // shipped whatever this says, for the same reason the cut gate and the plate floor are: a bound on a
+    // lever this fork owns has to stand where the game is actually played (C58, LEDGER item 107).
+    TWEEN_TICK_CENSUS_ON.store(config.debug_mode, Ordering::Release);
 }
 
 // `skip_training_cut`, mirrored so the per frame pump in `TrainingCuttProbe.rs` reads shipped code
@@ -1990,7 +2214,7 @@ fn note_pair_ceiling(ui: f32, factors: [f32; 3]) -> bool {
     };
 
     debug!(
-        "AnimationSpeed: pair ceiling {product}x on one completion both layers reach: ui_animation {ui}x over the {produced}x Unity is holding in Time.timeScale from this fork's write layer ({lever_note}) is a {clock}x delta clock, so the ui clock runs {cap}x and {headroom}x is left for a group factor (transition {transition}, result {screens}, story {story}); the 20x bounds what this fork puts on the delta channel - the independentTime channel a time scale independent tween is advanced on and the story timeline's own time scale (MAX_TIME_SCALE {max_time_scale}x) are outside it, and a Time.timeScale past the ceiling is the game's own, left where the game put it; the trim reaches each armed door through its pace - {lanes}; a door leaves the trim only on a measured completion wall time, and {COUNTUP_DOOR} {countup}",
+        "AnimationSpeed: pair ceiling {product}x on one completion both layers reach: ui_animation {ui}x over the {produced}x Unity is holding in Time.timeScale from this fork's write layer ({lever_note}) is a {clock}x delta clock, so the ui clock runs {cap}x and {headroom}x is left for a group factor (transition {transition}, result {screens}, story {story}); the 20x bounds what this fork puts on the delta channel - the independentTime channel a time scale independent tween is advanced on and the story timeline's own time scale (MAX_TIME_SCALE {max_time_scale}x) are outside it, and a Time.timeScale past the ceiling is the game's own, left where the game put it; the trim reaches each armed door through its pace - {lanes}; a door leaves the trim only on a measured completion wall time, and {COUNTUP_DOOR} {countup}; one tick of that clock carries at most {tick_ms} ms of tween time, the whole {product}x up to a {tick_frame} ms frame and a smaller multiplier past it (MAX_TWEEN_TICK_ADVANCE_SEC, C58 / LEDGER item 107), and the `Tween clock census` line prices it when debug_mode is on",
         product = MAX_TWEEN_SPEED_PRODUCT,
         produced = produced,
         lever_note = lever_note,
@@ -2002,6 +2226,8 @@ fn note_pair_ceiling(ui: f32, factors: [f32; 3]) -> bool {
         story = factors[2],
         max_time_scale = MAX_TIME_SCALE,
         lanes = lanes,
+        tick_ms = MAX_TWEEN_TICK_ADVANCE_SEC * MS_PER_SECOND,
+        tick_frame = MAX_TWEEN_TICK_ADVANCE_SEC / MAX_TWEEN_SPEED_PRODUCT * MS_PER_SECOND,
     );
 
     true
@@ -2256,8 +2482,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     install_getters(umamusume);
 
     // Not `apply()`. This function runs between `Interceptor::begin_batch` and `finish_batch`
-    // (`hook/mod.rs:272-307`), which sits inside `DllMain` under the loader lock
-    // (`windows/main.rs:62-73`, `windows/hook.rs:64-71`): nothing is armed yet and the game has
+    // (`hook/mod.rs:2201-2236`), which sits inside `DllMain` under the loader lock
+    // (`windows/main.rs:62-75`, `windows/hook.rs:12-42`): nothing is armed yet and the game has
     // not finished initialising. `apply()` reaches StoryManager and the save loader through
     // `HighSpeedSetting` - its getter chain and `SaveHighSpeedType`, which persists - and rewrites
     // the duration fields, so the install path was calling game code, including a saving write,
@@ -2267,7 +2493,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     // are what the argument scaling detours and the `set_timeScale` hook read: leaving them at 1.0
     // until the first tick would run the boot fades at the shipped speed. The writes wait for
     // DIRTY, so the first pass is the first `GameSystem_Update` tick on the game thread through
-    // `apply_if_dirty` (`GameSystem.rs:49`) - the deferred shape `Time::init` already uses - and
+    // `apply_if_dirty` (`GameSystem.rs:88-89`) - the deferred shape `Time::init` already uses - and
     // `SceneManager::ChangeView` runs one before the first view change reads its fade constants.
     refresh_config_mirrors();
     mark_dirty();
@@ -3011,7 +3237,7 @@ fn note_tag_cut_write(door: &str, slot: usize, current: Option<(f32, bool)>, tar
 }
 
 type TagCutCreateLineEffectFn = extern "C" fn(this: *mut Il2CppObject, transform: *mut Il2CppObject) -> *mut Il2CppObject;
-// `CreateLineEffect/1 -> class<UnityEngine.Animator>(class<Transform>)` (`introspect.log:23805`): the door hands
+// `CreateLineEffect/1 -> class<UnityEngine.Animator>(class<Transform>)` (`introspect.log:23807`): the door hands
 // the line effect's Animator back, so the write goes on the object the game actually made rather than on a guess
 // about which field the class plays with. Both parameters are references held as addresses and passed back, and
 // the Animator returned is handed back untouched (A5, C48).
@@ -3031,7 +3257,7 @@ def_detour! {
 }
 
 type TagCutPlayLineEffectFn = extern "C" fn(this: *mut Il2CppObject);
-// `PlayLineEffect/0 -> void()` (`introspect.log:23809`), the door the class plays `_topLineAnimator` and
+// `PlayLineEffect/0 -> void()` (`introspect.log:23808`), the door the class plays `_topLineAnimator` and
 // `_bottomLineAnimator` through. The speed is an absolute value this fork holds rather than a multiple of what
 // the Animator already had, so a cut that reaches this door and `CreateLineEffect` is not written twice (C22).
 def_detour! {
@@ -3108,7 +3334,7 @@ unsafe fn raise_motion_speed(motion: *mut Il2CppObject, target: f32) -> Option<(
 }
 
 /// The motion a flash player plays through: `field _motion [class<AnimateToUnity.AnMotion>]`
-/// (`introspect.log:26507`), read the same way the tag cut-in line animators are read. A field that did not resolve
+/// (`introspect-run45.log:26507`), read the same way the tag cut-in line animators are read. A field that did not resolve
 /// at init reads as null here, and a null motion is a no-op.
 unsafe fn read_flash_motion(this: *mut Il2CppObject) -> *mut Il2CppObject {
     read_line_animator(this, FLASH_MOTION_FIELD.load(Ordering::Relaxed))
@@ -3143,7 +3369,7 @@ const FLASH_PLAY_FLOAT_SLOT: usize = 17;
 const MOTION_SET_SPEED_SLOT: usize = 18;
 
 type FlashPlayerPlayIntFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, action: *mut Il2CppObject, value: i32);
-// `FlashPlayer::Play/3 -> void(string<System.String>, class<System.Action>, int)` (`introspect.log:28693`), reached
+// `FlashPlayer::Play/3 -> void(string<System.String>, class<System.Action>, int)` (`introspect-run45.log:28693`), reached
 // 1926 times in run 44 on the labels `in00`, `in`, `loop` and `end` with an int of 0. The label names a motion label
 // and the int is not a speed, so the lever writes on the motion the player holds rather than on an argument, after
 // the game has started the play. The string and the Action travel as addresses and go back untouched (A5).
@@ -3166,7 +3392,7 @@ def_detour! {
 }
 
 type FlashPlayerPlayFloatFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, action: *mut Il2CppObject, value: f32);
-// `Play/3 -> void(string<System.String>, class<System.Action>, float)` (`introspect.log:28694`), the same door with a
+// `Play/3 -> void(string<System.String>, class<System.Action>, float)` (`introspect-run45.log:28694`), the same door with a
 // float, which run 44 reached zero times. Armed so a run says whether this client ever plays a cut-in effect through
 // it, with the same write on the motion behind the player.
 def_detour! {
@@ -3199,7 +3425,7 @@ fn raise_speed_argument(speed: f32, bound: f32) -> f32 {
 }
 
 type MotionSetSpeedDoorFn = extern "C" fn(this: *mut Il2CppObject, speed: f32, to_children: bool);
-// `AnMotion::SetMotionSpeed/2 -> void(float, bool)` (`introspect.log:28841`), the game's own speed door on the
+// `AnMotion::SetMotionSpeed/2 -> void(float, bool)` (`introspect-run45.log:28841`), the game's own speed door on the
 // motion. The argument is scaled rather than the field multiplied, and the value written is never below what the
 // caller handed nor past the pair bound: a motion the game put at 8.0 stays at 8.0, and a paused motion stays paused.
 def_detour! {
@@ -3401,8 +3627,8 @@ fn install_getters(umamusume: *const Il2CppImage) {
 
     // The training tag cut-in effect, the leg run 40 measured at 1214 and 1223 ms between `PlayCutIn` and its
     // `done` action coming back as `PlayCutInOut`. `CreateLineEffect/1 -> class<UnityEngine.Animator>(class<Transform>)`
-    // (`introspect.log:23805`) hands the effect's Animator back, and `PlayLineEffect/0 -> void()`
-    // (`introspect.log:23809`) is the door the class plays its own `_topLineAnimator` / `_bottomLineAnimator`
+    // (`introspect.log:23807`) hands the effect's Animator back, and `PlayLineEffect/0 -> void()`
+    // (`introspect.log:23808`) is the door the class plays its own `_topLineAnimator` / `_bottomLineAnimator`
     // through, so both doors hand the lever a live object instead of an address guessed from a field. Nothing is
     // armed unless `UnityEngine.Animator`'s getter and setter pair resolved as well: a lever that cannot read the
     // speed it is about to raise cannot honour the raise-only rule, and 0 is never called (AGENTS section 2).
@@ -3457,7 +3683,7 @@ fn install_getters(umamusume: *const Il2CppImage) {
 
     // The clock a training cut-in effect actually runs on. `AnimateToUnity.AnMotion` lives in `Plugins.dll`, an image
     // the dump scope does not walk but the game loads, and run 45 reached it through `Gallop.FlashPlayer._motion`
-    // (`introspect.log:28743`). Nothing is armed unless the motion's own getter and setter pair resolved: a lever
+    // (`introspect-run45.log:26507`). Nothing is armed unless the motion's own getter and setter pair resolved: a lever
     // that cannot read the speed it is about to raise cannot honour the raise-only rule, and 0 is never called.
     let flash_player = TrainingCuttProbe::class_for_label(umamusume, "Gallop.FlashPlayer");
     let motion_class = crate::il2cpp::symbols::get_assembly_image(c"Plugins.dll").ok().and_then(|image| {
@@ -3784,12 +4010,69 @@ mod tests {
         COUNTUP_UNMATCHED.store(state.unmatched, Ordering::Release);
     }
 
+    // The tween tick census is a process wide counter set like the count up bracket, and a case that reads it
+    // has to start where a fresh launch does: nothing counted, nothing armed.
+    struct TweenTickCensusState {
+        armed: bool,
+        ticks: usize,
+        total_ms: i64,
+        peak_ms: i64,
+        asked_peak_ms: i64,
+        over_typical: usize,
+        trimmed: usize,
+        held: usize,
+        report_sec: i64,
+        report_ticks: usize,
+    }
+
+    fn take_tween_tick_census() -> TweenTickCensusState {
+        let state = TweenTickCensusState {
+            armed: TWEEN_TICK_CENSUS_ON.load(Ordering::Relaxed),
+            ticks: TWEEN_TICKS.load(Ordering::Relaxed),
+            total_ms: TWEEN_TICK_MS_TOTAL.load(Ordering::Relaxed),
+            peak_ms: TWEEN_TICK_MS_PEAK.load(Ordering::Relaxed),
+            asked_peak_ms: TWEEN_TICK_ASKED_MS_PEAK.load(Ordering::Relaxed),
+            over_typical: TWEEN_TICKS_OVER_TYPICAL.load(Ordering::Relaxed),
+            trimmed: TWEEN_TICKS_TRIMMED.load(Ordering::Relaxed),
+            held: TWEEN_TICKS_HELD.load(Ordering::Relaxed),
+            report_sec: TWEEN_TICK_REPORT_SEC.load(Ordering::Relaxed),
+            report_ticks: TWEEN_TICK_REPORT_TICKS.load(Ordering::Relaxed),
+        };
+
+        TWEEN_TICK_CENSUS_ON.store(false, Ordering::Release);
+        TWEEN_TICKS.store(0, Ordering::Release);
+        TWEEN_TICK_MS_TOTAL.store(0, Ordering::Release);
+        TWEEN_TICK_MS_PEAK.store(0, Ordering::Release);
+        TWEEN_TICK_ASKED_MS_PEAK.store(0, Ordering::Release);
+        TWEEN_TICKS_OVER_TYPICAL.store(0, Ordering::Release);
+        TWEEN_TICKS_TRIMMED.store(0, Ordering::Release);
+        TWEEN_TICKS_HELD.store(0, Ordering::Release);
+        TWEEN_TICK_REPORT_SEC.store(-1, Ordering::Release);
+        TWEEN_TICK_REPORT_TICKS.store(0, Ordering::Release);
+
+        state
+    }
+
+    fn restore_tween_tick_census(state: &TweenTickCensusState) {
+        TWEEN_TICK_CENSUS_ON.store(state.armed, Ordering::Release);
+        TWEEN_TICKS.store(state.ticks, Ordering::Release);
+        TWEEN_TICK_MS_TOTAL.store(state.total_ms, Ordering::Release);
+        TWEEN_TICK_MS_PEAK.store(state.peak_ms, Ordering::Release);
+        TWEEN_TICK_ASKED_MS_PEAK.store(state.asked_peak_ms, Ordering::Release);
+        TWEEN_TICKS_OVER_TYPICAL.store(state.over_typical, Ordering::Release);
+        TWEEN_TICKS_TRIMMED.store(state.trimmed, Ordering::Release);
+        TWEEN_TICKS_HELD.store(state.held, Ordering::Release);
+        TWEEN_TICK_REPORT_SEC.store(state.report_sec, Ordering::Release);
+        TWEEN_TICK_REPORT_TICKS.store(state.report_ticks, Ordering::Release);
+    }
+
     struct PassTurn {
         _turn: MutexGuard<'static, ()>,
         saved_mirrors: [u32; 11],
         saved_applied: [u32; 4],
         saved_training_note: bool,
         saved_countup: CountupBracketState,
+        saved_tween_census: TweenTickCensusState,
     }
 
     fn pass_turn() -> PassTurn {
@@ -3833,6 +4116,7 @@ mod tests {
             saved_applied,
             saved_training_note,
             saved_countup: take_countup_bracket(),
+            saved_tween_census: take_tween_tick_census(),
         }
     }
 
@@ -3851,6 +4135,7 @@ mod tests {
             TAG_CUT_FACTOR.store(self.saved_mirrors[10], Ordering::Release);
             TRAINING_DOORS_NOTE_LOGGED.store(self.saved_training_note, Ordering::Release);
             restore_countup_bracket(&self.saved_countup);
+            restore_tween_tick_census(&self.saved_tween_census);
 
             for group in 0..self.saved_applied.len() {
                 APPLIED_FACTORS[group].store(self.saved_applied[group], Ordering::Release);
@@ -4199,25 +4484,40 @@ mod tests {
             "the neutral clock changed a tween tick",
         );
 
-        // `ui_animation 20`, the ceiling the mirror publishes for the wizard's 1000.0 (C5).
+        // `ui_animation 20`, the ceiling the mirror publishes for the wizard's 1000.0 (C5). On a tick the per
+        // tick ceiling does not bind - the 5 ms `target_fps 200` frame - the delta channel carries the whole
+        // 20x the lever asks for and the independent channel is exactly what the caller computed.
         mirror_config(&timing_config(1.0, 1.0, 1.0, MAX_UI_ANIMATION_SCALE));
+        let (fast_tick, fast_independent) = tween_clocks(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC);
+        assert!(ms_is(fast_tick, TICK_CEILING_FRAME_SEC * MAX_UI_ANIMATION_SCALE), "the delta channel stopped being the clock this lever speeds up: {fast_tick} on a {} s tick", TICK_CEILING_FRAME_SEC);
+        assert_eq!(fast_independent, TICK_CEILING_FRAME_SEC, "the independent channel was scaled: a time scale independent tween ran on the mod's clock");
+
+        // C5's defect, named on the 60 fps frame: the delta channel is the clock the option is about, the
+        // independent channel is the game's own real time, and they are not the same number.
         let (delta, independent) = tween_clocks(frame, real_time_tick);
-        assert_eq!(delta, frame * MAX_UI_ANIMATION_SCALE, "the delta channel stopped being the clock this lever speeds up");
+        assert!(delta > frame, "the lever put nothing on the delta channel: {delta}");
+        assert!(independent < delta, "the independent channel caught up with the delta channel: {independent} vs {delta}");
         assert_eq!(independent, real_time_tick, "the independent channel was scaled: a time scale independent tween ran on the mod's clock");
 
-        // The wall clock a 1 s tween takes on each channel, 60 ticks to a wall second: the scaled
-        // channel keeps the 50 ms the option asks for, the independent channel still takes its second.
-        // Before this fix both came out 50 ms, which is a real time UI tween ending in the time it takes
-        // the game to draw three frames.
-        let wall_ms_for_one_second_of_tween = |channel: f32| 1000.0 / (channel * 60.0);
-        assert!(ms_is(wall_ms_for_one_second_of_tween(delta), 1000.0 / MAX_UI_ANIMATION_SCALE), "the scaled clock no longer completes a second 20x faster");
-        assert!(ms_is(wall_ms_for_one_second_of_tween(independent), 1000.0), "the real time clock ran faster than real time");
+        // And the delta channel is held to the per tick ceiling on that frame: 100 ms of tween time, which is
+        // 6x real time rather than the 20x a 5 ms tick carries (C58, LEDGER item 107).
+        assert!(ms_is(delta, MAX_TWEEN_TICK_ADVANCE_SEC), "a 16.7 ms tick at ui_animation 20 handed {delta} s of tween time, not the {MAX_TWEEN_TICK_ADVANCE_SEC} s ceiling");
+        assert!(delta < frame * MAX_UI_ANIMATION_SCALE, "the tick ceiling did not bite on a 60 fps tick: it handed {}", frame * MAX_UI_ANIMATION_SCALE);
+
+        // The wall clock a 1 s tween takes on each channel: 60 ticks to a wall second at this frame, so the
+        // delta channel closes a second of tween time in 166.7 ms and the independent channel still takes its
+        // second. Before C5 both came out 50 ms, which is a real time UI tween ending in the time it takes the
+        // game to draw three frames.
+        let wall_ms_for_one_second_of_tween = |advance: f32, ticks_per_sec: f32| 1000.0 / (advance * ticks_per_sec);
+        assert!(ms_is(wall_ms_for_one_second_of_tween(delta, 1.0 / frame), 1000.0 * frame / MAX_TWEEN_TICK_ADVANCE_SEC), "the scaled clock no longer completes a second faster than real time");
+        assert!(ms_is(wall_ms_for_one_second_of_tween(fast_tick, 1.0 / TICK_CEILING_FRAME_SEC), 1000.0 / MAX_UI_ANIMATION_SCALE), "the per tick ceiling took speed off a tick short enough for the whole lever");
+        assert!(ms_is(wall_ms_for_one_second_of_tween(independent, 1.0 / frame), 1000.0), "the real time clock ran faster than real time");
 
         // The slider's floor: the scaled clock slows down, the game's real time channel is untouched by
-        // a lever that is not about it.
+        // a lever that is not about it, and the tick ceiling does not reach into a slow down.
         mirror_config(&timing_config(1.0, 1.0, 1.0, MIN_UI_ANIMATION_SCALE));
         let (slower_delta, slower_independent) = tween_clocks(frame, real_time_tick);
-        assert_eq!(slower_delta, frame * MIN_UI_ANIMATION_SCALE);
+        assert_eq!(slower_delta, frame * MIN_UI_ANIMATION_SCALE, "the ceiling turned the slider's slow down into a shorter one");
         assert_eq!(slower_independent, real_time_tick, "the pause clock took the slider's slow down");
 
         // A mirror that is not a number - which `mirror_config` never stores - is the neutral clock on
@@ -4236,13 +4536,13 @@ mod tests {
             tween_speed(Group::Screens) <= MAX_TWEEN_SPEED_PRODUCT,
             "the pair left its ceiling once the independent channel came out of it",
         );
-        let (delta, independent) = tween_clocks(frame, real_time_tick);
-        assert_eq!(delta, frame * MAX_UI_ANIMATION_SCALE);
-        assert_eq!(independent, real_time_tick);
+        let (delta, independent) = tween_clocks(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC);
+        assert!(ms_is(delta, TICK_CEILING_FRAME_SEC * MAX_UI_ANIMATION_SCALE), "the tick ceiling trimmed the whole 20x off a {} ms tick: {delta}", TICK_CEILING_FRAME_SEC * 1000.0);
+        assert_eq!(independent, TICK_CEILING_FRAME_SEC);
 
         println!(
-            "tween clock at ui_animation {}x: delta tick {} s -> {} s, independent tick {} s -> {} s (MAX_UI_ANIMATION_SCALE {})",
-            ui_animation_scale(), frame, delta, real_time_tick, independent, MAX_UI_ANIMATION_SCALE,
+            "tween clock at ui_animation {}x: delta tick {} s -> {} s on a 60 fps frame, {} s -> {} s on a {} ms frame, independent tick {} s -> {} s (MAX_UI_ANIMATION_SCALE {}, MAX_TWEEN_TICK_ADVANCE_SEC {} s)",
+            ui_animation_scale(), frame, delta, TICK_CEILING_FRAME_SEC, fast_tick, TICK_CEILING_FRAME_SEC * 1000.0, real_time_tick, independent, MAX_UI_ANIMATION_SCALE, MAX_TWEEN_TICK_ADVANCE_SEC,
         );
     }
 
@@ -4267,18 +4567,295 @@ mod tests {
         assert_eq!(held_independent, real_time_tick);
 
         // The hold is per cut and not per session: the same mirror with no cut playing scales the channel
-        // the lever is for again.
+        // the lever is for again, up to the per tick ceiling on a frame that long.
         let (delta, independent) = tween_clocks_holding(frame, real_time_tick, false);
-        assert_eq!(delta, frame * MAX_UI_ANIMATION_SCALE, "the hold outlasted the cut it was covering");
+        assert!(ms_is(delta, MAX_TWEEN_TICK_ADVANCE_SEC), "a released 16.7 ms tick handed {delta} s of tween time, not the {MAX_TWEEN_TICK_ADVANCE_SEC} s ceiling");
+        assert!(delta > held_delta, "the hold outlasted the cut it was covering");
         assert_eq!(independent, real_time_tick);
 
-        // What the hold costs at the ceiling: the cut's tweens take their own length instead of a twentieth
-        // of it, which is the difference between a completion the cut's wait can still see and one it has
-        // already missed.
-        let wall_ms_for_one_second_of_tween = |channel: f32| 1000.0 / (channel * 60.0);
-        assert!(ms_is(wall_ms_for_one_second_of_tween(held_delta), 1000.0), "a held tween still ran fast");
-        assert!(ms_is(wall_ms_for_one_second_of_tween(delta), 1000.0 / MAX_UI_ANIMATION_SCALE), "a released tween stopped being the one the lever speeds up");
+        // And the hold is still the difference between a completion the cut's wait can see and one it has
+        // missed, on a tick short enough for the whole lever: a held cut's tweens take their own length, a
+        // released one runs at the pair ceiling's 20x.
+        let (held_fast, _) = tween_clocks_holding(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC, true);
+        let (released_fast, _) = tween_clocks_holding(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC, false);
+        assert_eq!(held_fast, TICK_CEILING_FRAME_SEC, "the hold let the ui clock into a cut's tween tick");
+        assert_eq!(held_fast, TICK_CEILING_FRAME_SEC, "the hold let the ui clock into a cut's tween tick");
+        assert!(ms_is(released_fast, TICK_CEILING_FRAME_SEC * MAX_UI_ANIMATION_SCALE), "a released tick stopped being the one the lever speeds up: {released_fast}");
+
+        // What the hold costs: the cut's tweens take their own length instead of a twentieth of it, which is
+        // the difference between a completion the cut's wait can still see and one it has already missed.
+        let wall_ms_for_one_second_of_tween = |advance: f32, ticks_per_sec: f32| 1000.0 / (advance * ticks_per_sec);
+        assert!(ms_is(wall_ms_for_one_second_of_tween(held_delta, 1.0 / frame), 1000.0), "a held tween still ran fast");
+        assert!(ms_is(wall_ms_for_one_second_of_tween(delta, 1.0 / frame), 1000.0 * frame / MAX_TWEEN_TICK_ADVANCE_SEC), "a released tween stopped being the one the lever speeds up");
+        assert!(ms_is(wall_ms_for_one_second_of_tween(released_fast, 1.0 / TICK_CEILING_FRAME_SEC), 1000.0 / MAX_UI_ANIMATION_SCALE), "a released tick on a short frame stopped running at the pair ceiling");
     }
+
+    // C58 / LEDGER item 107: the second ceiling on this fork's tween clock, on the quantity a flow actually
+    // waits on. Run 57 stopped on a goal complete dialog whose acknowledge button never appeared, at a mean
+    // frame of 33.7 ms: `Frame clock totals at 2528 s: frames 74951 over 2527736 ms mean 33.7 ms worst 6041 ms`,
+    // every window through the blocked tail 33.7 to 33.8 ms, and the training screen window - the screen it
+    // stopped on - 74156 frames over 2499928 ms, the same 33.7 ms. Its snapshot reads `ui_animation 20` with
+    // `target_fps -1`, so one `TweenManager::Update` tick of that session carried 33.7 x 20 = 674 ms of tween
+    // time - the whole entry of the dialog it is stuck behind, arrived at once. That entry cross fades through
+    // a `Sequence` (`Gallop.DialogSingleModeStartConfirmEntry` `field _crossFadeSeq
+    // [class<DG.Tweening.Sequence>]`) with its button inserted 0.3 to 0.5 s into it. The blocked window is the
+    // 2,412 s from the log's last training door call, `TrainingParamChangeUI::OnAllTypewriteEnd() call 5` at
+    // 20:45:37.757, to its last periodic totals at 21:25:50.242, which read `open now 2417805 ms`,
+    // `DialogManager::get_IsShowDialog()=75614 peak 1.000` and `PushDialog(data)=9`. That window prints periodic
+    // totals and no door call with arguments, no view change and no exception; the log's next and last door-call
+    // line is `GraphicSettings::SetEffectTimeScale(scale) call 7: [1.0]` at 21:25:51.084, 40 minutes later, one
+    // line before the log ends and after `Game window teardown message 16`, so it names the shutdown path and
+    // not a training flow that resumed. 33.2 ms is the mean runs 54, 55 and 56 print; it is not what run 57
+    // printed. Runs 52, 53, 56 and 56b are the same shape on the
+    // training turn at the same setting, and the longest of them (56b, the stalled session left open) held one
+    // branch over 103,833 `MoveNext` steps, worst hold 3,496,409 ms at branch 6, 104,304
+    // `CutInTimelineController::UpdateSpeed` calls pumped through the wait, `allTextWaitTime peak 0.0000`,
+    // `isHighSpeedOnStart true in 0 of 103,833 reads`; the same turns ran whole at 1.0. The multiplier bound
+    // (item 62) cannot see this: 20x is a legal multiplier at any tick length.
+    /// Run 57's mean frame, as its own totals print it: `Frame clock totals at 2528 s: frames 74951 over
+    /// 2527736 ms mean 33.7 ms worst 6041 ms` (`run log/hachimi-run57.log` line 3718); every window through the
+    /// blocked tail reads 33.7 to 33.8 ms.
+    const RUN57_FRAME_SEC: f32 = 33.7 / 1000.0;
+    /// Run 56's mean frame, as its own last totals print it: `frames 3593 over 119723 ms mean 33.3 ms`
+    /// (`run log/hachimi-run56.log` line 1864).
+    const RUN56_FRAME_SEC: f32 = 33.3 / 1000.0;
+    /// Run 54's mean frame, as its own last totals print it: `frames 2412 over 79776 ms mean 33.1 ms`
+    /// (`run log/hachimi-run54.log` line 1911).
+    const RUN54_FRAME_SEC: f32 = 33.1 / 1000.0;
+    const DIALOG_BUTTON_INSERT_NEAR_SEC: f32 = 0.3;
+    const DIALOG_BUTTON_INSERT_FAR_SEC: f32 = 0.5;
+
+    #[test]
+    fn one_tween_tick_carries_no_more_tween_time_than_the_shortest_completion_a_flow_waits_on() {
+        let _turn = pass_turn();
+
+        // The ceiling, against the shortest thing measured being waited on: the count up getter's 0.16 s
+        // (run 17's `CountupModifier_getDuration 0.16 -> 0.007999999`), C62's floor on the plate cascade, and
+        // the near end of the dialog entry's own button insert.
+        assert!(MAX_TWEEN_TICK_ADVANCE_SEC < 0.16, "one tick is not shorter than the shortest duration a bounded door has been measured handing a training flow");
+        assert!(MAX_TWEEN_TICK_ADVANCE_SEC < TYPICAL_ANIMATION_SEC, "one tick carries a whole typical animation");
+        assert_eq!(TYPICAL_ANIMATION_SEC, MIN_PLATE_INTERVAL_SEC, "the census's typical animation is not the value this fork's own gates floor a cascade at");
+        assert!(TYPICAL_ANIMATION_SEC <= DIALOG_BUTTON_INSERT_NEAR_SEC, "the census's typical animation is longer than the near end of the dialog entry's button insert");
+
+        // The reproduction, both ways, on run 57's measured tick. First that the tick this test prices is the
+        // tick the run printed: every mean quoted above is the quotient of its own `Frame clock totals` window
+        // rounded to the tenth of a millisecond that line prints, and 33.2 ms is not one of run 57's. A
+        // measurement a shipped comment cites has to be checked against the window it came from, not asserted.
+        assert!(frame_clock_mean_is_the_line_prints(74951, 2527736, RUN57_FRAME_SEC), "run 57's frame clock no longer means 33.7 ms over 74951 frames in 2527736 ms");
+        assert!(frame_clock_mean_is_the_line_prints(74156, 2499928, RUN57_FRAME_SEC), "run 57's training screen window no longer means 33.7 ms over 74156 frames in 2499928 ms");
+        assert!(frame_clock_mean_is_the_line_prints(2412, 79776, RUN54_FRAME_SEC), "run 54's frame clock no longer means 33.1 ms over 2412 frames in 79776 ms");
+        assert!(frame_clock_mean_is_the_line_prints(3593, 119723, RUN56_FRAME_SEC), "run 56's frame clock no longer means 33.3 ms over 3593 frames in 119723 ms");
+        assert!(!frame_clock_mean_is_the_line_prints(74951, 2527736, 33.2 / 1000.0), "33.2 ms prices run 57's window after all, which is the misquotation C58 names");
+        assert!(frame_clock_mean_is_the_line_prints(1801, 59737, 33.2 / 1000.0), "33.2 ms is no longer the mean run 55's window prints, and that window is where the misquotation was quoted from");
+        mirror_config(&timing_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        // What that tick carried before the bound: 674 ms, which is 6.7 of the 100 ms ticks the ceiling allows,
+        // 2.7 typical animations, and 1.35 of the far end of the dialog entry's button insert - the whole entry
+        // in one step.
+        let carried_before = RUN57_FRAME_SEC * MAX_UI_ANIMATION_SCALE;
+        assert!(ms_is(carried_before, 0.674), "run 57's tick no longer carries the 674 ms its own frame clock prices: {carried_before} s");
+        assert!(carried_before > DIALOG_BUTTON_INSERT_FAR_SEC, "the unbounded tick no longer closes a whole dialog entry in one step: {carried_before} s");
+        assert!(DIALOG_BUTTON_INSERT_NEAR_SEC / carried_before < 1.0, "a {} s dialog leg no longer arrives inside one tick", DIALOG_BUTTON_INSERT_NEAR_SEC);
+        assert!(carried_before / MAX_TWEEN_TICK_ADVANCE_SEC > 6.7, "the measured tick is not the multiple of the ceiling the run read: {}x", carried_before / MAX_TWEEN_TICK_ADVANCE_SEC);
+        assert!(carried_before / TYPICAL_ANIMATION_SEC > 2.69, "the measured tick is not the multiple of a typical animation the run read: {}x", carried_before / TYPICAL_ANIMATION_SEC);
+        assert!(carried_before / DIALOG_BUTTON_INSERT_FAR_SEC > 1.34, "the measured tick is not the fraction of the far end of the button leg the run read: {}x", carried_before / DIALOG_BUTTON_INSERT_FAR_SEC);
+
+        // What the same tick carries now, and the speed that is worth on that frame: the bound is 0.1 s, so on
+        // run 57's 33.7 ms mean frame it is worth 2.97x (2.97x again on the window's own 33.73 ms quotient),
+        // where the 33.2 ms figure first quoted for that run priced 3.01x.
+        let (advance, independent) = tween_clocks(RUN57_FRAME_SEC, RUN57_FRAME_SEC);
+        let worth_on_run57 = clock_at_frame(RUN57_FRAME_SEC);
+        assert!(ms_is(advance, MAX_TWEEN_TICK_ADVANCE_SEC), "a {:.1} ms tick at ui_animation 20 handed {advance} s, not the {MAX_TWEEN_TICK_ADVANCE_SEC} s ceiling", RUN57_FRAME_SEC * MS_PER_SECOND);
+        assert!(ms_is(worth_on_run57, MAX_TWEEN_TICK_ADVANCE_SEC / RUN57_FRAME_SEC), "the ceiling is not the {}x it is worth on run 57's frame", MAX_TWEEN_TICK_ADVANCE_SEC / RUN57_FRAME_SEC);
+        assert!(worth_on_run57 > 2.96 && worth_on_run57 < 2.98, "the ceiling did not land at the 2.97x run 57's frame clock prices: {worth_on_run57}x");
+        assert!(worth_on_run57 > 2.9, "the ceiling left run 57's frame slower than 2.9x the game's own clock: {worth_on_run57}x");
+        assert_eq!(independent, RUN57_FRAME_SEC, "the per tick ceiling reached the independent channel (C5)");
+
+        // The legs the training flow waits on now span more than one tick each.
+        assert!(DIALOG_BUTTON_INSERT_NEAR_SEC / MAX_TWEEN_TICK_ADVANCE_SEC >= 3.0, "the dialog entry's button leg lands inside a tick");
+        assert!(DIALOG_BUTTON_INSERT_FAR_SEC / MAX_TWEEN_TICK_ADVANCE_SEC >= 5.0, "the far end of that leg lands inside a tick");
+        assert!(0.16 / MAX_TWEEN_TICK_ADVANCE_SEC > 1.5, "the count up completion lands inside a tick");
+        assert!(MIN_PLATE_INTERVAL_SEC / MAX_TWEEN_TICK_ADVANCE_SEC > 2.0, "the plate beat lands inside a tick");
+
+        // And the bound is a bound on long ticks, not a tax on fast ones: at the 5 ms frame every completion
+        // assertion in this module holds, the pair ceiling's whole 20x lands on the ceiling and nothing is
+        // taken off.
+        assert!(ms_is(MAX_TWEEN_TICK_ADVANCE_SEC / TICK_CEILING_FRAME_SEC, MAX_TWEEN_SPEED_PRODUCT), "the whole 20x is not realisable at the {} ms frame bar", FRAME_MS_AT_200_FPS);
+        assert!(ms_is(TICK_CEILING_FRAME_SEC * MS_PER_SECOND, FRAME_MS_AT_200_FPS), "the ceiling is not set at the frame the pair ceiling is priced on");
+        assert!(ms_is(clock_at_frame(TICK_CEILING_FRAME_SEC), MAX_TWEEN_SPEED_PRODUCT), "a fast tick lost speed to the tick ceiling: {}x", clock_at_frame(TICK_CEILING_FRAME_SEC));
+
+        // The frames the recorded runs actually ran at, each one the mean its own `Frame clock totals` window
+        // prints: run 31's 16.9 ms stalled career end, run 54's 33.1 ms and run 56's 33.3 ms. All three stay
+        // speed-ups of the game's own clock, and none of them is the 33.2 ms figure item 107 first quoted for
+        // run 57 - 33.2 ms is what runs 54, 55 and 56 print in their windows.
+        let run31 = RUN31_FRAME_MS / MS_PER_SECOND;
+        assert!(clock_at_frame(run31) > 5.9 && clock_at_frame(run31) < 6.0, "run 31's {} ms frame is not held to 5.9x: {}x", run31, clock_at_frame(run31));
+        assert!(clock_at_frame(RUN54_FRAME_SEC) > 3.0, "run 54's {:.1} ms frame is not held to 3x: {}x", RUN54_FRAME_SEC * MS_PER_SECOND, clock_at_frame(RUN54_FRAME_SEC));
+        assert!(clock_at_frame(RUN56_FRAME_SEC) > 3.0 && clock_at_frame(RUN56_FRAME_SEC) < 3.01, "run 56's {:.1} ms frame is not held to its 3.0x: {}x", RUN56_FRAME_SEC * MS_PER_SECOND, clock_at_frame(RUN56_FRAME_SEC));
+
+        println!(
+            "C58 item 107, one tick at ui_animation {}x: run 57's {:.1} ms frame carried {:.1} ms of tween time before the bound and {:.1} ms after, worth {:.2}x on that frame; a {} ms frame still carries the whole {}x",
+            ui_animation_scale(),
+            RUN57_FRAME_SEC * MS_PER_SECOND,
+            carried_before * MS_PER_SECOND,
+            advance * MS_PER_SECOND,
+            worth_on_run57,
+            TICK_CEILING_FRAME_SEC * MS_PER_SECOND,
+            MAX_TWEEN_SPEED_PRODUCT,
+        );
+    }
+
+    // The promise every ceiling in this module owes and a per tick bound is the easiest one to break: it may
+    // trim what this fork added, and it may never hand the game back a slower tick than the game wrote. A
+    // frame longer than the bound - a hitch, or a cut the game is running at its own 8.0000 (run 19) - is
+    // handed on as it arrived.
+    #[test]
+    fn the_tick_ceiling_never_hands_back_less_than_the_delta_the_game_wrote() {
+        let _turn = pass_turn();
+
+        // 5 ms (`target_fps 200`), 16.7 ms (60 fps), run 57's own 33.7 ms mean, 100 ms (exactly the bound), and
+        // two hitches past it.
+        const FRAMES: [f32; 6] = [0.005, 1.0 / 60.0, RUN57_FRAME_SEC, 0.1, 0.2, 0.5];
+        // `MIN_TIME_SCALE` .. `MAX_TIME_SCALE` is what this fork's write layer may leave in `Time.timeScale`
+        // (8.0 and 40.0 are numbers a game write reached on its own: run 19 read the training cut at 8.0000).
+        const PRODUCED: [f32; 4] = [1.0, 2.0, 8.0, 40.0];
+        const RUNGS: [f32; 5] = [1.0, 2.0, 5.0, MAX_UI_ANIMATION_SCALE / 2.0, MAX_UI_ANIMATION_SCALE];
+
+        for produced in PRODUCED {
+            TIME_SCALE_PRODUCED.store(produced.to_bits(), Ordering::Release);
+
+            for ui in RUNGS {
+                mirror_config(&timing_config(1.0, 1.0, 1.0, ui));
+
+                for frame in FRAMES {
+                    // The delta the game hands the detour is its frame times the scale `Time.timeScale` is
+                    // holding, and that is what must survive the ceiling.
+                    let delta = frame * produced;
+                    let (advance, independent) = tween_clocks(delta, frame);
+
+                    assert!(advance >= delta - 1e-6, "the ceiling trimmed the game's own {delta} s tick to {advance} s at ui {ui}x on a {frame} s frame under a {produced}x scale");
+                    assert!(advance <= delta * ui + 1e-6, "the tick handed out more than the lever asked for: {advance} vs {}", delta * ui);
+                    assert!(advance / delta <= MAX_TWEEN_SPEED_PRODUCT + 0.01, "the tick ran at {}x, past the pair ceiling", advance / delta);
+                    assert_eq!(independent, frame, "the per tick ceiling reached the independent channel (C5)");
+
+                    // Past the bound, the fork's lever is off that tick entirely: the delta arrives as the game
+                    // wrote it and the ceiling has nothing of its own to take back.
+                    if delta > MAX_TWEEN_TICK_ADVANCE_SEC {
+                        assert!(ms_is(advance, delta), "the ceiling trimmed a {} ms delta the game wrote to {advance} s", delta * MS_PER_SECOND);
+                    }
+
+                    // The multiplier the tick runs at is at or above the scale the game is holding, so the
+                    // bound is a ceiling on this fork's speed-up and never a slowdown to the game.
+                    assert!(clock_at_frame(frame) >= produced - 0.01, "a {frame} s frame under a {produced}x scale ran at {}x, slower than the game's own clock", clock_at_frame(frame));
+                }
+            }
+        }
+
+        // A neutral lever is untouched by the whole bound, at every frame: the shipped state does nothing.
+        TIME_SCALE_PRODUCED.store(1.0f32.to_bits(), Ordering::Release);
+        mirror_config(&timing_config(1.0, 1.0, 1.0, 1.0));
+
+        for frame in FRAMES {
+            assert_eq!(tween_clocks(frame, frame), (frame, frame), "the tick ceiling reached a neutral tick");
+        }
+
+        // The slider's slow end is left as the slider left it: a ceiling does not reach into a slow down and
+        // make it smaller.
+        mirror_config(&timing_config(1.0, 1.0, 1.0, MIN_UI_ANIMATION_SCALE));
+
+        for frame in FRAMES {
+            let (advance, _) = tween_clocks(frame, frame);
+
+            assert!(ms_is(advance, frame * MIN_UI_ANIMATION_SCALE), "the tick ceiling trimmed the slider's own slow down on a {frame} s frame");
+        }
+    }
+
+    // The measurement item 107 says is missing: "a census of how much tween time one tick actually carries,
+    // which no probe measures yet". A ceiling nobody can price is a ceiling nobody can tell apart from
+    // nothing, so the bound comes with the counters that price it, on the same periodic rule the training
+    // census reports on and armed by the same `debug_mode` the probes are armed by.
+    #[test]
+    fn the_tween_tick_census_prices_the_ceiling_on_the_periodic_report_rule() {
+        let _turn = pass_turn();
+
+        // A build without `debug_mode` counts nothing at all: the ceiling is shipped whatever this says, and
+        // the measurement costs one relaxed load.
+        mirror_config(&debug_config(1.0, 1.0, 1.0, MAX_UI_ANIMATION_SCALE, false));
+
+        for _ in 0..1_000 {
+            let _ = tween_clocks(RUN57_FRAME_SEC, RUN57_FRAME_SEC);
+        }
+
+        assert_eq!(TWEEN_TICKS.load(Ordering::Relaxed), 0, "a build without debug_mode counted tween ticks");
+        assert_eq!(TWEEN_TICK_MS_PEAK.load(Ordering::Relaxed), 0, "a build without debug_mode kept a peak");
+
+        // The same lever with the census armed, on run 57's tick: 33.7 ms of game delta on a 20x clock.
+        mirror_config(&debug_config(1.0, MAX_FACTOR, 1.0, MAX_UI_ANIMATION_SCALE, true));
+        let held_before = TWEEN_TICKS.load(Ordering::Relaxed);
+
+        for _ in 0..100 {
+            let (advance, _) = tween_clocks(RUN57_FRAME_SEC, RUN57_FRAME_SEC);
+
+            assert!(advance <= MAX_TWEEN_TICK_ADVANCE_SEC + 1e-6, "a counted tick escaped the ceiling: {advance} s");
+        }
+
+        assert_eq!(TWEEN_TICKS.load(Ordering::Relaxed), held_before + 100, "the census did not count the ticks the lever ran on");
+        // The 100 ms the ceiling hands, against the 674 ms run 57's own mean frame times the lever asks for: the
+        // price of the bound, as the run reads it rather than as a number this module asserts about it.
+        assert_eq!(TWEEN_TICK_MS_PEAK.load(Ordering::Relaxed), 100, "the peak is not the ceiling's 100 ms");
+        assert_eq!(TWEEN_TICK_ASKED_MS_PEAK.load(Ordering::Relaxed), 674, "the peak asked is not run 57's 674 ms");
+        assert_eq!(TWEEN_TICKS_TRIMMED.load(Ordering::Relaxed), 100, "the census did not count what the ceiling took back");
+        assert_eq!(TWEEN_TICKS_OVER_TYPICAL.load(Ordering::Relaxed), 0, "a trimmed tick carried a whole typical animation");
+        assert_eq!(TWEEN_TICK_MS_TOTAL.load(Ordering::Relaxed), 100 * 100, "the census total is not the mean it reports");
+
+        // A tick the game owns and the bound cannot reach is counted as what it is: 300 ms handed on
+        // unchanged, over one typical animation, and the reason the peak asked jumps to 6 s - a 300 ms frame
+        // on a 20x clock is the "16 s of elapsed time per 60 fps tick" shape `TweenManager.rs` names as what
+        // an unbounded lever hands the game. The bound took 5.7 s off that tick and handed the game its own.
+        let (advance, _) = tween_clocks(0.3, 0.3);
+        assert_eq!(advance, 0.3, "the ceiling trimmed a 300 ms delta the game wrote");
+        assert_eq!(TWEEN_TICKS_OVER_TYPICAL.load(Ordering::Relaxed), 1, "the census missed a tick that carried more than one typical animation");
+        assert_eq!(TWEEN_TICKS_TRIMMED.load(Ordering::Relaxed), 101, "the census lost the tick the bound capped to the game's own delta");
+        assert_eq!(TWEEN_TICK_MS_PEAK.load(Ordering::Relaxed), 300, "the peak missed the tick the ceiling could not reach");
+        assert_eq!(TWEEN_TICK_ASKED_MS_PEAK.load(Ordering::Relaxed), 6000, "the peak asked missed the unbounded shape a hitch carries");
+
+        // A tick the training cut hold handed on is named as one, so a stall's mean is not read as this
+        // fork's clock.
+        let _ = tween_clocks_holding(RUN57_FRAME_SEC, RUN57_FRAME_SEC, true);
+        assert_eq!(TWEEN_TICKS_HELD.load(Ordering::Relaxed), 1, "a held tick was not named");
+        assert_eq!(TWEEN_TICKS_TRIMMED.load(Ordering::Relaxed), 101, "the training cut hold was counted as a trim");
+
+        // The rule the line reports on is the one every other census in this fork uses: the totals have to
+        // have moved, and the interval has to have passed.
+        let ticks = TWEEN_TICKS.load(Ordering::Relaxed);
+        assert!(TrainingCuttProbe::report_due(20, -1, ticks, held_before, TrainingCuttProbe::REPORT_INTERVAL_SECS), "the first report was refused");
+        assert!(!TrainingCuttProbe::report_due(40, 20, ticks, ticks, TrainingCuttProbe::REPORT_INTERVAL_SECS), "a quiet path got a line");
+        assert!(!TrainingCuttProbe::report_due(30, 20, ticks + 5, ticks, TrainingCuttProbe::REPORT_INTERVAL_SECS), "a line arrived before the interval");
+        assert!(TrainingCuttProbe::report_due(20 + TrainingCuttProbe::REPORT_INTERVAL_SECS, 20, ticks + 5, ticks, TrainingCuttProbe::REPORT_INTERVAL_SECS), "the interval refused a moved census");
+
+        // The line itself, with the numbers a run needs to price the bound.
+        let line = tween_tick_census_line(120);
+
+        for owed in [
+            "Tween clock census at 120 s",
+            "102 tween ticks",
+            "mean 101.3 ms",
+            "peak 300 ms",
+            "1 ticks carried more than one typical animation (250 ms)",
+            "101 trimmed by the 100 ms per tick ceiling (peak asked 6000 ms)",
+            "1 handed on by the training cut hold",
+        ] {
+            assert!(line.contains(owed), "the census line left out {owed}: {line}");
+        }
+
+        println!("{line}");
+    }
+
+    /// A `timing_config` with `debug_mode` spelled out, which is what arms the tween tick census.
+    fn debug_config(transition: f32, screens: f32, story: f32, ui: f32, debug_mode: bool) -> Config {
+        Config { debug_mode, ..timing_config(transition, screens, story, ui) }
+    }
+
 
     // C58 / ledger item 62, spelled on the quantity the game waits on. Each layer has its own
     // `MAX_FACTOR` ceiling and each was checked on its own, but a tween's real completion time is the
@@ -4322,12 +4899,33 @@ mod tests {
         scale_duration(raw, group) / shipped_delta_channel() * 1000.0
     }
 
-    /// The multiplier a delta channel tween advances at, taken from `tween_clocks` itself and the mirror
-    /// `Time.rs` writes. It has to be the same number `delta_clock()` prices, and the frame sweep says so.
-    fn shipped_delta_channel() -> f32 {
-        let (tick, _) = tween_clocks(1.0, 1.0);
+    /// The longest tick at which the pair ceiling's whole `MAX_TWEEN_SPEED_PRODUCT` is still realisable: the
+    /// per tick advance bound divided by the multiplier it has to carry. It is the same 5 ms the frame bar
+    /// below already prices every completion at (`FRAME_MS_AT_200_FPS`, `target_fps 200`, the 5.6 ms run 17
+    /// measured), which is why the pair arithmetic this module asserts is unchanged by the tick ceiling and
+    /// why the ceiling is a bound on slow frames rather than a tax on fast ones.
+    const TICK_CEILING_FRAME_SEC: f32 = MAX_TWEEN_TICK_ADVANCE_SEC / MAX_TWEEN_SPEED_PRODUCT;
 
-        tick * time_scale_produced()
+    /// The multiplier a delta channel tween advances at, taken from `tween_clocks` itself and the mirror
+    /// `Time.rs` writes, on a tick the per tick ceiling does not bind. It has to be the same number
+    /// `delta_clock()` prices, and the frame sweep says so. Asked at `TICK_CEILING_FRAME_SEC` rather than at
+    /// one second: the tick ceiling is a time, so a one second tick is a tick the ceiling has already taken
+    /// the lever off, and reading a multiplier out of it reads the ceiling instead of the clock.
+    fn shipped_delta_channel() -> f32 {
+        let produced = time_scale_produced();
+        let (advance, _) = tween_clocks(TICK_CEILING_FRAME_SEC * produced, TICK_CEILING_FRAME_SEC);
+
+        advance / TICK_CEILING_FRAME_SEC
+    }
+
+    /// The multiplier the same mirrors put on a tick of `frame_sec` of real time: the game's own delta for that
+    /// frame, through `tween_clocks`, divided by the frame. This is where the per tick ceiling shows up as a
+    /// speed rather than as a time, and what the census prints as a peak is this number times the frame.
+    fn clock_at_frame(frame_sec: f32) -> f32 {
+        let produced = time_scale_produced();
+        let (advance, _) = tween_clocks(frame_sec * produced, frame_sec);
+
+        advance / frame_sec
     }
 
     /// The model and the shipped channel, named together where they have to agree.
@@ -4338,6 +4936,17 @@ mod tests {
     }
 
     fn ms_is(value: f32, expected: f32) -> bool { (value - expected).abs() < 0.01 }
+
+    /// That a mean frame this module's comments quote is the mean the run's own `Frame clock totals` line
+    /// prints for the window it is quoted from: the quotient of that window's `frames` and its `over N ms`,
+    /// rounded to the tenth of a millisecond the log prints. A run number a shipped comment cites has to be the
+    /// number the log printed; this is the half of that check that runs without the log (C58).
+    fn frame_clock_mean_is_the_line_prints(frames: i64, total_ms: i64, quoted_sec: f32) -> bool {
+        let printed_tenths = total_ms as f64 / frames as f64 * 10.0;
+        let quoted_tenths = quoted_sec as f64 * 10_000.0;
+
+        printed_tenths.round() as i64 == quoted_tenths.round() as i64
+    }
 
     /// A config with the four timing levers that make up a pair, everything else shipped.
     fn timing_config(transition: f32, screens: f32, story: f32, ui: f32) -> Config {
@@ -5601,7 +6210,7 @@ mod tests {
     fn the_cut_in_motion_lever_stops_at_the_pair_bound_and_never_lowers_a_speed() {
         let _turn = pass_turn();
 
-        // Run 45 named the object a cut-in effect runs on (`AnimateToUnity.AnMotion`, `introspect.log:28743`) and its
+        // Run 45 named the object a cut-in effect runs on (`AnimateToUnity.AnMotion`, `introspect-run45.log:28743`) and its
         // speed door `SetMotionSpeed/2`. At the shipped 1.0 the lever writes nothing anywhere.
         assert_eq!(flash_motion_speed(), 1.0, "a launch armed the cut-in motion lever");
 
@@ -5752,8 +6361,11 @@ mod tests {
     }
 
     // The defect this item closes, kept as an executable statement of what the door used to hand. The
-    // numbers are the ones the run logs printed: run 31's `InitializePlateList 1 -> 0.05`
-    // (`run log/hachimi-run31.log` line 1184) and run 20's `1 -> 0.05` beside `ui_animation 20`.
+    // numbers are the ones the runs printed: run 31's `InitializePlateList 1 -> 0.05`
+    // (`run log/hachimi-run31.log` line 1184), and run 20's `TrainingParamChangeUI.InitializePlateList
+    // 1 -> 0.05` beside a config reading `ui_animation 20` - run 20's log is not in the tree, so the pair is
+    // quoted from the ledger's run 20 note at `LEDGER.md:5089` and its config line at `:5064`, as printed
+    // 2026-10-12.
     #[test]
     fn a_result_screen_lever_on_the_plate_door_hands_the_number_run_31_stalled_with() {
         let _turn = pass_turn();
