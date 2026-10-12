@@ -3,17 +3,17 @@ use std::sync::Mutex;
 use fnv::FnvHashMap;
 use once_cell::sync::Lazy;
 use sqlparser::{
-    ast::BinaryOperator,
     dialect::SQLiteDialect,
     keywords::Keyword,
-    parser::Parser
+    parser::Parser,
+    tokenizer::{Token, Tokenizer}
 };
 
 use crate::core::hachimi::recover_lock;
 use crate::il2cpp::{
     api::{il2cpp_object_new, il2cpp_runtime_object_init},
     ext::Il2CppStringExt,
-    sql::{self, ExprExt, SelectExt, SelectItemExt},
+    sql::{self, SelectExt, SelectItemExt},
     symbols::get_method_addr,
     types::*
 };
@@ -46,8 +46,77 @@ pub fn new() -> *mut Il2CppObject {
 pub static SELECT_QUERIES: Lazy<Mutex<FnvHashMap<usize, Box<dyn sql::SelectQueryState + Send + Sync>>>> =
     Lazy::new(|| Mutex::new(FnvHashMap::default()));
 
+// The `column = ?` predicates after the statement's first WHERE, each with the number SQLite gives its placeholder.
+// SQLite numbers the placeholders of the whole statement in the order they are written: a `?` takes one more than the
+// largest number so far, and `?NNN` takes NNN. The old counter advanced only for predicates of that one shape, so an
+// `IN (?, ?)` shifted every later number (C21).
+fn where_placeholders(sql: &str) -> Vec<(String, i32)> {
+    let dialect = SQLiteDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() else {
+        return Vec::new();
+    };
+
+    // A named parameter (`:c`, `@c` or `$c`) takes its number in SQLite's order of first use, which this reader does
+    // not follow. sqlparser reads `:` and `@` as tokens of their own and `$` as the start of a word, so all three are
+    // caught here. A statement that names one records no column, and the query passes through with the game's own text (C21).
+    let named_elsewhere = tokens.iter().any(|token| {
+        matches!(token, Token::Colon | Token::AtSign)
+            || matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.starts_with('$'))
+    });
+    if named_elsewhere {
+        return Vec::new();
+    }
+
+    let tokens: Vec<Token> = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect();
+
+    let where_at = tokens.iter().position(|token| {
+        matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("WHERE"))
+    });
+
+    let mut placeholders = Vec::new();
+    let mut largest = 0;
+
+    for (at, token) in tokens.iter().enumerate() {
+        let Token::Placeholder(text) = token else {
+            continue;
+        };
+
+        let idx = match text.strip_prefix('?') {
+            Some("") => {
+                largest += 1;
+                largest
+            }
+            Some(digits) => {
+                let Ok(idx) = digits.parse::<i32>() else {
+                    continue;
+                };
+                largest = largest.max(idx);
+                idx
+            }
+            // only `?` placeholders get this far: a named parameter returned above
+            None => continue,
+        };
+
+        // Only a placeholder after the first WHERE, behind an unqualified `column =`, names a column
+        if !where_at.is_some_and(|start| at > start) || at < 2 || !matches!(tokens[at - 1], Token::Eq) {
+            continue;
+        }
+        let qualified = at >= 3 && matches!(tokens[at - 3], Token::Period);
+        if let (false, Token::Word(word)) = (qualified, &tokens[at - 2]) {
+            placeholders.push((word.value.clone(), idx));
+        }
+    }
+
+    placeholders
+}
+
 #[inline(never)]
 fn parse_query(query: *mut Il2CppObject, sql: *const Il2CppString) {
+    // C8: `query` is the object the game just handed back. IL2CPP reuses the address of a freed query, and a query freed
+    // without `Dispose` leaves its state under that address, so this one starts without the state of whatever held the
+    // address before it. `Dispose` removes the state of the queries it sees go.
+    recover_lock(&SELECT_QUERIES).remove(&(query as usize));
+
     // C9: `sql` is the string the game handed its own `Query`/`PreparedQuery`, and a call that
     // carries none is a statement this hook has nothing to read a table name out of.
     if sql.is_null() {
@@ -98,20 +167,10 @@ fn parse_query(query: *mut Il2CppObject, sql: *const Il2CppString) {
             }
         }
 
-        // Add params
-        i = 1; // index starts at 1
-        if let Some(selection) = select.selection {
-            // this should visit them in order (column1 = ? AND column2 = ? ...)
-            for expr in selection.binary_op_iter() {
-                if *expr.op != BinaryOperator::Eq { continue; }
-
-                if let Some(name) = expr.left.get_ident_value() {
-                    if expr.right.is_placeholder_value() {
-                        query_state.add_param(i, name);
-                        i += 1;
-                    }
-                }
-            }
+        // Add params. The game binds them by the numbers SQLite gives its placeholders, which run over the whole statement
+        // in the order they are written, so a predicate of any other shape still takes its numbers (C21).
+        for (name, idx) in where_placeholders(&sql_str) {
+            query_state.add_param(idx, &name);
         }
 
         // Add query state
@@ -168,5 +227,62 @@ pub fn init(LibNative_Runtime: *const Il2CppImage) {
         CLASS = Connection;
         OPEN_ADDR = get_method_addr(Connection, c"Open", 4);
         CLOSEDB_ADDR = get_method_addr(Connection, c"CloseDB", 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_predicates_after_where_take_the_numbers_sqlite_gives_their_placeholders() {
+        // The `IN (?, ?)` takes two numbers, so `index` is the fourth placeholder and not the second.
+        assert_eq!(
+            where_placeholders("SELECT text FROM text_data WHERE category = ? AND id IN (?, ?) AND index = ?"),
+            vec![("category".to_owned(), 1), ("index".to_owned(), 4)]
+        );
+    }
+
+    #[test]
+    fn a_placeholder_inside_a_string_is_not_one() {
+        assert_eq!(
+            where_placeholders("SELECT text FROM text_data WHERE note = '? = ?' AND category = ?"),
+            vec![("category".to_owned(), 1)]
+        );
+    }
+
+    #[test]
+    fn numbered_placeholders_take_the_numbers_sqlite_gives_them() {
+        // `?3` names the third, and each bare `?` after it takes one more than the largest number so far.
+        assert_eq!(
+            where_placeholders("SELECT text FROM text_data WHERE category = ?3 AND index = ? AND id = ?"),
+            vec![("category".to_owned(), 3), ("index".to_owned(), 4), ("id".to_owned(), 5)]
+        );
+    }
+
+    #[test]
+    fn a_named_parameter_records_no_column_rather_than_a_guessed_one() {
+        for sql in [
+            "SELECT text FROM text_data WHERE category = :c AND index = ?",
+            "SELECT text FROM text_data WHERE category = @c AND index = ?",
+            "SELECT text FROM text_data WHERE category = $c AND index = ?",
+        ] {
+            assert!(where_placeholders(sql).is_empty(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_qualified_column_is_not_a_predicate_this_reader_names() {
+        assert!(where_placeholders("SELECT text FROM text_data WHERE text_data.category = ?").is_empty());
+    }
+
+    #[test]
+    fn a_new_query_at_a_reused_address_starts_without_the_old_state() {
+        let address = 0x0C8_0000_0010usize;
+        recover_lock(&SELECT_QUERIES).insert(address, Box::new(sql::TextDataQuery::default()));
+
+        parse_query(address as *mut Il2CppObject, std::ptr::null());
+
+        assert!(!recover_lock(&SELECT_QUERIES).contains_key(&address), "the freed query's state survived the reuse");
     }
 }
