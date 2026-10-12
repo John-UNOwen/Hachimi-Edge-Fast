@@ -1,5 +1,6 @@
-use std::ptr::null_mut;
+use std::{collections::HashMap, ptr::null_mut, sync::Mutex};
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use widestring::Utf16Str;
 
@@ -91,6 +92,136 @@ struct TextBlockDict {
     new_clip_length: Option<i32>
 }
 
+// The value the game shipped for each story timeline object, and the value this mod wrote into it last.
+// A story asset instance is cached, so the same object reaches `on_LoadAsset` again on the next load.
+// Multiplying whatever the field holds then compounded the factor on every load (C22), so the factor
+// is always applied to the baseline, and a read that no longer matches the last write means the game
+// assigned a new value and that value is the next baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AppliedTcps {
+    original: i32,
+    written: i32
+}
+
+static APPLIED_TCPS: Lazy<Mutex<HashMap<usize, AppliedTcps>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+// Returns the value the field should hold, and the baseline to remember for this object. A baseline is only
+// kept while the value this mod wrote is in place; a value equal to the shipped one needs none.
+fn plan_tcps(current: i32, applied: Option<AppliedTcps>, mult: f32) -> (i32, Option<AppliedTcps>) {
+    let original = match applied {
+        Some(applied) if applied.written == current => applied.original,
+        _ => current
+    };
+
+    let target = if mult == 1.0 {
+        original
+    }
+    else {
+        (original as f32 * mult).round() as i32
+    };
+
+    if target == original {
+        (target, None)
+    }
+    else {
+        (target, Some(AppliedTcps { original, written: target }))
+    }
+}
+
+fn apply_tcps_multiplier(this: *mut Il2CppObject, mult: f32) -> i32 {
+    let current = get_TypewriteCountPerSecond(this);
+    let key = this as usize;
+
+    let target = {
+        let mut applied_map = APPLIED_TCPS.lock().unwrap_or_else(|e| e.into_inner());
+        let (target, next) = plan_tcps(current, applied_map.get(&key).copied(), mult);
+        match next {
+            Some(applied) => { applied_map.insert(key, applied); }
+            None => { applied_map.remove(&key); }
+        }
+        target
+    };
+
+    // The write happens after the lock is released, so the game is never called while it is held.
+    if target != current {
+        set_TypewriteCountPerSecond(this, target);
+    }
+
+    target
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One call per story asset load of the same object: `shipped` is what the field holds when it is read.
+    fn load(applied: &mut Option<AppliedTcps>, shipped: &mut i32, mult: f32) {
+        let (target, next) = plan_tcps(*shipped, *applied, mult);
+        *applied = next;
+        *shipped = target;
+    }
+
+    #[test]
+    fn neutral_multiplier_never_writes() {
+        let mut applied = None;
+        let mut field = 100;
+        for _ in 0..300 {
+            load(&mut applied, &mut field, 1.0);
+        }
+        assert_eq!(field, 100);
+        assert_eq!(applied, None);
+    }
+
+    #[test]
+    fn repeated_loads_apply_the_factor_once() {
+        let mut applied = None;
+        let mut field = 100;
+        for _ in 0..300 {
+            load(&mut applied, &mut field, 2.0);
+        }
+        assert_eq!(field, 200);
+        assert_eq!(applied, Some(AppliedTcps { original: 100, written: 200 }));
+    }
+
+    #[test]
+    fn changing_the_factor_scales_the_shipped_value_not_the_last_write() {
+        let mut applied = None;
+        let mut field = 100;
+        load(&mut applied, &mut field, 2.0);
+        load(&mut applied, &mut field, 4.0);
+        assert_eq!(field, 400);
+        load(&mut applied, &mut field, 4.0);
+        assert_eq!(field, 400);
+        load(&mut applied, &mut field, 0.5);
+        assert_eq!(field, 50);
+    }
+
+    #[test]
+    fn returning_to_one_restores_the_shipped_value() {
+        let mut applied = None;
+        let mut field = 100;
+        load(&mut applied, &mut field, 4.0);
+        load(&mut applied, &mut field, 1.0);
+        assert_eq!(field, 100);
+        assert_eq!(applied, None);
+    }
+
+    #[test]
+    fn a_value_the_game_assigns_becomes_the_new_baseline() {
+        let mut applied = None;
+        let mut field = 100;
+        load(&mut applied, &mut field, 2.0);
+        field = 300;
+        load(&mut applied, &mut field, 2.0);
+        assert_eq!(field, 600);
+    }
+
+    #[test]
+    fn a_factor_that_leaves_the_shipped_value_unchanged_writes_nothing() {
+        assert_eq!(plan_tcps(1, None, 0.5), (1, None));
+    }
+}
+
 // hook::UnityEngine_AssetBundleModule::AssetBundle
 // name:
 // - assets/_gallopresources/bundle/resources/home/data/xxxxx/yy/hometimeline_xxxxx_yy_zzzzzzz.asset
@@ -102,12 +233,8 @@ pub fn on_LoadAsset(_bundle: *mut Il2CppObject, this: *mut Il2CppObject, name: &
     }
 
     let hachimi = Hachimi::instance();
-    let mut tcps = get_TypewriteCountPerSecond(this) as f32;
     let tcps_mult = hachimi.config.load().story_tcps_multiplier;
-    if tcps_mult != 1.0 {
-        tcps = (tcps * tcps_mult).round();
-        set_TypewriteCountPerSecond(this, tcps as i32);
-    }
+    let tcps = apply_tcps_multiplier(this, tcps_mult) as f32;
 
     rewrite_story_shadow_types(this);
 
