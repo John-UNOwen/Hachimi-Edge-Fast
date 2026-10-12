@@ -765,3 +765,38 @@ pub fn clear_il2cpp_list(list: *mut Il2CppObject) {
     let clear: extern "C" fn(*mut Il2CppObject) = unsafe { std::mem::transmute(clear_addr) };
     clear(list);
 }
+
+// C19: the translation repo's news address is handed to the game's own web view, so only the two web schemes pass.
+// A `file:`, `javascript:` or other scheme in that config would reach the view exactly as written.
+pub fn is_web_url(url: &str) -> bool {
+    url.get(..8).is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        || url.get(..7).is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+}
+
+// C19: the part of a url a log line may carry. The query and the fragment hold the parameters and session values a
+// game puts on a url, and the log file is not where they belong.
+pub fn url_without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_web_url, url_without_query};
+
+    #[test]
+    fn only_the_two_web_schemes_reach_the_web_view() {
+        assert!(is_web_url("https://example.com/news?lang=en"));
+        assert!(is_web_url("HTTP://example.com/"));
+        assert!(!is_web_url("file:///C:/Windows/win.ini"));
+        assert!(!is_web_url("javascript:alert(1)"));
+        assert!(!is_web_url("httpx://example.com/"));
+        assert!(!is_web_url("https:/example.com"));
+        assert!(!is_web_url(""));
+    }
+
+    #[test]
+    fn a_log_line_keeps_the_address_and_drops_the_query() {
+        assert_eq!(url_without_query("https://example.com/gacha?v=1&token=abc#top"), "https://example.com/gacha");
+        assert_eq!(url_without_query("https://example.com/plain"), "https://example.com/plain");
+    }
+}

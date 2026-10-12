@@ -268,7 +268,7 @@ pub fn process_message(umsg: c_uint, lparam: LPARAM) {
     match umsg {
         WM_OPEN_WEBVIEW => {
             let url = unsafe { Box::from_raw(lparam.0 as *mut (String, String, String)) };
-            info!("Received request to open webview with URL: {:?}", url);
+            info!("Received request to open webview with URL: {}", crate::core::utils::url_without_query(&url.0));
 
             let old_webview = dialog.webview.take();
             dialog.pending_bounds = None;
@@ -328,6 +328,18 @@ const URL_HANDLER: &[fn(&str, &str, &HashMap<&str, &str>) -> Option<(String, Str
 const BASE_API_URL: &str = "https://api.games.umamusume.jp/umamusume/contents/v/index.html#/";
 static GACHA_URL_ID_MAP: Lazy<RwLock<HashMap<String, i32>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
+// C19: a gacha screen asks for its url again each time it opens, so a map that reaches the cap starts over rather than
+// holding every url a session has seen. The urls it drops are asked for again on the next open.
+const GACHA_URL_CAP: usize = 64;
+
+fn insert_gacha_url(map: &mut HashMap<String, i32>, url: String, gacha_id: i32) {
+    if !map.contains_key(&url) && map.len() >= GACHA_URL_CAP {
+        map.clear();
+    }
+
+    map.insert(url, gacha_id);
+}
+
 pub fn add_gacha_url(url: *mut Il2CppString, gacha_id: i32) {
     // C9: `url` is what the game's own `GetGachaUrl` answered for this gacha, and a gacha type it
     // has no url for is a legitimate null. There is nothing to key the id on.
@@ -337,7 +349,7 @@ pub fn add_gacha_url(url: *mut Il2CppString, gacha_id: i32) {
 
     let url_string = unsafe { (*url).as_utf16str().to_string() };
     if let Ok(mut map) = GACHA_URL_ID_MAP.write() {
-        map.insert(url_string, gacha_id);
+        insert_gacha_url(&mut map, url_string, gacha_id);
     }
 }
 
@@ -581,4 +593,27 @@ fn open_dialog(title: String, orig_url: String) {
 
 pub fn has_available_webview() -> bool {
     *HAS_WEBVIEW
+}
+
+#[cfg(test)]
+mod gacha_url_tests {
+    use super::{insert_gacha_url, GACHA_URL_CAP};
+    use std::collections::HashMap;
+
+    #[test]
+    fn the_gacha_map_starts_over_at_its_cap_instead_of_growing() {
+        let mut map = HashMap::new();
+        for i in 0..GACHA_URL_CAP {
+            insert_gacha_url(&mut map, format!("url{i}"), i as i32);
+        }
+        assert_eq!(map.len(), GACHA_URL_CAP);
+
+        insert_gacha_url(&mut map, "url-new".to_owned(), 7);
+        assert_eq!(map.len(), 1, "the map kept its old urls past the cap");
+        assert_eq!(map.get("url-new"), Some(&7));
+
+        // A url the map already holds does not start it over.
+        insert_gacha_url(&mut map, "url-new".to_owned(), 8);
+        assert_eq!(map.len(), 1);
+    }
 }

@@ -46,7 +46,11 @@ def_detour! {
     GetUrl(this: *mut Il2CppObject, url_type: i32) -> *mut Il2CppString {
             if url_type == WebViewDefine::Url_Update {
             if let Some(news_url) = &Hachimi::instance().localized_data.load().config.news_url {
-                return news_url.to_il2cpp_string();
+                // C19: the translation repo's address goes to the game's web view, so only a web address is handed over.
+                if crate::core::utils::is_web_url(news_url) {
+                    return news_url.to_il2cpp_string();
+                }
+                warn!("news_url in the translation repo is not an http or https address, the game's own news address is used");
             }
         }
 
