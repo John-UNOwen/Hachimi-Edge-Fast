@@ -191,20 +191,24 @@ pub(crate) struct CutProbe {
     // Set for the probes worth a peak: the largest value this path handed back all run.
     peaked: bool,
     peak: AtomicU32,
+    // The clock time of the last crossing, from `ProbeSuite`, or -1 for a door never crossed or a suite that never
+    // started. The watchdog reads it to say which doors went quiet during a stall.
+    last_us: AtomicI64,
 }
 
 impl CutProbe {
     pub(crate) const fn counted(name: &'static str) -> Self {
-        Self { name, calls: AtomicUsize::new(0), peaked: false, peak: AtomicU32::new(0) }
+        Self { name, calls: AtomicUsize::new(0), peaked: false, peak: AtomicU32::new(0), last_us: AtomicI64::new(-1) }
     }
 
     pub(crate) const fn peaked(name: &'static str) -> Self {
-        Self { name, calls: AtomicUsize::new(0), peaked: true, peak: AtomicU32::new(0) }
+        Self { name, calls: AtomicUsize::new(0), peaked: true, peak: AtomicU32::new(0), last_us: AtomicI64::new(-1) }
     }
 
     // First hits print the values, later ones only the count, so a path the game polls every frame
     // cannot fill the log.
     pub(crate) fn observe(&self, values: &[f64]) {
+        self.stamp();
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
         note_hole_census(self.name);
 
@@ -225,6 +229,7 @@ impl CutProbe {
     // values reported twice the calls the game actually made: run 13's `InitializePlateList(list,
     // interval)=12` was six calls, and its first hit lines numbered them 1, 3, 5 and 7 (C53).
     pub(crate) fn observe_peak(&self, values: &[f64], value: f32) {
+        self.stamp();
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
 
         // The census records the value for the same doors the peak is worth keeping for: those are the
@@ -248,6 +253,7 @@ impl CutProbe {
 
     // The frame hot shape: one increment, one max, no slice and no formatting until a chunk boundary.
     pub(crate) fn sample(&self, value: f32) {
+        self.stamp();
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
 
         if self.peaked {
@@ -262,6 +268,21 @@ impl CutProbe {
         if calls % PROBE_CHUNK == 0 {
             debug!("Cutt probe {} {} calls peak {}", self.name, calls, f32::from_bits(self.peak.load(atomic::Ordering::Relaxed)));
         }
+    }
+
+    // One clock read per crossing, and only while the suite is armed. Without debug_mode the suite never starts, the
+    // read answers -1, and a crossing costs one relaxed store.
+    fn stamp(&self) {
+        self.last_us.store(super::ProbeSuite::now_us(), atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn last_us(&self) -> i64 {
+        self.last_us.load(atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stamp_at(&self, us: i64) {
+        self.last_us.store(us, atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn calls(&self) -> usize {
@@ -403,6 +424,14 @@ static CUTT_UPDATE_SPEED: CutProbe = CutProbe::counted("CutInTimelineController:
 static CUTT_SKIP_RUNTIME_TIME: CutProbe = CutProbe::peaked("CutInTimelineController::SkipRuntime(time)");
 static CUTT_SKIP_RUNTIME_FRAMES: CutProbe = CutProbe::counted("CutInTimelineController::SkipRuntime(frames, keep)");
 static CUTT_SKIP_TIME_DIRECT: CutProbe = CutProbe::peaked("CutInTimelineController::SkipTimeDirect(time)");
+
+// The pause, resume and wait setters of the cut-in timeline. A stalled cut reads the census flags on every sample,
+// but the door that set a hold is only visible as the time it was last crossed, so each one stamps that time.
+static CUTT_PAUSE: CutProbe = CutProbe::counted("CutInTimelineController::Pause(pause)");
+static CUTT_RESUME: CutProbe = CutProbe::counted("CutInTimelineController::Resume()");
+static CUTT_SET_WAIT_TAP: CutProbe = CutProbe::counted("CutInTimelineController::SetWaitTap(event)");
+static CUTT_SET_WAIT_VOICE_END: CutProbe = CutProbe::counted("CutInTimelineController::SetWaitVoiceEnd(event)");
+static CUTT_SET_ENABLE_WAITING_UPDATE: CutProbe = CutProbe::counted("CutInTimelineController::SetEnableWaitingUpdate(enable)");
 static CUT_STATUS_SKIP: CutProbe = CutProbe::counted("SingleModeMainViewTrainingCutStatus::Skip(skip)");
 static CUTT_WAIT_TAP_ASYNC: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::WaitTapAsync()");
 static CUTT_FADE_OUT_RESULT_FLASH: CutProbe = CutProbe::counted("SingleModeMainTrainingCuttController::FadeOutResultFlash()");
@@ -529,7 +558,7 @@ static TAG_PLAYER_IS_VALID_TAG: CutProbe = CutProbe::counted("SingleModeMainView
 static TAG_PLAYER_PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutIn(cards, done)");
 static TAG_PLAYER_PLAY_CUT_OUT: CutProbe = CutProbe::counted("SingleModeMainViewTagTrainingCutInPlayer::PlayCutInOut(done)");
 
-static PROBES: [&CutProbe; 104] = [
+pub(crate) static PROBES: [&CutProbe; 109] = [
     &GET_TRAINING_CUT_TIME_SCALE,
     &CUT_IN_GET_TARGET_SPEED,
     &CUT_IN_IS_HIGH_SPEED_MODE,
@@ -543,6 +572,11 @@ static PROBES: [&CutProbe; 104] = [
     &CUTT_SKIP_RUNTIME_TIME,
     &CUTT_SKIP_RUNTIME_FRAMES,
     &CUTT_SKIP_TIME_DIRECT,
+    &CUTT_PAUSE,
+    &CUTT_RESUME,
+    &CUTT_SET_WAIT_TAP,
+    &CUTT_SET_WAIT_VOICE_END,
+    &CUTT_SET_ENABLE_WAITING_UPDATE,
     &CUT_STATUS_SKIP,
     &CUTT_WAIT_TAP_ASYNC,
     &CUTT_FADE_OUT_RESULT_FLASH,
@@ -2075,11 +2109,145 @@ def_detour! {
     }
 }
 
+// Stall census for the cut-in controller (C65). The 2026-10-12 07:43 session stalled on the inherit screen (view 1501) with
+// `CutInTimelineController::UpdateSpeed` still called every frame, the story doors silent for minutes, and no
+// reading of the controller's own clock, because `get_CurrentTime` was never called on that path. This reads
+// the clock itself, once a second, from the `UpdateSpeed` detour: the controller was just handed back to the
+// game, so the object is live, and every read is a pure getter. A stall reads as a `current time` that stops
+// moving while the update count keeps rising. It logs only while the view is in the story event bucket, so
+// the training cut-ins that run through the same door stay out of it. Observe only: no write.
+const STALL_SAMPLE_INTERVAL_MS: i64 = 1000;
+
+pub(crate) fn stall_sample_due(last_ms: i64, now_ms: i64) -> bool {
+    last_ms < 0 || now_ms - last_ms >= STALL_SAMPLE_INTERVAL_MS
+}
+
+// One stall clock per cut-in controller. Run 31's census showed two controllers, 0x2075b2cd800 and 0x2075b2cd000,
+// taking turns on every frame. A single slot restarted the other controller's clock on each flip, so its "seen"
+// figure read 0 ms for the whole run. Four slots hold every controller a career has been seen to use, with room
+// for one more.
+const STALL_SLOTS: usize = 4;
+
+struct StallSlot {
+    controller: AtomicUsize,
+    seen_since_ms: AtomicI64,
+    last_sample_ms: AtomicI64,
+    last_update_ms: AtomicI64,
+    updates: AtomicUsize,
+}
+
+impl StallSlot {
+    const fn new() -> Self {
+        Self {
+            controller: AtomicUsize::new(0),
+            seen_since_ms: AtomicI64::new(-1),
+            last_sample_ms: AtomicI64::new(-1),
+            last_update_ms: AtomicI64::new(-1),
+            updates: AtomicUsize::new(0),
+        }
+    }
+
+    fn claim(&self, controller: usize, now: i64) {
+        self.controller.store(controller, atomic::Ordering::Relaxed);
+        self.seen_since_ms.store(now, atomic::Ordering::Relaxed);
+        self.last_sample_ms.store(-1, atomic::Ordering::Relaxed);
+        self.last_update_ms.store(-1, atomic::Ordering::Relaxed);
+        self.updates.store(0, atomic::Ordering::Relaxed);
+    }
+}
+
+static STALL_SLOTS_TABLE: [StallSlot; STALL_SLOTS] = [const { StallSlot::new() }; STALL_SLOTS];
+
+// The slot a controller's clock lives in. A controller that already has a slot keeps it. A new one takes the
+// first empty slot, or else the slot updated least recently, which belongs to a controller the game has stopped
+// calling.
+fn stall_slot_in(table: &[StallSlot], controller: usize, now: i64) -> &StallSlot {
+    if let Some(slot) = table.iter().find(|slot| slot.controller.load(atomic::Ordering::Relaxed) == controller) {
+        return slot;
+    }
+
+    let victim = table
+        .iter()
+        .min_by_key(|slot| slot.last_update_ms.load(atomic::Ordering::Relaxed))
+        .unwrap_or(&table[0]);
+    victim.claim(controller, now);
+
+    victim
+}
+
+def_method_wrapper_fn!(stall_get_current_time, STALL_GET_CURRENT_TIME_ADDR, f32, this: *mut Il2CppObject);
+def_method_wrapper_fn!(stall_get_total_time, STALL_GET_TOTAL_TIME_ADDR, f32, this: *mut Il2CppObject);
+def_method_wrapper_fn!(stall_get_waiting_time, STALL_GET_WAITING_TIME_ADDR, f32, this: *mut Il2CppObject);
+def_method_wrapper_fn!(stall_get_time_scale, STALL_GET_TIME_SCALE_ADDR, f32, this: *mut Il2CppObject);
+def_method_wrapper_fn!(stall_get_cutt_index, STALL_GET_CUTT_INDEX_ADDR, i32, this: *mut Il2CppObject);
+def_method_wrapper_fn!(stall_get_is_pause, STALL_GET_IS_PAUSE_ADDR, bool, this: *mut Il2CppObject);
+def_method_wrapper_fn!(stall_get_is_waiting_update, STALL_GET_IS_WAITING_UPDATE_ADDR, bool, this: *mut Il2CppObject);
+
+// Milliseconds since a door last crossed on the suite clock, or -1 while it has not crossed since the suite armed.
+fn door_age_ms(door: &CutProbe, now_us: i64) -> i64 {
+    let last = door.last_us();
+
+    if last < 0 { -1 } else { (now_us - last) / 1000 }
+}
+
+fn resolve_stall_getters(timeline: Option<*mut Il2CppClass>) {
+    let Some(class) = timeline else { return };
+    unsafe {
+        STALL_GET_CURRENT_TIME_ADDR = AnimationSpeed::resolve_method(class, "get_CurrentTime", &[], Il2CppTypeEnum_IL2CPP_TYPE_R4);
+        STALL_GET_TOTAL_TIME_ADDR = AnimationSpeed::resolve_method(class, "GetTotalTime", &[], Il2CppTypeEnum_IL2CPP_TYPE_R4);
+        STALL_GET_WAITING_TIME_ADDR = AnimationSpeed::resolve_method(class, "get_WaitingTime", &[], Il2CppTypeEnum_IL2CPP_TYPE_R4);
+        STALL_GET_TIME_SCALE_ADDR = AnimationSpeed::resolve_method(class, "get_CurrentTimeScale", &[], Il2CppTypeEnum_IL2CPP_TYPE_R4);
+        STALL_GET_CUTT_INDEX_ADDR = AnimationSpeed::resolve_method(class, "get_CuttIndex", &[], Il2CppTypeEnum_IL2CPP_TYPE_I4);
+        STALL_GET_IS_PAUSE_ADDR = AnimationSpeed::resolve_method(class, "get_IsPause", &[], Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN);
+        STALL_GET_IS_WAITING_UPDATE_ADDR = AnimationSpeed::resolve_method(class, "get_IsWaitingUpdate", &[], Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN);
+    }
+}
+
+fn stall_census(this: *mut Il2CppObject, now: i64) {
+    let controller = this as usize;
+    let slot = stall_slot_in(&STALL_SLOTS_TABLE, controller, now);
+
+    slot.last_update_ms.store(now, atomic::Ordering::Relaxed);
+    slot.updates.fetch_add(1, atomic::Ordering::Relaxed);
+
+    let last = slot.last_sample_ms.load(atomic::Ordering::Relaxed);
+    if !stall_sample_due(last, now) {
+        return;
+    }
+    slot.last_sample_ms.store(now, atomic::Ordering::Relaxed);
+
+    let view = SceneManager::requested_view_id();
+    if bucket_for(view, SceneManager::is_race_scene_family()) != ViewBucket::StoryEvent {
+        return;
+    }
+
+    let seen = now - slot.seen_since_ms.load(atomic::Ordering::Relaxed);
+    let now_us = super::ProbeSuite::now_us();
+    info!(
+        "Cut-in stall census: view {view} controller {controller:#x} seen {seen} ms, {} UpdateSpeed calls, current time {:.3}, total {:.3}, waiting {:.3}, scale {:.3}, cutt index {}, paused {}, wait flag {}, pause set {} ms ago, resume {} ms ago, tap wait set {} ms ago, voice wait set {} ms ago",
+        slot.updates.load(atomic::Ordering::Relaxed),
+        stall_get_current_time(this),
+        stall_get_total_time(this),
+        stall_get_waiting_time(this),
+        stall_get_time_scale(this),
+        stall_get_cutt_index(this),
+        stall_get_is_pause(this),
+        stall_get_is_waiting_update(this),
+        door_age_ms(&CUTT_PAUSE, now_us),
+        door_age_ms(&CUTT_RESUME, now_us),
+        door_age_ms(&CUTT_SET_WAIT_TAP, now_us),
+        door_age_ms(&CUTT_SET_WAIT_VOICE_END, now_us),
+    );
+}
+
+
 type CuttUpdateSpeedFn = extern "C" fn(this: *mut Il2CppObject);
 def_detour! {
     CuttTimeline_UpdateSpeed(this: *mut Il2CppObject) {
             CUTT_UPDATE_SPEED.count();
-        pump_training_cut_cutt(this, elapsed_ms());
+        let now = elapsed_ms();
+        pump_training_cut_cutt(this, now);
+        stall_census(this, now);
 
         get_orig_fn!(CuttTimeline_UpdateSpeed, CuttUpdateSpeedFn)(this);
     }
@@ -2166,6 +2334,63 @@ def_detour! {
     }
     bail {
                 get_orig_fn!(CuttTimeline_SkipTimeDirect, CuttSkipTimeDirectFn)(this, time)
+    }
+}
+
+type TimelineResumeFn = extern "C" fn(this: *mut Il2CppObject);
+type TimelineSetEventFn = extern "C" fn(this: *mut Il2CppObject, data: *mut Il2CppObject);
+def_detour! {
+    CuttTimeline_Pause(this: *mut Il2CppObject, pause: bool) {
+            CUTT_PAUSE.observe(&[bit(pause)]);
+
+        get_orig_fn!(CuttTimeline_Pause, TimelineSetFlagFn)(this, pause);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_Pause, TimelineSetFlagFn)(this, pause)
+    }
+}
+
+def_detour! {
+    CuttTimeline_Resume(this: *mut Il2CppObject) {
+            CUTT_RESUME.count();
+
+        get_orig_fn!(CuttTimeline_Resume, TimelineResumeFn)(this);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_Resume, TimelineResumeFn)(this)
+    }
+}
+
+def_detour! {
+    CuttTimeline_SetWaitTap(this: *mut Il2CppObject, data: *mut Il2CppObject) {
+            CUTT_SET_WAIT_TAP.count();
+
+        get_orig_fn!(CuttTimeline_SetWaitTap, TimelineSetEventFn)(this, data);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SetWaitTap, TimelineSetEventFn)(this, data)
+    }
+}
+
+def_detour! {
+    CuttTimeline_SetWaitVoiceEnd(this: *mut Il2CppObject, data: *mut Il2CppObject) {
+            CUTT_SET_WAIT_VOICE_END.count();
+
+        get_orig_fn!(CuttTimeline_SetWaitVoiceEnd, TimelineSetEventFn)(this, data);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SetWaitVoiceEnd, TimelineSetEventFn)(this, data)
+    }
+}
+
+def_detour! {
+    CuttTimeline_SetEnableWaitingUpdate(this: *mut Il2CppObject, enable: bool) {
+            CUTT_SET_ENABLE_WAITING_UPDATE.observe(&[bit(enable)]);
+
+        get_orig_fn!(CuttTimeline_SetEnableWaitingUpdate, TimelineSetFlagFn)(this, enable);
+    }
+    bail {
+                get_orig_fn!(CuttTimeline_SetEnableWaitingUpdate, TimelineSetFlagFn)(this, enable)
     }
 }
 
@@ -4174,6 +4399,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_GetWaitingTime, "get_WaitingTime", NO_PARAMS, R4, "CutInTimelineController::get_WaitingTime");
     probe!(timeline, CuttTimeline_SetSpeed, "SetSpeed", ONE_FLOAT, VOID, "CutInTimelineController::SetSpeed");
     probe!(timeline, CuttTimeline_UpdateSpeed, "UpdateSpeed", NO_PARAMS, VOID, "CutInTimelineController::UpdateSpeed");
+    resolve_stall_getters(timeline);
     probe!(timeline, CuttTimeline_SkipRuntimeTime, "SkipRuntime", ONE_FLOAT, VOID, "CutInTimelineController::SkipRuntime(time)");
     probe!(timeline, CuttTimeline_SkipRuntimeFrames, "SkipRuntime", FRAMES_AND_FLAG, VOID, "CutInTimelineController::SkipRuntime(frames, keep)");
 
@@ -4200,6 +4426,11 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_SetSkipFrame, "set_SkipFrame", ONE_INT, VOID, "CutInTimelineController::set_SkipFrame");
     probe!(timeline, CuttTimeline_SetIsAutoPlay, "set_IsAutoPlay", ONE_FLAG, VOID, "CutInTimelineController::set_IsAutoPlay");
     probe!(timeline, CuttTimeline_GetIsAutoPlay, "get_IsAutoPlay", NO_PARAMS, BOOL, "CutInTimelineController::get_IsAutoPlay");
+    probe!(timeline, CuttTimeline_Pause, "Pause", ONE_FLAG, VOID, "CutInTimelineController::Pause(pause)");
+    probe!(timeline, CuttTimeline_Resume, "Resume", NO_PARAMS, VOID, "CutInTimelineController::Resume()");
+    probe!(timeline, CuttTimeline_SetWaitTap, "SetWaitTap", &[CLASS], VOID, "CutInTimelineController::SetWaitTap(event)");
+    probe!(timeline, CuttTimeline_SetWaitVoiceEnd, "SetWaitVoiceEnd", &[CLASS], VOID, "CutInTimelineController::SetWaitVoiceEnd(event)");
+    probe!(timeline, CuttTimeline_SetEnableWaitingUpdate, "SetEnableWaitingUpdate", ONE_FLAG, VOID, "CutInTimelineController::SetEnableWaitingUpdate(enable)");
 
     probe!(cut_status, TrainingCutStatus_Skip, "Skip", ONE_FLAG, VOID, "SingleModeMainViewTrainingCutStatus::Skip");
     // `PlayIn/4` was last armed as a scaling door and run 26 is why it is not: its float is the play in the
@@ -5897,6 +6128,63 @@ mod tests {
         assert_eq!(CUTT_SKIP_RUNTIME_TIME.label(), "CutInTimelineController::SkipRuntime(time)");
         assert_eq!(CUTT_SKIP_RUNTIME_FRAMES.label(), "CutInTimelineController::SkipRuntime(frames, keep)");
         assert_ne!(CUTT_SKIP_RUNTIME_TIME.label(), CUTT_SKIP_RUNTIME_FRAMES.label());
+    }
+
+    #[test]
+    fn the_stall_census_samples_the_controller_once_a_second() {
+        // The first update on a controller is always sampled, then the census waits a full second before the
+        // next read of the controller's clock. A sample a few frames later would be a second read of the same
+        // stretch and would hide whether the clock is moving.
+        assert!(stall_sample_due(-1, 0));
+        assert!(!stall_sample_due(1_000, 1_999));
+        assert!(stall_sample_due(1_000, 2_000));
+        assert!(stall_sample_due(1_000, 9_000));
+    }
+
+    #[test]
+    fn two_controllers_that_take_turns_keep_their_own_stall_clocks() {
+        // Run 31's flip between two controllers on every frame. Each controller's clock starts at its own first
+        // update and counts its own updates, however often the other one runs in between.
+        let table = [const { StallSlot::new() }; STALL_SLOTS];
+        let (first, second) = (0x2075_b2cd800usize, 0x2075_b2cd000usize);
+        let mut now = 0;
+
+        for _ in 0..10 {
+            for controller in [first, second] {
+                let slot = stall_slot_in(&table, controller, now);
+                slot.last_update_ms.store(now, atomic::Ordering::Relaxed);
+                slot.updates.fetch_add(1, atomic::Ordering::Relaxed);
+            }
+
+            now += 1;
+        }
+
+        let a = stall_slot_in(&table, first, now);
+        let b = stall_slot_in(&table, second, now);
+
+        assert_eq!(a.seen_since_ms.load(atomic::Ordering::Relaxed), 0, "the first controller counts from its first update");
+        assert_eq!(b.seen_since_ms.load(atomic::Ordering::Relaxed), 0, "the second controller was not restarted by the first");
+        assert_eq!(a.updates.load(atomic::Ordering::Relaxed), 10);
+        assert_eq!(b.updates.load(atomic::Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn a_fifth_controller_takes_the_slot_nobody_has_updated_lately() {
+        let table = [const { StallSlot::new() }; STALL_SLOTS];
+
+        for (index, controller) in [0x1000usize, 0x2000, 0x3000, 0x4000].into_iter().enumerate() {
+            let slot = stall_slot_in(&table, controller, index as i64);
+            slot.last_update_ms.store(index as i64, atomic::Ordering::Relaxed);
+        }
+
+        let fifth = stall_slot_in(&table, 0x5000, 10);
+        fifth.last_update_ms.store(10, atomic::Ordering::Relaxed);
+
+        let holds = |controller: usize| table.iter().filter(|slot| slot.controller.load(atomic::Ordering::Relaxed) == controller).count();
+
+        assert_eq!(holds(0x5000), 1, "the new controller has a slot");
+        assert_eq!(holds(0x1000), 0, "the controller updated longest ago lost its slot");
+        assert_eq!(holds(0x4000), 1, "the controllers updated lately keep theirs");
     }
 
     #[test]

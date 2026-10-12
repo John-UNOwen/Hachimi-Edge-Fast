@@ -68,6 +68,13 @@ pub fn current_scene_id() -> SceneId {
     unsafe { std::mem::transmute(SCENE_ID_CACHE.load(atomic::Ordering::Acquire)) }
 }
 
+// The view id most recently requested through `ChangeView`. Nothing else in the mod names the view a cut-in
+// belongs to, and the stall census needs that name on the controller's own samples (C65).
+static REQUESTED_VIEW_ID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub fn requested_view_id() -> i32 {
+    REQUESTED_VIEW_ID.load(atomic::Ordering::Acquire)
+}
+
 pub fn is_race_scene_family() -> bool {
     let id = current_scene_id();
     matches!(
@@ -103,6 +110,7 @@ fn ChangeViewCommon(next_view_id: i32) {
             }
         }
     }
+    REQUESTED_VIEW_ID.store(next_view_id, atomic::Ordering::Release);
     debug!("next_view_id = {}", next_view_id);
 
     // Nothing speed related runs here. `AnimationSpeed::apply()` already ran in the ChangeView

@@ -99,6 +99,9 @@ mod GameFrameProbe;
 // Observe only: the popups and the skill learning screen that sit between career screens and have never
 // been counted here. Item 99 and item 104.
 mod DialogProbe;
+mod InheritFlowProbe;
+mod ProbeSuite;
+mod SkillSparkProbe;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -401,4 +404,6 @@ pub fn init() {
     // Last, and observe only: the dialog choke points, the skill learning screen doors, and the career
     // screen's own view lifecycle, so a popup count reads against the time the player was on the screen.
     DialogProbe::init(image);
+    SkillSparkProbe::init(image);
+    InheritFlowProbe::init(image);
 }

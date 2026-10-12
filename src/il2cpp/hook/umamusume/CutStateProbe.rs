@@ -355,6 +355,9 @@ static MOVENEXT: CutProbe = CutProbe::counted("<PlayTrainingCut>d__70::MoveNext(
 static TIME_SCALE: CutProbe = CutProbe::peaked("PlayTrainingCut timeScale");
 static ALL_TEXT_WAIT: CutProbe = CutProbe::peaked("PlayTrainingCut allTextWaitTime");
 
+// The doors this module counts, for the probe suite's watchdog.
+pub(crate) static PROBES: [&CutProbe; 3] = [&MOVENEXT, &TIME_SCALE, &ALL_TEXT_WAIT];
+
 // The largest value the game itself put into the cut's own timing fields this run.
 pub(crate) fn time_scale_peak() -> f32 {
     peak_seconds(TIME_SCALE.peak_bits())

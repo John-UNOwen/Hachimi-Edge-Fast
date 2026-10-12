@@ -110,7 +110,7 @@ static TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST: CutProbe = CutProbe::peaked("Sin
 // call on it means anything. Item 94.
 static STORY_SKIP_STORY: CutProbe = CutProbe::counted("StoryViewController::SkipStory()");
 
-static PROBES: [&CutProbe; 31] = [
+pub(crate) static PROBES: [&CutProbe; 31] = [
     &CUT_IN_PLAY,
     &CUT_IN_ON_PLAY_CUT_IN,
     &CUT_IN_IS_PLAYING,

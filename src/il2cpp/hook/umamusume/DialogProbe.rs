@@ -60,7 +60,7 @@ static SKILL_BACK_DELAY: CutProbe = CutProbe::peaked("SingleModeSkillLearningVie
 static BEGIN_VIEW: CutProbe = CutProbe::counted("SingleModeMainViewController::BeginView()");
 static PLAY_OUT_VIEW: CutProbe = CutProbe::counted("SingleModeMainViewController::PlayOutView()");
 
-static PROBES: [&CutProbe; 7] = [
+pub(crate) static PROBES: [&CutProbe; 7] = [
     &PUSH_DIALOG,
     &PUSH_SYSTEM_DIALOG,
     &IS_SHOW_DIALOG,

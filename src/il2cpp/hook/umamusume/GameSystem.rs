@@ -106,6 +106,8 @@ def_detour! {
         super::GameFrameProbe::report_if_due();
         // The dialog and skill screen census, on the same tick and the same quiet path rule.
         super::DialogProbe::report_if_due();
+        super::SkillSparkProbe::report_if_due();
+        super::InheritFlowProbe::report_if_due();
 
         #[cfg(target_os = "windows")]
         {
