@@ -288,6 +288,7 @@ config_editor:
   homescreen_bgseason: "Estación en el menú principal"
   shadow_resolution: "Resolución de las sombras"
   hide_now_loading: "Ocultar la pantalla de carga"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "Ocultar guía para cambiar la orientación en la pantalla de carga"
   replace_to_builtin_font: "Usar la fuente original del juego"
   custom_title_name: "Título personalizado para la ventana"

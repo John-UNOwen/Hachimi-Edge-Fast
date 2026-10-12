@@ -109,6 +109,7 @@ tl_updater:
     將無法使用翻譯功能。
 
 config_editor:
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   title: "設置編輯器"
   general_tab: "\uf013 一般"
   performance_tab: "\uf0e7 效能"

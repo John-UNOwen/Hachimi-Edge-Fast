@@ -242,6 +242,7 @@ config_editor:
   homescreen_bgseason: "Latar musim di beranda"
   shadow_resolution: "Resolusi bayangan"
   hide_now_loading: "Sembunyikan layar 'Now Loading'"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "Sembunyikan info orientasi layar"
   replace_to_builtin_font: "Gunakan font default game"
   custom_title_name: "Judul jendela kustom"

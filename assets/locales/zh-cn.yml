@@ -280,6 +280,7 @@ config_editor:
   force_chara_shadows: "强制角色阴影"
   story_shadow_type: "剧情阴影类型"
   hide_now_loading: "隐藏加载画面画面"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "隐藏加载画面方向提示"
   replace_to_builtin_font: "使用游戏默认字体"
   custom_title_name: "自定义窗口标题"

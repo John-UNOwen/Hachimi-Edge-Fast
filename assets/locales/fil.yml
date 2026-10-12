@@ -219,6 +219,7 @@ config_editor:
   caption_outline_size: "Laki ng outline"
   enable_smtc: "Paganahin ang Windows Media Controls"
   hide_now_loading: "Itago ang \"Now Loading\" na screen"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "Itago ang tagubilin ng oryentasyon sa loading screen"
   replace_to_builtin_font: "Gamitin ang default na font ng laro"
   custom_title_name: "Pasadyang Window Title"

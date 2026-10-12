@@ -309,6 +309,7 @@ config_editor:
   homescreen_bgseason: "Estação da tela de início"
   shadow_resolution: "Resolução das sombras"
   hide_now_loading: "Esconder tela de carregamento"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "Ocultar guia de orientação na tela de carregamento"
   replace_to_builtin_font: "Usar fonte padrão do jogo"
   custom_title_name: "Título customizado da janela"

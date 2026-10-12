@@ -300,6 +300,7 @@ config_editor:
   force_chara_shadows: "Принудительные тени персонажей"
   story_shadow_type: "Тип теней в сюжетах"
   hide_now_loading: "Скрыть экран загрузки"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "Скрыть подсказку ориентации на экране загрузки"
   replace_to_builtin_font: "Использовать шрифт игры по умолчанию"
   custom_title_name: "Пользовательский заголовок окна"

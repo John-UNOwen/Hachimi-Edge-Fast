@@ -105,6 +105,7 @@ tl_updater:
   warning: "Bản dịch sẽ không hoạt động trong lúc đang cập nhật"
 
 config_editor:
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   title: "Chỉnh sửa cài đặt"
   general_tab: "\uf013 Chung"
   performance_tab: "\uf0e7 Hiệu năng"

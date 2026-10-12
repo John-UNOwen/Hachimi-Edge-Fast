@@ -274,6 +274,7 @@ config_editor:
   force_chara_shadows: "강제로 그림자 만들기"
   story_shadow_type: "그림자 형태"
   hide_now_loading: "로딩 화면 미표시"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "now loading창 가이드 숨기기"
   replace_to_builtin_font: "기본 폰트 사용"
   custom_title_name: "커스텀 타이틀 페이지"

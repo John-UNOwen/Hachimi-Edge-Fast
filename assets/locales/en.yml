@@ -314,6 +314,7 @@ config_editor:
   force_chara_shadows: "Force Character Shadows"
   story_shadow_type: "Story Shadow Type"
   hide_now_loading: "Hide Now Loading screen"
+  hide_now_loading_inert: "No effect on this client: not wired up yet"
   ui_loading_show_orientation_guide: "Hide now loading orientation guide"
   replace_to_builtin_font: "Use default game font"
   custom_title_name: "Custom window title"
