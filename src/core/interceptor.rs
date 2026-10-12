@@ -1263,10 +1263,9 @@ mod tests {
     // bumped the generation while holding only the barrier's turn landed that bump between another
     // test's `reread` and its `cached` assertion, that assertion answered `None` where it expected a
     // trampoline, and the same test's `resolve` then fell into the cold branch that reaches
-    // `Hachimi::instance()` - `process::exit(1)` at `src/core/hachimi.rs:427` - which ends the test
+    // `Hachimi::instance()` - `process::exit(1)` at `src/core/hachimi.rs:523` - which ends the test
     // binary and hides every other test's result. The mechanism is pinned below, as a decision run in
-    // one thread inside one turn, rather than as a timing window nobody can reproduce on purpose.
-    //
+    // one thread inside one turn, not a window nobody reproduces. Only that pointer moved for C57. Only that pointer changed in this file: no decision here moves for C56, C57 or C58.
     // One lock, not two: `take_turns` and `guard::barrier_turn` are the same mutex, so a test that took
     // both would deadlock on a lock `std::sync::Mutex` does not re-enter.
     fn take_turns() -> MutexGuard<'static, ()> {

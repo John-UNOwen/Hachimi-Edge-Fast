@@ -1078,7 +1078,7 @@ pub mod guard {
     ///
     /// It returns the line instead of logging it because the claim this line carries is a claim about
     /// a log line, and the test process installs no logger: `report_trips` is reached once, from
-    /// `DLL_PROCESS_DETACH` (`src/windows/main.rs:84`), so as long as the assembly and the `warn!`
+    /// `DLL_PROCESS_DETACH` (`src/windows/main.rs:78-94`), so as long as the assembly and the `warn!`
     /// were one function nothing in the tree could read the report a run is supposed to print. That
     /// is how `BAIL_TRIPS` - bumped by `detour_fallback_or` for every fallback or `bail` the barrier
     /// had to stop *after* a trip, i.e. "the wrapper's own stated answer could not answer either" -
@@ -2046,11 +2046,11 @@ pub mod guard {
             assert_eq!(panic_trip_count(), before + 2, "the body and the fallback each tripped");
         }
 
-        /// The tier-3 claim the item states - that a run can tell "the wrapper's stated answer ran"
-        /// from "the stated answer itself could not answer" - is a claim about the detach line, so it
-        /// is checked against the line the shipped `report_trips` prints (`src/windows/main.rs:84`)
-        /// rather than against a counter no log reads. Both wrappers are panic-only shapes, so this
-        /// runs on every target, including the one with no SEH frame.
+        /// The tier-3 claim - a run telling "the wrapper's stated answer ran" from "the stated answer
+        /// itself could not answer" - is a claim about the detach line, so it is checked against the line
+        /// the shipped `report_trips` prints (`:1070-1074`, reached from `src/windows/main.rs:78-94`) and
+        /// not against a counter no log reads. Both wrappers are panic-only shapes, so this runs on every
+        /// target, SEH frame or not. Those pointers are the whole edit here for C56 to C58: no decision.
         #[test]
         fn the_detach_report_names_the_stated_answer_that_could_not_answer() {
             let _turn = counting();
