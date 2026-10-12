@@ -1,6 +1,6 @@
 <img align="left" width="80" height="80" src="assets/icon.png">
 
-# Hachimi Edge (performance fork)
+# Hachimi Edge (vibe-coded performance fork)
 
 English | [简体中文](README-zh_cn.md) | [繁體中文](README-zh_tw.md)
 
