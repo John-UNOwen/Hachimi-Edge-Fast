@@ -30,6 +30,19 @@ def_detour! {
         // it waits on finished on the multiplied clock is how three sessions stalled a training turn at
         // `ui_animation_scale 20.0`. The hold is one cut wide and its bound is measured on the game thread's
         // tick, in `TrainingCuttProbe::tick_cut_gate`.
+        //
+        // And it holds the tick itself under `AnimationSpeed::MAX_TWEEN_TICK_ADVANCE_SEC`: this argument is the
+        // whole tween time one call to the game's tween manager advances every delta channel tween by, so a
+        // tick longer than the animation it is speeding closes that animation - a `Sequence` leg, an inserted
+        // callback, the completion an `Action` is waiting on - in one step, before the coroutine that was going
+        // to watch for it parks on it. Run 57's own frame clock read a mean of 33.7 ms - `frames 74951 over
+        // 2527736 ms mean 33.7 ms` at 2528 s, 33.7 to 33.8 ms in every window through its blocked tail - so that
+        // session's 20x clock carried 674 ms at once. Its last training door call is `TrainingParamChangeUI::
+        // OnAllTypewriteEnd() call 5` at 20:45:37.757 and the 2,412 s after it prints periodic totals and no door
+        // call, the last reading `open now 2417805 ms` on a goal complete dialog whose acknowledge button is
+        // inserted 0.3 to 0.5 s into its own entry sequence (C58, ledger item 107). The trim lands on what this
+        // fork's lever added and never on the delta the game handed, so a long frame arrives as the game wrote
+        // it.
         let (delta_time, independent_time) = AnimationSpeed::tween_clocks(delta_time, independent_time);
 
         get_orig_fn!(Update, UpdateFn)(update_type, delta_time, independent_time);
