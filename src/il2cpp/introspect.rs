@@ -114,15 +114,16 @@ const FULL_DUMP_NAMES: &[&str] = &[
     // next lever has to be written against gets its own block, along with the member cut-in door's owner and the
     // plate class whose `TYPEWRITE_DURATION` / `NEXT_WAIT_DURATION` / `_typewriteDuration` the cascade reads.
     "FlashPlayer", "FlashActionPlayer", "TrainingParamChangeSupportMemberA2U", "TrainingParamChangePlate",
-    // `FlashPlayer`'s `_motion` and `_root` are AnimateToUnity objects (`introspect.log:26507` to `26508`) and the
+    // `FlashPlayer`'s `_motion` and `_root` are AnimateToUnity objects (`introspect-run45.log:26507` to `26508`) and the
     // flash player's own surface names no speed door of its own, so the class that actually advances a cut-in
     // effect has to be read before a lever is written on it.
     "AnMotion", "AnRoot",
 ];
 
 /// A field whose held class the walk cannot reach by name. `AnimateToUnity.AnMotion` and `AnRoot` are in no image
-/// `IMAGE_FILTERS` matches, and no loaded image carries a name that would say so (`introspect.log` names 102 images
-/// out of scope, none of them AnimateToUnity), so an allowlist entry for them can never fire. A field type is a
+/// `IMAGE_FILTERS` matches, and no loaded image carries a name that would say so: the run that wrote the dump
+/// printed 6 images in scope and 102 out of scope and none of the 102 is an AnimateToUnity image
+/// (`hachimi-run45.log:845`), so an allowlist entry for them can never fire. A field type is a
 /// pointer into the metadata that no image filter hides, and an `Il2CppClass` carries its own image, so the walk
 /// reaches the class from the class it already dumped and prints the image it came from (A8).
 const REACHED_VIA_FIELDS: &[(&str, &str)] = &[
@@ -133,9 +134,10 @@ const REACHED_VIA_FIELDS: &[(&str, &str)] = &[
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
 /// is bounded, so the log grows by these classes and not by whatever else matches a filter. One simple name can
-/// match in more than one image, so 44 names spent 48 blocks and 46 names spent the whole 56 block budget on the
-/// Global client (`introspect.log:27687`), and the budget is sized over that: a client that renames a state machine
-/// takes the slot rather than crowding a name this fork is measured against out.
+/// match in more than one image, so the dumps print more allowlist blocks than the list has names: 44 in the client
+/// dump (`introspect.log:27547`), 48 in the run 42 dump (`introspect-run42.log:27687`) and 61 in the run 45 dump
+/// (`introspect-run45.log:29078`), and the budget is sized over the widest of those: a client that renames a state machine
+/// takes the slot rather than crowding a name the C58 cascade is measured against out.
 const MAX_ALLOWLIST_CLASSES: usize = 64;
 
 /// Shape of the dump itself, stamped into the file. Bump it when the log gains or loses a
