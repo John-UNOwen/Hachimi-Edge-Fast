@@ -66,7 +66,6 @@ mod SaveDataManager;
 mod ApplicationSettingSaveLoader;
 pub(crate) mod HighSpeedSetting;
 mod LiveTheaterCharaSelect;
-mod LiveTheaterViewController;
 pub mod CySpringController;
 mod LiveUtil;
 pub mod MasterDataUtil;
@@ -270,7 +269,6 @@ pub fn init() {
     ApplicationSettingSaveLoader::init(image);
     HighSpeedSetting::init(image);
     LiveTheaterCharaSelect::init(image);
-    LiveTheaterViewController::init(image);
     CySpringController::init(image);
     LiveUtil::init(image);
     MasterDataUtil::init(image);
