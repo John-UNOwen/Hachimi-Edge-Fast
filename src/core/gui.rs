@@ -5630,12 +5630,6 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
-            if should_show_option(search, &t!("config_editor.ipc_listen_all")) {
-                ui.label(t!("config_editor.ipc_listen_all"));
-                ui.checkbox(&mut config.ipc_listen_all, "");
-                ui.end_row();
-            }
-
             if should_show_option(search, &t!("config_editor.hide_now_loading")) {
                 // Offered for compatibility; nothing reads the field yet (A6, C14), so the row says so.
                 ui.vertical(|ui| {

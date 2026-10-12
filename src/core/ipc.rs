@@ -6,17 +6,16 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use crate::{core::utils::notify_error, il2cpp::{hook::umamusume::{GameSystem, StoryTimelineController, StoryTimelineData}, symbols::{IList, Thread}, types::Il2CppObject}};
 use super::{Error, Gui, Hachimi};
 
-pub fn start_http(listen_all: bool) {
-    std::thread::spawn(move || http_thread(listen_all));
+// C18: the plane answers loopback only. It has no authentication, so a non-loopback bind would hand `SoftReset`,
+// `StoryGotoBlock` and `ReloadLocalizedData` to anything on the network that can reach the port.
+const IPC_ADDRESS: &str = "127.0.0.1:50433";
+
+pub fn start_http() {
+    std::thread::spawn(http_thread);
 }
 
-fn http_thread(listen_all: bool) {
-    let address = if listen_all {
-        "0.0.0.0:50433"
-    }
-    else {
-        "127.0.0.1:50433"
-    };
+fn http_thread() {
+    let address = IPC_ADDRESS;
 
     let server = match Server::http(address) {
         Ok(v) => v,
@@ -239,5 +238,15 @@ enum CommandResponse {
 impl CommandResponse {
     fn error(message: impl Into<Option<String>>) -> Self {
         Self::Error { message: message.into() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IPC_ADDRESS;
+
+    #[test]
+    fn the_ipc_plane_answers_loopback_only() {
+        assert!(IPC_ADDRESS.starts_with("127.0.0.1:"), "{IPC_ADDRESS}");
     }
 }

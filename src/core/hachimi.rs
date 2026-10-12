@@ -833,7 +833,11 @@ impl Hachimi {
         }
 
         if config.enable_ipc {
-            ipc::start_http(config.ipc_listen_all);
+            // C18: `ipc_listen_all` no longer reaches the network, and the plane answers loopback only.
+            if config.ipc_listen_all {
+                warn!("ipc_listen_all is ignored: the IPC plane answers 127.0.0.1 only (C18)");
+            }
+            ipc::start_http();
         }
 
         hachimi_impl::on_hooking_finished(self);
@@ -1226,6 +1230,7 @@ pub struct Config {
     #[serde(default)]
     pub enable_ipc: bool,
     #[serde(default)]
+    /// Ignored (C18): the IPC plane answers loopback only. The key stays so an existing config still parses.
     pub ipc_listen_all: bool,
     #[serde(default)]
     pub force_allow_dynamic_camera: bool,
