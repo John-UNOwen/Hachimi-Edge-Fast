@@ -12,3 +12,6 @@ cargo_check_out.txt
 
 # captured run logs: the evidence the run notes in LEDGER.md are written from
 /run log/
+
+# handoff note for the knowledge history tool, kept with the local records it describes
+/tools/knowledge-history-handoff.md
