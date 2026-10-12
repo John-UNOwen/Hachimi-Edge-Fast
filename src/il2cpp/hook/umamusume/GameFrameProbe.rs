@@ -24,9 +24,8 @@ use crate::{
 // the frame it measures. That is why the screen is read from the atomic `ChangeView` sets and not from the
 // game, which would be two managed calls on every frame.
 //
-// A gap over SLOW_FRAME_US is counted as a stall. Three runs of this fork have never measured a stall, so
-// the number is a question rather than a finding, and it is reported as a count beside its total time so a
-// long stall and many short ones cannot be confused with each other.
+// A gap over SLOW_FRAME_US is counted as a stall. The count is reported beside its total time, so a long stall
+// and many short ones cannot be confused with each other.
 
 // A frame this long is reported as a stall. 50 ms is a third of the 20 fps the training cut timeline is
 // authored at (run 10 read `get_TargetFps` as 20), so a frame past it is a frame the animation already lost.

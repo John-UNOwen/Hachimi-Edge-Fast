@@ -134,8 +134,8 @@ const REACHED_VIA_FIELDS: &[(&str, &str)] = &[
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
 /// is bounded, so the log grows by these classes and not by whatever else matches a filter. One simple name can
-/// match in more than one image, so the dumps print more allowlist blocks than the list has names: 44 in the client
-/// dump (`introspect.log:27547`), 48 in the run 42 dump (`introspect-run42.log:27687`) and 61 in the run 45 dump
+/// match in more than one image, so the dumps print more allowlist blocks than the list has names: 48 in the run 42
+/// dump (`introspect-run42.log:27687`) and 61 in the run 45 dump
 /// (`introspect-run45.log:29078`), and the budget is sized over the widest of those: a client that renames a state machine
 /// takes the slot rather than crowding a name the C58 cascade is measured against out.
 const MAX_ALLOWLIST_CLASSES: usize = 64;

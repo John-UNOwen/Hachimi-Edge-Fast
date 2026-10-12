@@ -2145,10 +2145,9 @@ pub(crate) fn stall_sample_due(last_ms: i64, now_ms: i64) -> bool {
     last_ms < 0 || now_ms - last_ms >= STALL_SAMPLE_INTERVAL_MS
 }
 
-// One stall clock per cut-in controller. Run 31's census showed two controllers, 0x2075b2cd800 and 0x2075b2cd000,
-// taking turns on every frame. A single slot restarted the other controller's clock on each flip, so its "seen"
-// figure read 0 ms for the whole run. Four slots hold every controller a career has been seen to use, with room
-// for one more.
+// One stall clock per cut-in controller. Two controllers taking turns on every frame would restart each other's
+// clock with a single slot, so its "seen" figure would read 0 ms for the whole run. Four slots is a bound chosen for
+// that case, not a count taken from a logged run.
 const STALL_SLOTS: usize = 4;
 
 struct StallSlot {
