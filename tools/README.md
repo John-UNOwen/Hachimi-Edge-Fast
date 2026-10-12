@@ -16,3 +16,9 @@ script kept under `target/scratch/` is deleted by `cargo clean` and by `git clea
 was never put in git's index is dropped by `git add -u` and by `git commit -am` without either command
 saying so. A count quoted from a tool that a commit can lose is not reproducible evidence, so these two
 travel with the hooks they check and the barrier audit checks that for them.
+
+## Knowledge history
+
+| Tool | What it does |
+|---|---|
+| `bash tools/knowledge-snapshot.sh ["what changed"]` | Records `knowledge/` and `LEDGER.md` in the local history outside this repository. `--log`, `--show [rev]` and `--restore [rev]` read it back. AGENTS.md section 1 has the rules. |

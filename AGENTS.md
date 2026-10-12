@@ -7,7 +7,13 @@ fix order, the run notes, and section F for releases.
 
 LEDGER.md and `knowledge/` are local records that this repository does not track. Both are in
 `.gitignore`, both are absent from a fresh clone, and `git clean -xdf` deletes them. Never `git add`
-them, and never audit them with `git diff`, which sees neither.
+them in this repository, and never audit them with its `git diff`, which sees neither. Their history
+is a separate local git repository, `$HOME/.hachimi-knowledge-history.git` (or
+`$KNOWLEDGE_HISTORY`). It has no remote, must never get one, and exists only on this machine. `bash
+tools/knowledge-snapshot.sh "what changed"` records both paths there. `--log` and `--show` read that
+history, and `--restore [rev]` puts both paths back as they were at `rev`, after snapshotting the
+current state. After a `git clean -xdf`, run `--restore`. Take a snapshot after each change to
+either file. Only that script stages these paths, and only into that history.
 
 ## 1. What this fork is for
 
@@ -95,6 +101,7 @@ or a decision is taken, not as a scratch pad. The split and the evidence rule ar
 | `src/android/` | Dobby backend, Zygisk, GL overlay |
 | `assets/locales/*.yml` | 10 locales (en, es, fil, id, ko, pt-br, ru, vi, zh-cn, zh-tw) |
 | `tools/gen_il2cpp_slot_table.py` | generates `src/il2cpp/slot_table_generated.rs` (Android) |
+| `tools/knowledge-snapshot.sh` | snapshots `knowledge/` and `LEDGER.md` into the local history outside this repository (section 1) |
 
 ## 4. Build and check
 
@@ -252,7 +259,7 @@ Hot paths run every frame or every tween tick. In them:
       different fixes, and a refusal is never in `c`.
    - `Frame probe totals at N s:` for the story stepping search (item D13).
 4. Record the run in LEDGER.md in the existing format: build hash, duration, numbers, what
-   moved, what didn't.
+   moved, what didn't. Then take a snapshot (section 1).
 
 ## 8. Where the remaining time is
 
@@ -291,7 +298,7 @@ A new speed or performance option touches, in one change:
 
 - Commits: `area: lower case imperative summary`, areas `il2cpp`, `core`, `gui`, `l10n`,
   `docs`, `windows`, `android`. One concern per commit. The ledger and the bundle are not part of a
-  commit: they are local records, gitignored, and never staged.
+  commit: they are local records, gitignored, and never staged in this repository. Their snapshots go to the history in section 1.
 - Code style follows the surrounding file: hook files use the game's PascalCase names
   (`src/lib.rs` allows `non_snake_case` crate wide), comments explain *why* a value is safe, not what the line does.
 - LEDGER.md status marks: `[x]` fixed and verified, `[~]` partial, `[ ]` open, `[latent]` inert
@@ -299,7 +306,7 @@ A new speed or performance option touches, in one change:
   a C item's state lives in its concept at `knowledge/defects/`, as `state`, `fixed_in` and the
   proof line. Cite the commit hash when closing a code item, and never mark `[x]` without a run. An
   item whose own text says the run is missing is `[~]`, not `[x]`. A ledger self check counts marks
-  in the files, never in a diff, because git tracks neither: count
+  in the files, never in a diff, because this repository's git tracks neither: count
   `Select-String '^- \[x\]|^[0-9]+\. \[x\]' LEDGER.md` and `Select-String '^state: fixed' knowledge\defects\*.md`
   before and after the change set, and quote both counts with the moment each was taken. A check
   that cannot match what it looks for returns a clean number on any tree.
@@ -315,7 +322,7 @@ A new speed or performance option touches, in one change:
 - `knowledge/` concepts follow OKF v0.2: frontmatter with a `type`, the ledger id inside the
   filename (`defects/c48-<slug>.md`, ids are never reused), the proof line quoted in the body, and
   no `verified` entry without that line. The ledger keeps the queue, the bundle keeps the
-  conclusion, and both stay out of git. The view over them is
+  conclusion, and both stay out of this repository's git, with their history in section 1. The view over them is
   `python knowledge/references/computations/defect_rollup.py`.
 - Upstream's PR template forbids untested AI generated code. Anything heading upstream must be
   built, run in game and understood by the human submitting it.
