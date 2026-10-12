@@ -208,15 +208,19 @@ impl SettingsPreset {
                 config.training_plate_speed = 1.0;
                 // Neither arm is this fork's ceiling arm, and this lever is not an upstream option either.
                 config.training_cut_speed = 1.0;
+                // The tag cut and the cut skip are this fork's levers too. Upstream has neither, so this arm turns both off.
+                config.training_tag_cut_speed = 1.0;
+                config.skip_training_cut = false;
             }),
         }
     }
 
     /// Every timing field at the ceiling the code honours: `MAX_FACTOR` for the transition, result and
     /// plate groups, 10.0 for the story group where its slider ends, `MAX_UI_ANIMATION_SCALE`,
-    /// `MAX_TIME_SCALE`, the choice delay floor, and the story text multiplier at the 1000.0 its
-    /// slider offers, which is deliberately unclamped (StoryTimelineData.rs multiplies
-    /// TypewriteCountPerSecond by it).
+    /// `MAX_TIME_SCALE`, `MAX_TAG_CUT_ANIMATOR_SPEED` for the tag cut, the choice delay floor, and the
+    /// story text multiplier at the 1000.0 its slider offers, which is deliberately unclamped
+    /// (StoryTimelineData.rs multiplies TypewriteCountPerSecond by it). The cut skip is switched on too.
+    /// `high_speed_settings` is not one of the levers: its option is hidden in code, so the arm keeps the live value.
     pub fn all_levers(live: &Config) -> Self {
         Self {
             name: PRESET_ALL_LEVERS.to_string(),
@@ -232,7 +236,7 @@ impl SettingsPreset {
                     AnimationSpeed::MIN_STORY_CHOICE_AUTO_SELECT_DELAY,
                     true,
                     true,
-                    true,
+                    live.high_speed_settings,
                     true,
                 );
 
@@ -240,15 +244,19 @@ impl SettingsPreset {
                 // One control feeding two doors, so the arm takes the reach of the further one: the scale door is
                 // capped at `MAX_TRAINING_CUT_TIME_SCALE` in its own code and the motion door at `MAX_MOTION_SPEED`.
                 config.training_cut_speed = AnimationSpeed::MAX_TRAINING_CUT_LEVER;
+                // The tag cut has its own Animator speed, capped in code at `MAX_TAG_CUT_ANIMATOR_SPEED`. The cut skip is a
+                // plain flag, so the arm names it on rather than inheriting whatever the live config held.
+                config.training_tag_cut_speed = AnimationSpeed::MAX_TAG_CUT_ANIMATOR_SPEED;
+                config.skip_training_cut = true;
             }),
         }
     }
 
     /// Upstream Hachimi's own speed options at the fastest values the user names: UI animation scale
     /// 10, story auto select delay 0.1, story text speed multiplier 10, CySpring mono frame scale
-    /// uncapped. This fork's group factors, its `Time.timeScale` lever, auto skip and the two story
-    /// high speed flags stay at their shipped values, so this arm is what plain upstream looks like
-    /// rather than what this fork can be pushed to.
+    /// uncapped. This fork's levers (group factors, `Time.timeScale`, plate, cut-in, tag cut, cut skip,
+    /// auto skip and the two story high speed flags) stay at their shipped values, so this arm is what
+    /// plain upstream looks like rather than what this fork can be pushed to.
     pub fn hachimi_fast(live: &Config) -> Self {
         Self {
             name: PRESET_HACHIMI_FAST.to_string(),
@@ -271,6 +279,9 @@ impl SettingsPreset {
                 config.training_plate_speed = 1.0;
                 // Neither arm is this fork's ceiling arm, and this lever is not an upstream option either.
                 config.training_cut_speed = 1.0;
+                // The tag cut and the cut skip are this fork's levers too. Upstream has neither, so this arm turns both off.
+                config.training_tag_cut_speed = 1.0;
+                config.skip_training_cut = false;
             }),
         }
     }
@@ -375,7 +386,9 @@ mod tests {
 
     #[test]
     fn the_neutral_arm_is_inert_on_every_timing_field() {
-        let live = Config::default();
+        let mut live = Config::default();
+        live.training_tag_cut_speed = 5.0;
+        live.skip_training_cut = true;
         let preset = SettingsPreset::neutral(&live);
         let config = &preset.config;
 
@@ -391,6 +404,8 @@ mod tests {
         assert!(!config.high_speed_settings);
         assert!(!config.story_high_speed_mode);
         assert!(!config.cyspring_mono_uncap_frame_scale);
+        assert_eq!(config.training_tag_cut_speed, 1.0, "upstream has no tag cut, so the inert arm turns it off even when the live config has it up");
+        assert!(!config.skip_training_cut, "upstream has no cut skip, so the inert arm turns it off even when the live config has it on");
 
         assert_eq!(config.story_tcps_multiplier, 1.0, "the shipped text multiplier is 3.0, a raised lever that belongs to another arm");
         assert_eq!(config.story_choice_auto_select_delay, AnimationSpeed::CHOICE_AUTO_SELECT_TRIGGER_TIME);
@@ -403,7 +418,9 @@ mod tests {
 
     #[test]
     fn the_all_levers_arm_names_no_more_than_the_code_honours() {
-        let config = SettingsPreset::all_levers(&Config::default()).config;
+        let mut live = Config::default();
+        live.high_speed_settings = true;
+        let config = SettingsPreset::all_levers(&live).config;
 
         assert_eq!(config.transition_speed, AnimationSpeed::MAX_FACTOR);
         assert_eq!(config.result_screen_speed, AnimationSpeed::MAX_FACTOR);
@@ -413,8 +430,10 @@ mod tests {
         assert_eq!(config.training_plate_speed, AnimationSpeed::MAX_FACTOR, "an arm that leaves a timing field at its neutral value is not the all levers arm");
         assert_eq!(config.training_cut_speed, AnimationSpeed::MAX_TRAINING_CUT_LEVER, "the cut-in lever stops short of the reach its further door has");
         assert!(config.training_cut_speed <= AnimationSpeed::MAX_TRAINING_CUT_TIME_SCALE, "the cut-in arm asks the scale door for more than that door may hand");
+        assert_eq!(config.training_tag_cut_speed, AnimationSpeed::MAX_TAG_CUT_ANIMATOR_SPEED, "the tag cut lever is a speed lever too, and an arm that leaves it at the live value is not the all levers arm");
+        assert!(config.skip_training_cut, "the cut skip is a speed lever too, and the arm names it on");
         assert!(config.auto_skip_result_screens);
-        assert!(config.high_speed_settings);
+        assert_eq!(config.high_speed_settings, live.high_speed_settings, "the hidden high speed option is not an all levers lever, so the arm keeps the live value");
         assert!(config.story_high_speed_mode);
         assert!(config.cyspring_mono_uncap_frame_scale);
         assert!(config.story_speed <= AnimationSpeed::MAX_FACTOR, "the story slider ends at 10.0; the arm must not offer past it");
@@ -422,7 +441,10 @@ mod tests {
 
     #[test]
     fn the_hachimi_fast_arm_raises_only_what_upstream_offers() {
-        let config = SettingsPreset::hachimi_fast(&Config::default()).config;
+        let mut live = Config::default();
+        live.training_tag_cut_speed = 5.0;
+        live.skip_training_cut = true;
+        let config = SettingsPreset::hachimi_fast(&live).config;
 
         assert_eq!(config.ui_animation_scale, 10.0);
         assert_eq!(config.story_choice_auto_select_delay, 0.1);
@@ -435,6 +457,8 @@ mod tests {
         assert_eq!(config.time_scale, 1.0);
         assert_eq!(config.training_plate_speed, 1.0, "this fork's plate lever is not an upstream option");
         assert_eq!(config.training_cut_speed, 1.0, "this fork's cut-in lever is not an upstream option either");
+        assert_eq!(config.training_tag_cut_speed, 1.0, "upstream has no tag cut, so the arm turns it off even when the live config has it up");
+        assert!(!config.skip_training_cut, "upstream has no cut skip, so the arm turns it off even when the live config has it on");
         assert!(!config.auto_skip_result_screens);
         assert!(!config.high_speed_settings);
         assert!(!config.story_high_speed_mode);
