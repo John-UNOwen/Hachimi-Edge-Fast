@@ -131,6 +131,18 @@ pub fn init(umamusume: *const Il2CppImage) {
     }
 }
 
+// Hidden for now (decision of 2026-10-12, knowledge/decisions/hide-high-speed-settings-2026-10-12.md). This pass
+// raises the game's own saved story and training High Speed values to the game maximum, and within one session it
+// put them back to the maximum after the save had read 0. The config key stays, so an existing config still loads,
+// but the pass reads it as off until this constant is removed.
+const HIGH_SPEED_SETTINGS_HIDDEN: bool = true;
+
+// The value the pass acts on, read from the config key. The Config snapshot line reports this value, so a run's log
+// says what the run did rather than what the file says.
+pub(crate) fn effective_enabled(config_value: bool) -> bool {
+    !HIGH_SPEED_SETTINGS_HIDDEN && config_value
+}
+
 // Runs on the game main thread wherever the speed groups are applied, so a config change taken
 // from the Config Editor lands at the next scene change. The writes are idempotent: the current
 // value is read first and only a lower value is raised, and what the game held before the first
@@ -141,7 +153,7 @@ pub fn apply() {
     // cost C36 never measured.
     AnimationSpeed::note_config_read();
 
-    let enabled = Hachimi::instance().config.load().high_speed_settings;
+    let enabled = effective_enabled(Hachimi::instance().config.load().high_speed_settings);
 
     // Three inputs, each read here, on the game thread, in the same pass that writes, and each handed to
     // `plan_pass` as an argument the way `AnimationSpeed::tween_clocks` hands the gate to
@@ -998,5 +1010,18 @@ mod tests {
         assert_eq!(held.story_writes, vec![2, 1], "the deferred restore never landed");
         assert_eq!(held.saved, 1);
         assert_eq!(held.training, 1);
+    }
+
+    #[test]
+    fn a_hidden_high_speed_settings_option_plans_nothing_whatever_the_config_says() {
+        // Hidden for now: the saved story and training values stay where the game has them, and no pass
+        // raises or restores them, with the config key on or off.
+        for config_value in [true, false] {
+            let enabled = effective_enabled(config_value);
+
+            assert!(!enabled, "a hidden option read as on for config value {config_value}");
+            assert_eq!(plan_pass(enabled, false, false, false, false), Pass::Idle);
+            assert_eq!(plan_pass(enabled, false, true, true, true), Pass::Idle, "a hidden option held a write it was never owed");
+        }
     }
 }

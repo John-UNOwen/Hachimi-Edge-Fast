@@ -64,7 +64,7 @@ pub mod RacePhaseCalculator;
 mod RaceUtil;
 mod SaveDataManager;
 mod ApplicationSettingSaveLoader;
-mod HighSpeedSetting;
+pub(crate) mod HighSpeedSetting;
 mod LiveTheaterCharaSelect;
 mod LiveTheaterViewController;
 pub mod CySpringController;

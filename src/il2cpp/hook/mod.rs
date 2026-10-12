@@ -2186,7 +2186,7 @@ pub fn init() {
             target_fps_unfocused,
             config.auto_skip_result_screens,
             config.skip_training_cut,
-            config.high_speed_settings,
+            umamusume::HighSpeedSetting::effective_enabled(config.high_speed_settings),
             config.story_high_speed_mode,
             config.hide_now_loading,
             config.physics_update_mode,

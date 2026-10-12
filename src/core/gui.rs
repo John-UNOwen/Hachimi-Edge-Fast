@@ -6089,12 +6089,6 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
-            if should_show_option(search, &t!("config_editor.high_speed_settings")) {
-                ui.label(t!("config_editor.high_speed_settings"));
-                ui.checkbox(&mut config.high_speed_settings, "");
-                ui.end_row();
-            }
-
             if should_show_option(search, &t!("config_editor.story_high_speed_mode")) {
                 ui.label(t!("config_editor.story_high_speed_mode"));
                 ui.checkbox(&mut config.story_high_speed_mode, "");
