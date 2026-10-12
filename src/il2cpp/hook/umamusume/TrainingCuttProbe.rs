@@ -4,14 +4,17 @@ use std::sync::atomic::{self, AtomicBool, AtomicI32, AtomicI64, AtomicU32, Atomi
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use fnv::FnvHashMap;
+use fnv::{FnvHashMap, FnvHashSet};
 use once_cell::sync::Lazy;
 
 use crate::{
     core::{hachimi::recover_lock, settings_preset, Hachimi},
     il2cpp::{
         api::{il2cpp_string_chars, il2cpp_string_length},
-        hook::umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager},
+        hook::{
+            hook_id, hook_key_match,
+            umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager},
+        },
         symbols::{get_class, get_field_from_name},
         types::*,
     },
@@ -112,12 +115,12 @@ const MEMBER_CUTIN_ARGS: &[Il2CppTypeEnum] = &[CLASS, CLASS, CLASS];
 const SOUL_CUTIN_ARGS: &[Il2CppTypeEnum] = &[I4, CLASS, CLASS, CLASS];
 const PLAYER_INDEX_AND_ACTION: &[Il2CppTypeEnum] = &[CLASS, I4, CLASS];
 // `FlashPlayer::Play/3 -> void(string<System.String>, class<System.Action>, int)` and the same door spelled with a
-// float (`introspect.log:26462` to `26463`): a label, a callback, and the number this run has to identify as a
+// float (`introspect-run45.log:26462` to `26463`): a label, a callback, and the number this run has to identify as a
 // speed or a duration. Two overloads of one name and one arity, which is what resolving by signature is for (A2).
 const LABEL_AND_INT: &[Il2CppTypeEnum] = &[STRING, I4];
 const LABEL_AND_FLOAT: &[Il2CppTypeEnum] = &[STRING, R4];
 // `FlashActionPlayer::Play/3 -> void(string<System.String>, float, string<System.String>)` and
-// `Play/2 -> void(string, string)` (`introspect.log:26411` to `26412`): the wrapper that holds a flash player and
+// `Play/2 -> void(string, string)` (`introspect-run45.log:26411` to `26412`): the wrapper that holds a flash player and
 // has a float on its play door. Counted apart so a run says which of the two classes a cut-in effect plays on.
 const LABEL_TIME_AND_LABEL: &[Il2CppTypeEnum] = &[STRING, R4, STRING];
 const TWO_LABELS: &[Il2CppTypeEnum] = &[STRING, STRING];
@@ -362,7 +365,7 @@ fn close_hole_census() -> Option<FnvHashMap<&'static str, HoleCensusEntry>> {
     recover_lock(&HOLE_CENSUS).take()
 }
 
-fn hole_census_line(span_ms: i64, table: &FnvHashMap<&'static str, HoleCensusEntry>) -> String {
+fn hole_census_line(span_ms: i64, from: &str, to: &str, table: &FnvHashMap<&'static str, HoleCensusEntry>) -> String {
     let doors = table.len();
     let crossings: usize = table.values().map(|entry| entry.crossings).sum();
 
@@ -382,7 +385,7 @@ fn hole_census_line(span_ms: i64, table: &FnvHashMap<&'static str, HoleCensusEnt
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!("Cutt probe cut hole census over {span_ms} ms: {doors} counted door(s) crossed {crossings} times while the status panel was held off: {listed}")
+    format!("Cutt probe cut hole census over {span_ms} ms from {from} to {to}: {doors} counted door(s) crossed {crossings} times while that stretch was held off: {listed}")
 }
 
 static GET_TRAINING_CUT_TIME_SCALE: CutProbe = CutProbe::peaked("SingleModeUtils::GetTrainingCutTimeScale(scale)");
@@ -496,7 +499,7 @@ static TAG_PLAYER_SET_RESULT_FLASH: CutProbe = CutProbe::counted("SingleModeMain
 static SUPPORT_MEMBER_LAST_FLASH_PLAYER: AtomicUsize = AtomicUsize::new(0);
 static TAG_PLAYER_RESULT_FLASH_PLAYER: AtomicUsize = AtomicUsize::new(0);
 static FLASH_PLAYER_MATCH_LOGGED: AtomicUsize = AtomicUsize::new(0);
-// `Gallop.FlashPlayer` is the class a training cut-in effect is played on (`introspect.log:26446`): it wraps an
+// `Gallop.FlashPlayer` is the class a training cut-in effect is played on (`introspect-run45.log:26446`): it wraps an
 // `AnimateToUnity.AnMotion` and its `Play` doors are the only ones on that class that take a number. Run 42 handed
 // the tag cut-in player 167 flash players through `SetResultFlashPlayer` and reached none of these doors, because
 // no build had armed them yet, so the 1.2 s effect leg has never been measured from the object that runs it.
@@ -513,7 +516,7 @@ static FLASH_END: CutProbe = CutProbe::counted("FlashPlayer::End()");
 static GRAPHIC_SETTINGS_EFFECT_TIME_SCALE: CutProbe = CutProbe::counted("GraphicSettings::SetEffectTimeScale(scale)");
 static FLASH_ACTION_PLAY_WITH_TIME: CutProbe = CutProbe::counted("FlashActionPlayer::Play(label, time, label)");
 static FLASH_ACTION_PLAY_TWO_LABELS: CutProbe = CutProbe::counted("FlashActionPlayer::Play(label, label)");
-// `field _lastMotionSpeed [float]` on the flash player (`introspect.log:26509`): the speed the wrapper last played
+// `field _lastMotionSpeed [float]` on the flash player (`introspect-run45.log:26509`): the speed the wrapper last played
 // its motion at, read with the same field accessor the plate UI's cascade floats use, so a run reports the number
 // the game holds instead of inferring it from a wall. A client with no such field reads a zero, which is reported
 // as a zero and not as a value this build never read.
@@ -707,12 +710,20 @@ pub(crate) fn current_view_id() -> i32 {
 }
 
 // Whether the game is standing on one of the career screens this probe already counts as a training
-// session. `high_speed_settings` writes the game's own story and training HighSpeedType values, and
-// run 16 logged its raise at 09:00:22 and its restore at 09:03:24 with one of these screens up,
-// inside a window where a training cut runtime never terminated. Both values live on the save loader
-// and in StoryManager's saved setting, so the write the next turn reads is the one taken before the
-// turn, not the one taken during it. The ids come from the game's own `ViewId`, so a client that
-// moves one shows up here as a compile error rather than as a gate that quietly holds nothing.
+// session. `high_speed_settings` writes the game's own story and training HighSpeedType values, and run 16
+// logged its raise at 09:00:22 and its restore at 09:03:24.9 with one of these screens up, inside a window
+// where a training cut runtime never terminated. Both values live on the save loader and in StoryManager's
+// saved setting, so the write the next turn reads is the one taken before the turn, not the one taken
+// during it. The ids come from the game's own `ViewId`, so a client that moves one shows up here as a
+// compile error rather than as a gate that quietly holds nothing.
+//
+// This is a proxy, and it is kept as one: it answers that a career screen is up, not that a cut is open,
+// and run 57 shows what the difference costs - its pass held at 20:45:29.864 (`run log/hachimi-run57.log:1854`)
+// while the cut census six seconds earlier read `cut runs 1 wall 8898 ms timeline 0 ms open 0 ms` (`:1827`).
+// `529e4f5` dropped it from the write guard and left the guard with `cut_gate_engaged()` alone, which closed
+// none of the passes this proxy refused; `HighSpeedSetting::plan_pass` and `StoryTimelineController::plan_pass`
+// now refuse on this answer *or* the gate, so the boundary added by the gate is added to the coverage instead
+// of replacing it.
 pub(crate) fn on_a_career_screen() -> bool {
     VIEW_TRAINING.contains(&current_view_id())
 }
@@ -769,18 +780,30 @@ static PLATE_STEP_WORST_MS: AtomicI64 = AtomicI64::new(0);
 
 // A gap is not one thing. Run 12 measured four of them at a 14,897.8 ms mean with a 31,867 ms worst and
 // said nothing about where the wall went, and a wall that is not split cannot be aimed at. These legs cut
-// each gap at the plate list calls seen inside it: the wait before the plate list, the plate list pass
-// itself, and the time from its last call to the next cut opening. All three come from one clock and
-// always add up to the gap, so whatever is left over shows as a leg instead of being guessed at. A gap
-// with no plate list call between its ends is counted apart rather than given invented legs.
+// each gap at the plate passes that ran inside it: the wait before the first pass, the passes themselves,
+// the idle between one pass's completion and the next pass's entry, and the time from the last completion
+// to the next cut opening. All four come from one clock and always add up to the gap, so whatever is left
+// over shows as a leg instead of being guessed at. A gap with no plate pass between its ends is counted
+// apart rather than given invented legs.
+//
+// The pass legs come from the cascade window itself - entry at `InitializePlateList` / `StartSequence` to
+// completion at `OnAllTypewriteEnd` - because the marks this split used to read were plate *calls*: run 49b's
+// `plate list steps 9 mean 14,421.2 ms` and `the pass itself mean 26,634.3 ms worst 79,903 ms` are intervals
+// from one pass to the next, and a cascade the fork bounds at 0.25 s per plate cannot cost that (ledger
+// item 79: "the probe needs the pass measured entry to completion rather than to the next pass").
 static GAP_PLATE_FIRST_MS: AtomicI64 = AtomicI64::new(-1);
-static GAP_PLATE_LAST_MS: AtomicI64 = AtomicI64::new(-1);
+// The completion of the last pass that closed inside the open gap, and the sum of the spans of the passes
+// that closed inside it. Both are written by `close_plate_pass` and read once when the next cut opens.
+static GAP_PASS_LAST_END_MS: AtomicI64 = AtomicI64::new(-1);
+static GAP_PASS_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static GAP_LEG_BEFORE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static GAP_LEG_BEFORE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static GAP_LEG_BEFORE_WORST_MS: AtomicI64 = AtomicI64::new(0);
 static GAP_LEG_PLATE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static GAP_LEG_PLATE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static GAP_LEG_PLATE_WORST_MS: AtomicI64 = AtomicI64::new(0);
+static GAP_LEG_BETWEEN_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
+static GAP_LEG_BETWEEN_WORST_MS: AtomicI64 = AtomicI64::new(0);
 static GAP_LEG_AFTER_RUNS: AtomicUsize = AtomicUsize::new(0);
 static GAP_LEG_AFTER_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static GAP_LEG_AFTER_WORST_MS: AtomicI64 = AtomicI64::new(0);
@@ -863,15 +886,230 @@ static PLATE_TYPEWRITE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static PLATE_TYPEWRITE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static PLATE_TYPEWRITE_WORST_MS: AtomicI64 = AtomicI64::new(0);
 
+// What one cascade holds while it types, and what its plates actually did, read at the doors the census
+// already arms. C54 is the finding that the float a caller hands `InitializePlateList` is not the number the
+// group typewrite path waits on; C62 is the finding that the interval is a timing beat above about 0.25 s.
+// Both were answered per *run*, off peak values. This is the same question per cascade: the class's own
+// pacing numbers (`_delay`, `_tapWait`, `_groupInterval`, `_sequenceInterval`) are instance floats the probe
+// can read at `StartSequence`, `StartGroupTypewrite`, `StartTypewrite`, `OnNextTypewrite`, `OnEndTypeWrite`
+// and `OnTapScreen`, and the two literals it would rather read are `static const` this fork cannot reach -
+// `TrainingParamChangePlate.TYPEWRITE_DURATION / NEXT_WAIT_DURATION` print `is a compile-time constant` at
+// `AnimationSpeed` and `A const has no slot in the static data area` at `introspect`, and every
+// `TrainingParamChangeUI` constant on this path (`GROUP_TYPEWRITE_INTERVAL_HIGH`, `SEQUENCE_INTERVAL`,
+// `SEQUENCE_INTERVAL_SUCCESSION`, `PLAY_SPEED_DEFAULT`, `PLAY_SPEED_FOR_SKIP`) is the same kind of literal.
+// Their size is therefore measured off the doors that stand for them: `StartTypewrite` to `OnEndTypeWrite`
+// is the plate's own type write, and `OnEndTypeWrite` to the next `OnNextTypewrite` is the wait before the
+// next plate starts.
+#[derive(Clone, Default)]
+struct CascadeRead {
+    index: usize,
+    open_ms: i64,
+    close_ms: i64,
+    closed_by: &'static str,
+    // The interval the caller handed `InitializePlateList` before this fork scaled it, and the numbers the
+    // UI itself holds.
+    interval: f32,
+    delay: f32,
+    tap_wait: f32,
+    group_interval: f32,
+    sequence_interval: f32,
+    plates: usize,
+    groups: usize,
+    advances: usize,
+    taps: usize,
+    first_start_ms: i64,
+    last_start_ms: i64,
+    // The legs the two unreachable literals own.
+    write_start_ms: i64,
+    write_end_ms: i64,
+    write_ms: i64,
+    write_runs: usize,
+    wait_ms: i64,
+    wait_runs: usize,
+    // Plate to plate spacings inside this cascade, bounded so a cascade with a thousand plates costs no
+    // allocation. The count is the number seen, not the number kept.
+    beats: [i64; CASCADE_BEAT_LIMIT],
+    beats_seen: usize,
+}
+
+impl CascadeRead {
+    // The wall clock between two typewrite starts of this cascade: one stat number landing after the next,
+    // which is the beat a player sees and the number a pacing lever has to match. None when the cascade
+    // typed one plate or never typed one.
+    fn beat_ms(&self) -> Option<i64> {
+        if self.plates < 2 || self.first_start_ms < 0 || self.last_start_ms <= self.first_start_ms {
+            return None;
+        }
+
+        Some((self.last_start_ms - self.first_start_ms) / (self.plates as i64 - 1))
+    }
+}
+
+// The numbers a cascade could be waiting on, in the order the class carries them, plus the answer that it
+// waits on none of them.
+const CASCADE_BEAT_LIMIT: usize = 16;
+const PACE_CANDIDATES: usize = 5;
+const PACE_NONE: usize = PACE_CANDIDATES;
+const PACE_NAMES: [&str; PACE_NONE + 1] = ["the interval handed to InitializePlateList", "TrainingParamChangeUI._delay", "TrainingParamChangeUI._tapWait", "TrainingParamChangeUI._groupInterval", "TrainingParamChangeUI._sequenceInterval", "none of these numbers"];
+static PACE_RUNS: [AtomicUsize; PACE_NONE + 1] = [const { AtomicUsize::new(0) }; PACE_NONE + 1];
+static CASCADE_READ: Lazy<Mutex<Option<CascadeRead>>> = Lazy::new(|| Mutex::new(None));
+static CASCADE_INDEX: AtomicUsize = AtomicUsize::new(0);
+static CASCADE_REPORTED: AtomicUsize = AtomicUsize::new(0);
+
+// The span of each cascade that closed, in close order, with the number of the cascade it belongs to.
+// Kept apart from the running total and the max because those two cannot separate cascades: a total only
+// names one cascade's span when exactly one cascade closed between two readings (C56). A fixed ring, no
+// allocation, written once per cascade close on the plate door - which is once per cascade of stat plates,
+// not once per frame - and read once per report. When a run closes more cascades between two readings than
+// the ring holds, the report says which spans it is not showing rather than letting the replay assume it
+// read them all.
+const CASCADE_SPAN_RING: usize = 16;
+static CASCADE_SPANS: [AtomicI64; CASCADE_SPAN_RING] = [const { AtomicI64::new(0) }; CASCADE_SPAN_RING];
+static CASCADE_SPAN_INDEXES: [AtomicUsize; CASCADE_SPAN_RING] = [const { AtomicUsize::new(0) }; CASCADE_SPAN_RING];
+static CASCADE_SPAN_WRITES: AtomicUsize = AtomicUsize::new(0);
+static CASCADE_SPANS_PRINTED: AtomicUsize = AtomicUsize::new(0);
+
+fn mean_of(total: i64, count: usize) -> f64 {
+    match count {
+        0 => 0.0,
+        n => total as f64 / n as f64,
+    }
+}
+
+fn pace_value(cascade: &CascadeRead, index: usize) -> f32 {
+    match index {
+        0 => cascade.interval,
+        1 => cascade.delay,
+        2 => cascade.tap_wait,
+        3 => cascade.group_interval,
+        _ => cascade.sequence_interval,
+    }
+}
+
+// How many of a cascade's plate steps land on one candidate number, and how far the matched ones sit from
+// it. The tolerance is a quarter of the candidate either side, never tighter than one frame: the beat is a
+// wall clock reading off two door calls, the candidate is a float the UI holds, and claiming a match at a
+// tighter tolerance than the frame quantisation between them would be a match invented from rounding.
+fn beats_against(cascade: &CascadeRead, value_ms: f64) -> (usize, f64) {
+    let slack = (value_ms * 0.25).max(20.0);
+    let mut matched = 0usize;
+    let mut total_delta = 0.0;
+
+    for step_ms in cascade.beats.iter().copied().take(cascade.beats_seen) {
+        let delta = (step_ms as f64 - value_ms).abs();
+
+        if delta <= slack {
+            matched += 1;
+            total_delta += delta;
+        }
+    }
+
+    (matched, total_delta)
+}
+
+/// Which of the numbers this cascade was handed or holds its own plate steps match, and how many of them
+/// matched. `PACE_NONE` says the plates advance on a number the class does not carry, which is C54's claim
+/// read per cascade instead of per run. A number the UI holds at 0 is never a candidate: it paces nothing.
+/// Two candidates that hold the same number are decided by which one the matched steps sit closest to, and
+/// a dead tie keeps the number the class carries first, because the probe cannot tell which of two equal
+/// floats the game reached for.
+fn cascade_pace(cascade: &CascadeRead) -> (usize, usize) {
+    if cascade.beats_seen == 0 {
+        return (PACE_NONE, 0);
+    }
+
+    let mut best = (PACE_NONE, 0usize, f64::MAX);
+
+    for index in 0..PACE_CANDIDATES {
+        let value_ms = f64::from(pace_value(cascade, index)) * f64::from(MS_PER_SECOND);
+
+        if value_ms <= 0.0 {
+            continue;
+        }
+
+        let (matched, delta) = beats_against(cascade, value_ms);
+
+        if matched > best.1 || (matched > 0 && matched == best.1 && delta < best.2) {
+            best = (index, matched, delta);
+        }
+    }
+
+    (best.0, best.1)
+}
+
+/// One cascade, said once, at the moment it closes: what its pass cost entry to completion, how far apart
+/// its plates landed, what the class held while it did it, and which of those numbers its own plate steps
+/// land on. This is the line C54 and C62 were owed - the number the cascade waits on, per cascade - spelled
+/// `Cutt probe plate cascade {index} closed {span_ms} ms from its plate list call to {closed_by}:`, followed
+/// by the plate spacing, the group / advance / tap counts, the five numbers the class carries, the two legs
+/// the unreachable literals own, and the verdict.
+///
+/// Two limits belong on this line, because a run is told to look for it. It is a `debug!`, so it exists only
+/// in a `debug_mode` session (`core/log.rs:3-9` holds a played build at `LevelFilter::Info`), and
+/// `close_plate_pass` prints it for the first `PROBE_DETAIL_LIMIT` cascades of a session only. The span on it
+/// is the same pair of clock reads the report's span tail prints for every cascade, so a cascade past that
+/// limit is not lost from the log: its span is still on the cascade line of the report, and only its pace
+/// answer survives as one count on `Cutt probe plate cascade pacing:`.
+fn cascade_line(cascade: &CascadeRead) -> String {
+    let span_ms = cascade.close_ms - cascade.open_ms;
+    let (pace, matched) = cascade_pace(cascade);
+    let pace_text = if pace == PACE_NONE {
+        format!("none of these numbers ({n} plate step(s) read)", n = cascade.beats_seen)
+    }
+    else {
+        format!("{} of {:.4} s, in {matched} of {} plate step(s)", PACE_NAMES[pace], pace_value(cascade, pace), cascade.beats_seen)
+    };
+    let beat_text = match cascade.beat_ms() {
+        Some(ms) => format!("{} plates typed mean {:.1} ms apart", cascade.plates, ms as f64),
+        None => format!("{} plate start(s), no step between them", cascade.plates),
+    };
+
+    format!(
+        "Cutt probe plate cascade {index} closed {span_ms} ms from its plate list call to {closed_by}: {beat_text}, {groups} group start(s), {advances} advance(s), {taps} tap screen(s); the UI held interval {interval:.4} s _delay {delay:.4} _tapWait {tap_wait:.4} _groupInterval {group_interval:.4} s _sequenceInterval {sequence_interval:.4} s; type write leg mean {write:.1} ms and wait to the next advance mean {wait:.1} ms; the plates advance on {pace_text}",
+        index = cascade.index,
+        closed_by = cascade.closed_by,
+        groups = cascade.groups,
+        advances = cascade.advances,
+        taps = cascade.taps,
+        interval = cascade.interval,
+        delay = cascade.delay,
+        tap_wait = cascade.tap_wait,
+        group_interval = cascade.group_interval,
+        sequence_interval = cascade.sequence_interval,
+        write = mean_of(cascade.write_ms, cascade.write_runs),
+        wait = mean_of(cascade.wait_ms, cascade.wait_runs)
+    )
+}
+
 // The wall between a training cut-in finishing and the status panel playing out. Both training heavy runs
 // put nearly all of a slow turn here: 9,740 ms in run 14 and 7,221 ms in run 15, with no door reached in
-// between, while the frame clock drew the whole way through at about 175 frames a second. The mark is
-// made by the story event probe's training cut-in door and consumed by the status play out door, so a cut
-// reports at most one hole and a cut that plays out at once reports none.
-static CUT_HOLE_FROM_MS: AtomicI64 = AtomicI64::new(-1);
+// between, while the frame clock drew the whole way through at about 175 frames a second.
+//
+// The pairing used to stand on one order: the story event probe's `SingleModeTrainingCutInHelper::OnEndCutIn`
+// door opened the window and `SingleModeMainViewTrainingCutStatus::PlayOut` closed it, so a cut that reached
+// those two doors the other way round reported nothing at all - and that is the order this client walks now.
+// Run 57 (`v0.32.0-529e4f5`) played the status panel out at 20:44:22.847 and ended the cut-in at
+// 20:44:24.247; run 53 did the same at 19:30:14.533 and 19:30:18.100. Both printed `cut holes: 0 holes
+// mean 0.0 ms` in every 20 s report, run 57 beside `cut runs by screen: training screen(view 1101) runs 1
+// wall 8898 ms`. Run 54 is the only recent run that read a hole (34 ms), because there the cut-in ended
+// first at 19:34:10.661 and the panel played out 34 ms later. So the window stands on whichever end the game
+// reached first and closes at the other, and which end opened it is reported: the two orders are different
+// waits. A cut still reports at most one hole, because the mark is swapped out when it is read.
+static CUT_HOLE_OPEN_MS: AtomicI64 = AtomicI64::new(-1);
+static CUT_HOLE_OPEN_END: AtomicUsize = AtomicUsize::new(HOLE_END_CUT_IN);
 static CUT_HOLE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static CUT_HOLE_MS_TOTAL: AtomicI64 = AtomicI64::new(0);
 static CUT_HOLE_WORST_MS: AtomicI64 = AtomicI64::new(0);
+// How many holes each of the two orders produced, because which end came first is the reading this repair
+// exists to keep: the cut-in ending first is the 7 to 8 s shape runs 14 to 26 measured, the status play out
+// first is the shape runs 53 and 57 measured.
+static CUT_HOLE_END_RUNS: [AtomicUsize; HOLE_END_COUNT] = [const { AtomicUsize::new(0) }; HOLE_END_COUNT];
+
+/// Which of the two doors a hole window is standing on.
+const HOLE_END_CUT_IN: usize = 0;
+const HOLE_END_PLAY_OUT: usize = 1;
+const HOLE_END_COUNT: usize = 2;
+const HOLE_END_NAMES: [&str; HOLE_END_COUNT] = ["the training cut-in ending", "the status play out"];
 
 // A span from a door the game reached to the point the run ended, guarded against a request that never
 // happened or landed after the close. Kept apart from the callers so the guard is a test.
@@ -883,15 +1121,39 @@ fn span_from(requested: i64, now: i64) -> Option<i64> {
     Some(now - requested)
 }
 
-/// One gap cut into its three legs at the plate list calls seen inside it. Every mark is read from the
-/// same clock, so a mark out of order means the pairing is wrong and the gap is left whole: a leg made
-/// from bad marks is worse than a gap nobody explained.
-fn gap_legs(close_ms: i64, first_plate_ms: i64, last_plate_ms: i64, open_ms: i64) -> Option<(i64, i64, i64)> {
-    let before = span_from(close_ms, first_plate_ms)?;
-    let plate = span_from(first_plate_ms, last_plate_ms)?;
-    let after = span_from(last_plate_ms, open_ms)?;
+/// The two ends of a cut hole, said in the order this cut reached them.
+fn hole_stretch(from_end: usize) -> (&'static str, &'static str) {
+    (HOLE_END_NAMES[from_end], HOLE_END_NAMES[HOLE_END_COUNT - 1 - from_end])
+}
 
-    Some((before, plate, after))
+/// The pairing of the two doors a cut hole is named for, in the order the game reached them. `open_ms` and
+/// `open_end` are the window the probe is standing on (-1 when nothing is open), `this_end` and `now_ms` the
+/// door that just arrived. `Some` is the hole this door closes, told from the end that opened it; `None` is
+/// the window this door opens. A window already standing on the same end is a mark no door ever answered, and
+/// this door replaces it rather than pairing with itself.
+fn pair_hole_open(open_ms: i64, open_end: usize, this_end: usize, now_ms: i64) -> Option<(i64, usize)> {
+    if open_ms < 0 || open_end == this_end {
+        return None;
+    }
+
+    span_from(open_ms, now_ms).map(|span_ms| (span_ms, open_end))
+}
+
+/// One gap cut into its legs at the plate passes seen inside it. A pass is its entry (`InitializePlateList`
+/// or the `StartSequence` that follows it) to its completion (`OnAllTypewriteEnd`), not to the next entry:
+/// run 49b read `the pass itself mean 26,634.3 ms worst 79,903 ms` out of a door bounded at
+/// `MIN_PLATE_INTERVAL_SEC` 0.25 s and `training_plate_speed` 20, so that leg was the idle from one pass to
+/// the next, player included, charged to a pass (ledger item 79). What is left between the first entry and
+/// the last completion is named apart as the idle between passes, so the four legs are still the whole gap.
+/// Every mark is read from the same clock, so a mark out of order means the pairing is wrong and the gap is
+/// left whole: a leg made from bad marks is worse than a gap nobody explained.
+fn gap_legs(close_ms: i64, first_entry_ms: i64, last_end_ms: i64, passed_ms: i64, open_ms: i64) -> Option<(i64, i64, i64, i64)> {
+    let before = span_from(close_ms, first_entry_ms)?;
+    let whole = span_from(first_entry_ms, last_end_ms)?;
+    let after = span_from(last_end_ms, open_ms)?;
+    let passes = passed_ms.clamp(0, whole);
+
+    Some((before, passes, whole - passes, after))
 }
 
 /// The spacing between two stat plate events, or none when they do not both sit inside one window. An
@@ -1013,6 +1275,13 @@ fn window_line(window: usize, name: &str, agg: &WindowAgg) -> String {
 // lever off the tween channel for the length of one training cut, which is where the stall lives, and
 // leaves it on everywhere else.
 //
+// The same boundary is what C57's two high speed write passes ask, because it is the measured version of
+// the thing they were meant to wait for: run 16 wrote `story high speed 1 -> 2` and `training high speed
+// 1 -> 2` again at 09:04:51, inside the window where this cut run sat open for 90,492 ms with its cut-in
+// stepped every frame, and its own ladder is the evidence that the proxies that guard used are not this
+// boundary - the stamp on `SingleModeTrainingCutInHelper::OnTimelineUpdatePost` sat flat at 788 calls from
+// 09:00:49 to 09:01:29, when nothing was playing, and the view id test answers that a screen is up.
+//
 // The close door is not trusted on its own: in every stalled session measured so far `CleanUpCutt` is
 // never called, so a hold only that door could end would leave the lever off for the rest of the session.
 // The hold therefore also expires on the game thread's own tick count. At the 33.1 ms mean frame runs 54
@@ -1081,6 +1350,146 @@ impl CutGate {
 
 static CUT_GATE: CutGate = CutGate::new();
 
+// The gate publishes one thing to the rest of the fork: `cut_gate_engaged()`, the answer `529e4f5`
+// shipped, which `AnimationSpeed::tween_clocks_holding`, `HighSpeedSetting::apply` and both writes
+// `StoryTimelineController` makes to the story high speed static all read. That answer is false both
+// when a cut has closed and when nothing was ever armed to open one, and this module is the only place
+// that can tell those two apart, so `arm_cut_gate` reports which of them it is *at install* - in the
+// line the run reads - rather than exporting a second state for its readers to ask about per call.
+//
+// It is the arming and not the resolving, and it is the start doors and not just any door. `new_hook!`
+// creates no hook at all when the site's id - or the bare wrapper name that id ends with - is in
+// `Config::disabled_hooks`: it takes the other branch, `declare_hook_target` and a
+// `[DISABLED] new_hook!:` line, and no hook is created (`hook/mod.rs:310-316`). And a gate whose only
+// armed door is `CleanUpCutt` has nothing that ever calls `CutGate::engage` (`:3219`, `:3242`). Both shapes read
+// closed for the whole session, and both used to be counted as armed: the count came from
+// `resolve_method` answering non-zero, so a build with the gate's doors named in `disabled_hooks`
+// printed `armed on 3 of 3 doors` about a gate that could never hold anything (C57).
+
+// The three doors `arm_cut_gate` arms, spelled as the census spells its counters (lines :433, :434,
+// :440) so a door named as missing in the install line is the same door a totals line counts.
+const GATE_DOOR_LABELS: [&str; 3] = [
+    "SingleModeMainTrainingCuttController::PlayTrainingCut(info)",
+    "SingleModeMainTrainingCuttController::PlayScenarioTrainingCut(info)",
+    "SingleModeMainTrainingCuttController::CleanUpCutt()",
+];
+
+// One door of the gate, in `GATE_DOOR_LABELS` order: the label the census counts it under, the id
+// `new_hook!` keys its arming site on, and whether it is the door that ends a hold rather than the one
+// that starts one. `disabled_hooks` is keyed on the arming site and not on the game method (C27), so the
+// door carries both halves: the name a run reads and the key a config has to hold to put it down.
+struct GateDoor {
+    label: &'static str,
+    id: &'static str,
+    closes: bool,
+}
+
+// The id one gate door's arming site answers to, spelled out exactly as `new_hook!` spells it
+// (`hook/mod.rs:291`): this module's path, the separator, the wrapper name. Written out at each door
+// rather than built from a runtime string, so the id a key is matched against is the id the build keys
+// the site on and not an approximation of it.
+fn gate_doors() -> [GateDoor; 3] {
+    [
+        GateDoor {
+            label: GATE_DOOR_LABELS[0],
+            id: hook_id(concat!(module_path!(), "::", stringify!(TrainingCutt_PlayTrainingCut))),
+            closes: false,
+        },
+        GateDoor {
+            label: GATE_DOOR_LABELS[1],
+            id: hook_id(concat!(module_path!(), "::", stringify!(TrainingCutt_PlayScenarioTrainingCut))),
+            closes: false,
+        },
+        GateDoor {
+            label: GATE_DOOR_LABELS[2],
+            id: hook_id(concat!(module_path!(), "::", stringify!(TrainingCutt_CleanUpCutt))),
+            closes: true,
+        },
+    ]
+}
+
+/// What the gate's three doors did at install: how many resolved, how many armed, and which of the two
+/// reasons every door that did not arm falls under. `armed` and `resolved` are the two counts both install
+/// lines print and `CensusCounts::from_gate` seeds the census from; they are kept apart because they are not
+/// the same count and a run has to be able to tell a client that has no such method from a player who
+/// switched the door off.
+#[derive(Clone, Debug, Default)]
+struct GateArming {
+    /// Doors whose game method resolved to an address.
+    resolved: usize,
+    /// Doors `new_hook!` created a hook on: resolved, and no `disabled_hooks` key reaches the site. How
+    /// many is not which - the two halves below are what a hold depends on, because a gate holding only
+    /// the close door has one armed door and no way to open a hold (C57).
+    armed: usize,
+    /// A door that starts a hold armed. With none of them armed nothing ever calls `CutGate::engage`,
+    /// so this module can never report a cut and every reader of `cut_gate_engaged` is reading a gate
+    /// that cannot open. The install line says so; no reader has to work it out for itself.
+    open_armed: bool,
+    /// The door that ends a hold armed. Without it a hold ends only on its tick bound.
+    close_armed: bool,
+    /// Doors that resolved to nothing, in `GATE_DOOR_LABELS` order.
+    unresolved: Vec<&'static str>,
+    /// Doors that resolved and were put down by the player's own `disabled_hooks`: the door and the key.
+    disabled: Vec<(&'static str, String)>,
+}
+
+impl GateArming {
+    fn complete(&self) -> bool {
+        self.armed == GATE_DOOR_LABELS.len()
+    }
+}
+
+/// The `disabled_hooks` key that puts one arming site down, or `None` when the player configured none
+/// that reaches it. It is `hook_key_match` - the copy of the rule the key report runs (`hook/mod.rs:171`)
+/// - asked for this door's id, so the door check and the arming decision cannot drift apart.
+///
+/// Deliberately *not* `hook_is_disabled`, which answers the same thing and records the id on the way:
+/// `new_hook!` records this site's id when it makes the decision, and a second record would count the
+/// same hook twice in `report_hook_keys`, inventing hooks a bare key put down. Cold either way - three
+/// scans of a player's key list while hooking, never on a call path.
+fn key_putting_door_down(disabled: &FnvHashSet<String>, id: &'static str) -> Option<String> {
+    disabled.iter().find(|key| hook_key_match(key, id).is_some()).cloned()
+}
+
+/// Which doors armed, decided from what the resolver answered and what the player configured. A door
+/// arms only when both halves hold: its method resolved, and no key puts that site down. This is the
+/// decision `arm_cut_gate` counts from and `init` prints: an address is not a hook, and a count of hooks
+/// is not a reading of a cut - `open_armed` and `close_armed` are the halves the install line reports
+/// and the census counts, and `armed` is only the number a run reads.
+///
+/// The third reason a door arms nothing is not counted here: a backend that refuses to create the hook.
+/// `new_hook!` prints that itself at error level (`hook/mod.rs:302`), which survives the `Info` file
+/// filter, so it is the one miss a played build cannot hide from the log.
+fn gate_arming(open: usize, scenario: usize, close: usize, disabled: &FnvHashSet<String>) -> GateArming {
+    let addresses = [open, scenario, close];
+    let mut arming = GateArming::default();
+
+    for (index, door) in gate_doors().iter().enumerate() {
+        if addresses[index] == 0 {
+            arming.unresolved.push(door.label);
+            continue;
+        }
+
+        arming.resolved += 1;
+
+        if let Some(key) = key_putting_door_down(disabled, door.id) {
+            arming.disabled.push((door.label, key));
+            continue;
+        }
+
+        arming.armed += 1;
+
+        if door.closes {
+            arming.close_armed = true;
+        }
+        else {
+            arming.open_armed = true;
+        }
+    }
+
+    arming
+}
+
 // The census half of the two doors the gate arms is only asked for when the probe was installed, so a
 // build played without `debug_mode` pays two atomic stores per cut and writes no census lines.
 static CENSUS_ON: AtomicBool = AtomicBool::new(false);
@@ -1090,37 +1499,208 @@ static CENSUS_ON: AtomicBool = AtomicBool::new(false);
 // happens to be installed. The pair is the boundary the census already measures - `PlayTrainingCut` opens
 // a run and `CleanUpCutt` closes it - and both wrappers hand their arguments and the coroutine the
 // original built to the game untouched.
-fn arm_cut_gate(cutt_controller: Option<*mut Il2CppClass>) -> usize {
+//
+// It answers which doors armed and which did not. Before this, a door that resolved nothing armed nothing
+// and said nothing: the miss was only ever printed by the resolver at debug level
+// (`AnimationSpeed.rs:1692` "has no overload with the expected signature", `:1709` "is static"), which the
+// file filter drops whenever `debug_mode` is off (`core/log.rs:3-9` sets `LevelFilter::Info`), and the one
+// line the install printed appeared only with at least one door armed and only on the non-debug path. A
+// played build could therefore hold its ui clock off, refuse its own writes, or do neither, with nothing in
+// `hachimi.log` saying which of those it was. The census half of this module has always recorded its misses
+// (`missing.push($label)`, `:4069`) and printed them (`:4356-4357`); the gate is the half that three other
+// decisions now lean on, so it does the same.
+//
+// And it answers that question with the door armed, not with the target found: a door the resolver
+// resolved and `disabled_hooks` put down is a miss too, and it is named with the key that did it.
+fn arm_cut_gate(cutt_controller: Option<*mut Il2CppClass>, disabled: &FnvHashSet<String>) -> GateArming {
     let Some(class) = cutt_controller else {
-        return 0;
+        // No class means no door: the gate a played build is now leaning on does not exist, and that is
+        // the one fact the run has to have. `init` prints every door as missing from this answer.
+        return GateArming { unresolved: GATE_DOOR_LABELS.to_vec(), ..GateArming::default() };
     };
 
-    let mut armed = 0usize;
     let open = unsafe { AnimationSpeed::resolve_method(class, "PlayTrainingCut", ONE_INFO, CLASS) };
-
-    if open != 0 {
-        new_hook!(open, TrainingCutt_PlayTrainingCut);
-        armed += 1;
-    }
 
     // The scenario sibling opens a cut run the same way and is closed by the same door, so it holds the ui
     // clock the same way. Run 56's stalled cut came through `PlayTrainingCut`; this door is covered so the
     // hold does not depend on which of the two the game played through.
     let scenario = unsafe { AnimationSpeed::resolve_method(class, "PlayScenarioTrainingCut", ONE_INFO, CLASS) };
 
-    if scenario != 0 {
-        new_hook!(scenario, TrainingCutt_PlayScenarioTrainingCut);
-        armed += 1;
+    // The close door is the miss with a cost a player pays: with no `CleanUpCutt` wrapper armed nothing
+    // calls `CutGate::release` (`:3174`), so a hold only ever ends on `tick`'s `CUT_GATE_HOLD_TICKS`
+    // bound, and every cut in the session costs the ~30 s window in which `Pass::Hold` refuses both a raise
+    // and its owed restore. Named at install, that shape is readable before the first cut instead of after
+    // one.
+    let close = unsafe { AnimationSpeed::resolve_method(class, "CleanUpCutt", NO_PARAMS, VOID) };
+
+    // The decision before the arming, both over the same three ids: `gate_arming` asks the key rule
+    // `new_hook!` is about to run for the site under it, so the count reports what the macro created
+    // rather than what the resolver found. The macro stays the one place a hook is created - the pair and
+    // the wrappers `529e4f5` shipped are untouched - and a door it puts down still prints its own
+    // `[DISABLED] new_hook!: <id>` line and still gets its target declared.
+    let arming = gate_arming(open, scenario, close, disabled);
+
+    if open != 0 {
+        new_hook!(open, TrainingCutt_PlayTrainingCut);
     }
 
-    let close = unsafe { AnimationSpeed::resolve_method(class, "CleanUpCutt", NO_PARAMS, VOID) };
+    if scenario != 0 {
+        new_hook!(scenario, TrainingCutt_PlayScenarioTrainingCut);
+    }
 
     if close != 0 {
         new_hook!(close, TrainingCutt_CleanUpCutt);
-        armed += 1;
     }
 
-    armed
+    // Which half of the pair armed is what a run has to be able to read, and it is not how many doors
+    // did. `CutGate::open` is set only by `PlayTrainingCut` and `PlayScenarioTrainingCut`, so a gate whose
+    // one armed door is `CleanUpCutt` has `armed > 0` and nothing that can ever call `engage`: the answer
+    // it gives for the whole session is the one that reads "no cut is open". `cut_gate_missing_line`
+    // spells that shape out instead of leaving a reader to infer it from a count.
+    arming
+}
+
+// The id one census door's arming site answers to, spelled exactly as `new_hook!` spells it
+// (`hook/mod.rs:291`): this module's path, the separator, the wrapper name. The census counts a door under
+// the id the macro keys its own decision on, so the count answers for the sites this build arms and not for
+// a name it merely resembles (C27), and the string a run reads in a `new_hook!:` line is the string the
+// census matched the key against.
+macro_rules! census_door_id {
+    ($hook:ident) => {
+        $crate::il2cpp::hook::hook_id(concat!(module_path!(), "::", stringify!($hook)))
+    };
+}
+
+/// The two census doors a test can arm without the game: `init`'s `probe!` sites for the cut end async door
+/// and the status play in door, each with the label the census prints for it and the id its arming site
+/// answers to. The spelling has to be written in this module, because `module_path!` answers for the module
+/// it is written in, and a test compares what the census matched a key against with the string a
+/// `new_hook!:` line prints.
+#[cfg(test)]
+fn census_fixture_doors() -> [(&'static str, &'static str); 2] {
+    [
+        ("SingleModeMainTrainingCuttController::PlayTrainingCutEndAsync", census_door_id!(TrainingCutt_PlayTrainingCutEndAsync)),
+        ("SingleModeMainTrainingCuttController::PlayInTrainingStatus", census_door_id!(TrainingCutt_PlayInTrainingStatus)),
+    ]
+}
+
+/// What the census counts for the doors this module arms, in the two names the install line prints.
+/// `resolved` is a door whose game method answered an address, which is a fact about the client. `armed` is a
+/// door `new_hook!` created a hook on, which is a fact about this build: the key rule that macro consults
+/// (`hook/mod.rs:293`) can leave a door that resolved with no hook behind it at all. `asked` is every door
+/// the module tried to arm, so the two numbers read against one total. They used to be one number - the
+/// census was seeded off `armed` while its body still counted what the resolver answered - which is how the
+/// census read `5 doors installed` about a build whose `new_hook!` sites created 4 hooks (C57; the fixture is
+/// `the_census_counts_a_door_new_hook_never_arms_as_resolved_only`).
+#[derive(Clone, Debug, Default)]
+struct CensusCounts {
+    /// Doors this census asked an address for, gate doors and probe doors alike.
+    asked: usize,
+    /// Doors that answered with an address.
+    resolved: usize,
+    /// Doors `new_hook!` created a hook on: resolved, and no `disabled_hooks` key reaches the site.
+    armed: usize,
+    /// Census doors that resolved and armed nothing because the player's own key named their arming site,
+    /// each with the key that did it. The census half of the install line's `armed nothing` clause.
+    disabled: Vec<(&'static str, String)>,
+}
+
+impl CensusCounts {
+    /// The gate's three doors are armed above the debug gate, so the census takes `arm_cut_gate`'s answer
+    /// rather than resolving them a second time: the same doors, the same key rule, the same two numbers.
+    fn from_gate(arming: &GateArming) -> Self {
+        CensusCounts {
+            asked: GATE_DOOR_LABELS.len(),
+            resolved: arming.resolved,
+            armed: arming.armed,
+            disabled: Vec::new(),
+        }
+    }
+
+    /// One census door whose method resolved, recorded after the `new_hook!` that ran for the site under it.
+    /// A resolved door always counts as resolved; it counts as armed only when the rule that macro consults
+    /// leaves the site alone, so the census reports the hooks the build created, not the addresses the
+    /// resolver found. Cold: one scan of a player's key list per door while hooking, never on a call path.
+    fn record_resolved(&mut self, label: &'static str, id: &'static str, disabled: &FnvHashSet<String>) {
+        self.asked += 1;
+        self.resolved += 1;
+
+        match key_putting_door_down(disabled, id) {
+            Some(key) => self.disabled.push((label, key)),
+            None => self.armed += 1,
+        }
+    }
+
+    /// One census door the client has no such method for, or whose class was not found: neither fact.
+    fn record_miss(&mut self) {
+        self.asked += 1;
+    }
+}
+
+/// The census line a run reads. It prints the same two facts the install line prints - how many doors
+/// resolved and how many armed - over every door this module arms, so the census and the gate line cannot
+/// hand one install two different readings.
+fn census_line(counts: &CensusCounts, counted_kinds: usize) -> String {
+    format!(
+        "Cutt probe: armed on {} of {} doors, {} of {} resolved, {} doors carry a counted kind in the totals line, cut runs measured from the cut start doors to CleanUpCutt and attributed to the view they start on",
+        counts.armed, counts.asked, counts.resolved, counts.asked, counted_kinds,
+    )
+}
+
+/// The census half of the `armed nothing` clause: every door this census armed nothing on although the
+/// client answered for it, named with the key that put the arming site down. The doors the resolver never
+/// answered for stay on their own line, because they have a different cause and a different fix.
+fn census_disabled_line(counts: &CensusCounts) -> String {
+    let named: Vec<String> = counts.disabled.iter().map(|(label, key)| format!("{label} (key {key:?})")).collect();
+
+    format!("Cutt probe: armed nothing on {} resolved door(s) this census arms: disabled_hooks names these arming sites: {}", counts.disabled.len(), named.join(", "))
+}
+
+// The install line for a gate that armed every door it could ask for. Printed in both modes now; it
+// used to print only on the non-debug path, which is the mode no measurement run uses. It names both
+// counts, because the census line below does and a run has to be able to read the two against each other.
+fn cut_gate_armed_line(arming: &GateArming) -> String {
+    let doors = GATE_DOOR_LABELS.len();
+
+    format!("Cutt gate: ui clock held at 1.0 while a training cut plays, armed on {armed} of {doors} doors, {resolved} of {doors} resolved", armed = arming.armed, resolved = arming.resolved)
+}
+
+/// The install line for a gate that armed less than it asked for, naming every door that did not arm and
+/// which of the two reasons it falls under: this client has no such method, or the player's own
+/// `disabled_hooks` key put the arming site down. Built apart from the il2cpp resolve so a test drives the
+/// same decision `init` prints from, and it carries what each shape costs the session: the 0-of-3 shape is
+/// the one that used to be invisible in every mode, the shape with no *start* door armed is the one where
+/// the gate can never open a hold at all, and the shape where only the close door is missing is the one
+/// where every cut in the session costs the tick bound.
+///
+/// `resolved` is printed beside `armed` because the two counts answer different questions - the first
+/// about the client, the second about this build - and before this the line could only print the one a
+/// resolver produced.
+fn cut_gate_missing_line(arming: &GateArming, class_found: bool) -> String {
+    let doors = GATE_DOOR_LABELS.len();
+    let mut line = format!("Cutt gate: armed on {} of {doors} doors, {} of {doors} resolved", arming.armed, arming.resolved);
+
+    if !arming.unresolved.is_empty() {
+        let reason = if class_found { "no matching overload" } else { "no class" };
+        line.push_str(&format!("; not installed ({reason}): {}", arming.unresolved.join(", ")));
+    }
+
+    if !arming.disabled.is_empty() {
+        let named: Vec<String> = arming.disabled.iter().map(|(label, key)| format!("{label} (key {key:?})")).collect();
+        line.push_str(&format!("; armed nothing: disabled_hooks names these arming sites: {}", named.join(", ")));
+    }
+
+    if !arming.open_armed {
+        line.push_str("; the cut gate is inert in this build, no door that opens a hold is armed, so the ui clock hold and the high speed write guard that read it are inert too");
+    }
+    else if !arming.close_armed {
+        line.push_str(&format!(
+            "; no close door armed, a training cut hold ends only on its {} game tick bound",
+            CUT_GATE_HOLD_TICKS,
+        ));
+    }
+
+    line
 }
 
 /// Once per game tick from `GameSystem_Update`, where a per frame door already exists. A tick with no
@@ -1135,7 +1715,15 @@ pub fn tick_cut_gate() {
     }
 }
 
-/// True while a training cut holds this fork's ui clock off the tween channel. Read once per tween tick.
+/// True while a training cut is open in the game: from `PlayTrainingCut` / `PlayScenarioTrainingCut`
+/// to `CleanUpCutt`, ending at `CUT_GATE_HOLD_TICKS` game ticks when the close door never arrives.
+/// Read once per tween tick by `AnimationSpeed::tween_clocks`, and once per pass by
+/// `HighSpeedSetting::apply` and by both of `StoryTimelineController`'s writes to the story high speed
+/// static, which are the writes C57 measured landing inside a live cut.
+///
+/// This is the whole public surface of the gate, exactly as `529e4f5` shipped it: a reader that needs to
+/// know whether the doors behind this answer actually armed is told at install, by `cut_gate_armed_line`
+/// or `cut_gate_missing_line`, rather than being handed a second state to consult per call.
 pub(crate) fn cut_gate_engaged() -> bool {
     CUT_GATE.engaged()
 }
@@ -1205,21 +1793,25 @@ fn open_cut_run() {
     }
 }
 
-// The gap belongs to the plate list door the probe already stands on, so splitting it costs no new hook:
-// a `InitializePlateList` call between a close and the next open says the game was building param plates
-// during that idle, and the time on either side of those calls is the time it was not.
+// The gap belongs to the plate doors the probe already stands on, so splitting it costs no new hook: a
+// `InitializePlateList` call between a close and the next open says the game was building param plates
+// during that idle, and the time on either side of those passes is the time it was not. Each pass is
+// charged its own entry to completion, which `close_plate_pass` accumulated while the gap was open.
 fn record_gap_legs(close_ms: i64, open_ms: i64) {
-    let first_plate = GAP_PLATE_FIRST_MS.swap(-1, atomic::Ordering::Relaxed);
-    let last_plate = GAP_PLATE_LAST_MS.swap(-1, atomic::Ordering::Relaxed);
+    let first_entry = GAP_PLATE_FIRST_MS.swap(-1, atomic::Ordering::Relaxed);
+    let last_end = GAP_PASS_LAST_END_MS.swap(-1, atomic::Ordering::Relaxed);
+    let passed_ms = GAP_PASS_MS_TOTAL.swap(0, atomic::Ordering::Relaxed);
 
-    match gap_legs(close_ms, first_plate, last_plate, open_ms) {
-        Some((before, plate, after)) => {
+    match gap_legs(close_ms, first_entry, last_end, passed_ms, open_ms) {
+        Some((before, passes, between, after)) => {
             GAP_LEG_BEFORE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
             GAP_LEG_BEFORE_MS_TOTAL.fetch_add(before, atomic::Ordering::Relaxed);
             GAP_LEG_BEFORE_WORST_MS.fetch_max(before, atomic::Ordering::Relaxed);
             GAP_LEG_PLATE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
-            GAP_LEG_PLATE_MS_TOTAL.fetch_add(plate, atomic::Ordering::Relaxed);
-            GAP_LEG_PLATE_WORST_MS.fetch_max(plate, atomic::Ordering::Relaxed);
+            GAP_LEG_PLATE_MS_TOTAL.fetch_add(passes, atomic::Ordering::Relaxed);
+            GAP_LEG_PLATE_WORST_MS.fetch_max(passes, atomic::Ordering::Relaxed);
+            GAP_LEG_BETWEEN_MS_TOTAL.fetch_add(between, atomic::Ordering::Relaxed);
+            GAP_LEG_BETWEEN_WORST_MS.fetch_max(between, atomic::Ordering::Relaxed);
             GAP_LEG_AFTER_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
             GAP_LEG_AFTER_MS_TOTAL.fetch_add(after, atomic::Ordering::Relaxed);
             GAP_LEG_AFTER_WORST_MS.fetch_max(after, atomic::Ordering::Relaxed);
@@ -1286,6 +1878,14 @@ fn close_cut_run() {
     // probe's lock on every door call for the rest of the session.
     close_hole_census();
 
+    // A hole is only a hole inside one cut, so a mark either end left standing is dropped here rather than
+    // paired with the next cut's. The reset is above the early return below on purpose: `CleanUpCutt` runs
+    // 35 times against 19 cut starts (run 10) and `open_cut_run` calls this function before every cut, so
+    // a close that counts as nothing is still the point after which a leftover mark must not pair with
+    // anything - a mark that survives it measures the idle between two turns as a hole inside one.
+    CUT_HOLE_OPEN_MS.store(-1, atomic::Ordering::Relaxed);
+    CUT_HOLE_OPEN_END.store(HOLE_END_CUT_IN, atomic::Ordering::Relaxed);
+
     let opened = RUN_OPENED_MS.swap(-1, atomic::Ordering::Relaxed);
 
     if opened < 0 {
@@ -1340,18 +1940,15 @@ fn close_cut_run() {
 
     RUN_CLOSED_MS.store(now, atomic::Ordering::Relaxed);
 
-    // A new gap begins at this close, so the plate list marks of the previous one are dropped rather than
+    // A new gap begins at this close, so the plate marks of the previous one are dropped rather than
     // carried into it.
     GAP_PLATE_FIRST_MS.store(-1, atomic::Ordering::Relaxed);
-    GAP_PLATE_LAST_MS.store(-1, atomic::Ordering::Relaxed);
+    GAP_PASS_LAST_END_MS.store(-1, atomic::Ordering::Relaxed);
+    GAP_PASS_MS_TOTAL.store(0, atomic::Ordering::Relaxed);
 
     // The teardown is also where a cascade that never reported its typewrite end stops being open. A
     // window left open would charge the next turn's first plate event to the cascade before it.
-    close_plate_pass();
-
-    // A hole is only a hole inside one cut, so a cut-in end that never reached a play out is dropped
-    // here rather than paired with the next cut's.
-    CUT_HOLE_FROM_MS.store(-1, atomic::Ordering::Relaxed);
+    close_plate_pass("the cut teardown");
 
     // The cut's own coroutine window closes on the same door, and reports what that coroutine did inside
     // the wall clock this line just measured.
@@ -1649,7 +2246,7 @@ pub(crate) fn note_plate_call(this: *mut Il2CppObject, interval: f32) {
     }
 
     record_plate_step();
-    open_plate_pass();
+    open_plate_pass(this, Some(interval));
 }
 
 // `PlayIcon/2 -> void(int, class<Gallop.TrainingParamChangeUI.ChangeParameterInfo>)`: the per plate play
@@ -1708,7 +2305,7 @@ type PlateVoidFn = extern "C" fn(this: *mut Il2CppObject);
 def_detour! {
     TrainingParamChangeUI_StartSequence(this: *mut Il2CppObject) {
             PLATE_START_SEQUENCE.count();
-        open_plate_pass();
+        open_plate_pass(this, None);
 
         get_orig_fn!(TrainingParamChangeUI_StartSequence, PlateVoidFn)(this);
     }
@@ -1720,6 +2317,7 @@ def_detour! {
 def_detour! {
     TrainingParamChangeUI_StartGroupTypewrite(this: *mut Il2CppObject) {
             PLATE_START_GROUP_TYPEWRITE.count();
+        note_cascade_group_start(this);
 
         get_orig_fn!(TrainingParamChangeUI_StartGroupTypewrite, PlateVoidFn)(this);
     }
@@ -1732,6 +2330,7 @@ def_detour! {
     TrainingParamChangeUI_StartTypewrite(this: *mut Il2CppObject, index: i32) {
             PLATE_START_TYPEWRITE.observe(&[index as f64]);
         record_typewrite_cadence();
+        note_cascade_typewrite_start(this);
 
         get_orig_fn!(TrainingParamChangeUI_StartTypewrite, PlateIntFn)(this, index);
     }
@@ -1743,6 +2342,7 @@ def_detour! {
 def_detour! {
     TrainingParamChangeUI_OnNextTypewrite(this: *mut Il2CppObject) {
             PLATE_ON_NEXT_TYPEWRITE.count();
+        note_cascade_advance(this);
 
         get_orig_fn!(TrainingParamChangeUI_OnNextTypewrite, PlateVoidFn)(this);
     }
@@ -1754,6 +2354,7 @@ def_detour! {
 def_detour! {
     TrainingParamChangeUI_OnEndTypeWrite(this: *mut Il2CppObject, index: i32) {
             PLATE_ON_END_TYPE_WRITE.observe(&[index as f64]);
+        note_cascade_typewrite_end(this);
 
         get_orig_fn!(TrainingParamChangeUI_OnEndTypeWrite, PlateIntFn)(this, index);
     }
@@ -1765,7 +2366,7 @@ def_detour! {
 def_detour! {
     TrainingParamChangeUI_OnAllTypewriteEnd(this: *mut Il2CppObject) {
             PLATE_ON_ALL_TYPEWRITE_END.count();
-        close_plate_pass();
+        close_plate_pass("its typewrite end");
 
         get_orig_fn!(TrainingParamChangeUI_OnAllTypewriteEnd, PlateVoidFn)(this);
     }
@@ -1777,6 +2378,7 @@ def_detour! {
 def_detour! {
     TrainingParamChangeUI_OnTapScreen(this: *mut Il2CppObject) {
             PLATE_ON_TAP_SCREEN.count();
+        note_cascade_tap_screen(this);
 
         get_orig_fn!(TrainingParamChangeUI_OnTapScreen, PlateVoidFn)(this);
     }
@@ -1903,14 +2505,12 @@ fn record_plate_step() {
         PLATE_STEP_WORST_MS.fetch_max(step_ms, atomic::Ordering::Relaxed);
     }
 
-    // The same door is the split point of the gap when no cut is open. A plate list pass during a cut
-    // belongs to that cut's wall, so it is not charged to the idle between cuts.
-    if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) < 0 && RUN_CLOSED_MS.load(atomic::Ordering::Relaxed) >= 0 {
-        if GAP_PLATE_FIRST_MS.load(atomic::Ordering::Relaxed) < 0 {
-            GAP_PLATE_FIRST_MS.store(now, atomic::Ordering::Relaxed);
-        }
-
-        GAP_PLATE_LAST_MS.store(now, atomic::Ordering::Relaxed);
+    // The same door is the entry of a pass, and it is the split point of the gap when no cut is open. A
+    // plate pass during a cut belongs to that cut's wall, so it is not charged to the idle between cuts.
+    // Only the entry is marked here: the completion is the cascade window's own close, which
+    // `close_plate_pass` charges to the gap it ran inside.
+    if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) < 0 && RUN_CLOSED_MS.load(atomic::Ordering::Relaxed) >= 0 && GAP_PLATE_FIRST_MS.load(atomic::Ordering::Relaxed) < 0 {
+        GAP_PLATE_FIRST_MS.store(now, atomic::Ordering::Relaxed);
     }
 }
 
@@ -1945,21 +2545,253 @@ fn record_play_cadence(last_ms: &AtomicI64, runs: &AtomicUsize, total_ms: &Atomi
 // a window of its own. Run 15 called `StartGroupTypewrite` 58 times against 17 `StartSequence` calls, so
 // opening per group reported 19 windows and a 15,141 ms worst cascade for a chain whose own
 // Initialize to OnAllTypewriteEnd span was between 215 ms and 930 ms.
-fn open_plate_pass() {
-    if PLATE_PASS_OPEN_MS.load(atomic::Ordering::Relaxed) < 0 {
-        PLATE_PASS_OPEN_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+fn open_plate_pass(this: *mut Il2CppObject, interval: Option<f32>) {
+    let now = elapsed_ms();
+
+    if PLATE_PASS_OPEN_MS.load(atomic::Ordering::Relaxed) >= 0 {
+        // A second list call inside a cascade the game has not finished is the caller handing the same
+        // sequence a new number. The window stays one cascade; the numbers it holds are refreshed.
+        with_cascade(|cascade| {
+            if let Some(value) = interval {
+                cascade.interval = value;
+            }
+
+            read_cascade_numbers(cascade, this);
+        });
+
+        return;
+    }
+
+    PLATE_PASS_OPEN_MS.store(now, atomic::Ordering::Relaxed);
+
+    let mut slot = recover_lock(&CASCADE_READ);
+    let index = CASCADE_INDEX.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+    let mut cascade = CascadeRead {
+        index,
+        open_ms: now,
+        close_ms: now,
+        first_start_ms: -1,
+        write_start_ms: -1,
+        write_end_ms: -1,
+        ..CascadeRead::default()
+    };
+
+    if let Some(value) = interval {
+        cascade.interval = value;
+    }
+
+    read_cascade_numbers(&mut cascade, this);
+    *slot = Some(cascade);
+}
+
+fn with_cascade(record: impl FnOnce(&mut CascadeRead)) {
+    let mut slot = recover_lock(&CASCADE_READ);
+
+    if let Some(cascade) = slot.as_mut() {
+        record(cascade);
     }
 }
 
-fn close_plate_pass() {
+// The four instance floats `Gallop.TrainingParamChangeUI` paces its group typewrite with. Read at the
+// doors already armed, which is what C54 asked for: the answer is in the class, not in the argument.
+fn read_cascade_numbers(cascade: &mut CascadeRead, this: *mut Il2CppObject) {
+    cascade.delay = plate_ui_delay(this);
+    cascade.tap_wait = plate_ui_tap_wait(this);
+    cascade.group_interval = plate_ui_group_interval(this);
+    cascade.sequence_interval = plate_ui_sequence_interval(this);
+}
+
+/// The pass ended. The span is entry to completion - the plate list call or the sequence start that opened
+/// the window, to the typewrite end, or to the teardown that stood in for an end that never arrived - and
+/// never the distance to the next call, which is the reading ledger item 79 refused to accept.
+fn close_plate_pass(closed_by: &'static str) {
     let opened = PLATE_PASS_OPEN_MS.swap(-1, atomic::Ordering::Relaxed);
     PLATE_TYPEWRITE_LAST_MS.store(-1, atomic::Ordering::Relaxed);
+    let now = elapsed_ms();
+    let span_ms = span_from(opened, now);
 
-    if let Some(span_ms) = span_from(opened, elapsed_ms()) {
+    if let Some(span_ms) = span_ms {
         PLATE_PASS_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
         PLATE_PASS_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
         PLATE_PASS_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
+
+        // A pass that ran in the idle between cuts is a leg of that gap, charged its own span rather than
+        // the distance to the next pass. A pass that opened before this gap began - inside a cut, or before
+        // the previous cut closed - belongs to that wall instead of the gap.
+        let closed_ms = RUN_CLOSED_MS.load(atomic::Ordering::Relaxed);
+
+        if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) < 0 && closed_ms >= 0 && opened >= closed_ms {
+            GAP_PASS_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
+            GAP_PASS_LAST_END_MS.store(now, atomic::Ordering::Relaxed);
+
+            if GAP_PLATE_FIRST_MS.load(atomic::Ordering::Relaxed) < 0 {
+                GAP_PLATE_FIRST_MS.store(opened, atomic::Ordering::Relaxed);
+            }
+        }
     }
+
+    let closed = recover_lock(&CASCADE_READ).take();
+
+    if let Some(mut cascade) = closed {
+        cascade.close_ms = now;
+        cascade.closed_by = closed_by;
+
+        // The same two clock reads the total above accumulated, kept as this cascade's own number. The
+        // aggregate reads the total and the max over every cascade that has closed, and a total prices one
+        // cascade's span only when nothing else closed since the last reading (C56), so the spans are
+        // written down separately, in close order, while the close is here to say which one it is.
+        if let Some(span_ms) = span_ms {
+            record_cascade_span(cascade.index, span_ms);
+        }
+
+        let (pace, _) = cascade_pace(&cascade);
+        PACE_RUNS[pace].fetch_add(1, atomic::Ordering::Relaxed);
+
+        let reported = CASCADE_REPORTED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        if reported <= PROBE_DETAIL_LIMIT {
+            debug!("{}", cascade_line(&cascade));
+        }
+    }
+}
+
+/// One cascade closed: its span and the number its window opened on go into the ring, oldest slot
+/// overwritten. Two relaxed stores and one counter on a door that runs once per cascade, never per frame.
+fn record_cascade_span(index: usize, span_ms: i64) {
+    let slot = CASCADE_SPAN_WRITES.fetch_add(1, atomic::Ordering::Relaxed) % CASCADE_SPAN_RING;
+    CASCADE_SPANS[slot].store(span_ms, atomic::Ordering::Relaxed);
+    CASCADE_SPAN_INDEXES[slot].store(index, atomic::Ordering::Relaxed);
+}
+
+/// The ring as a reading takes it: spans and cascade numbers in slot order, plus how many cascades the ring
+/// has taken in over the session. Slot order is close order only until the ring wraps; the reading that
+/// prints them works out the order from the count.
+#[derive(Clone, Copy, Default)]
+struct CascadeSpans {
+    spans: [i64; CASCADE_SPAN_RING],
+    indexes: [usize; CASCADE_SPAN_RING],
+    writes: usize,
+}
+
+impl CascadeSpans {
+    /// The spans that closed since the reading that last named any: oldest first, each one said as
+    /// `cascade number=span ms`. `printed` is how many spans an earlier report already named, so the tail is
+    /// the closes that landed between two readings, and it is in close order whether or not the ring has
+    /// wrapped. A run that closed more cascades than the ring holds is told which spans the line is not
+    /// showing, because a replay reading this line has to know whether it read every cascade or the last few
+    /// of them. Nothing new says nothing at all: run 57 printed its cascade line 127 times and only four of
+    /// those readings had a close no earlier reading had named, so naming spans costs nothing on the other
+    /// 123 reports.
+    fn span_tail(&self, printed: usize) -> String {
+        let closed = self.writes.saturating_sub(printed);
+
+        if closed == 0 {
+            return String::new();
+        }
+
+        let shown = closed.min(CASCADE_SPAN_RING);
+        let mut tail = String::new();
+
+        for offset in 0..shown {
+            let slot = (self.writes - shown + offset) % CASCADE_SPAN_RING;
+            let _ = write!(tail, " {}={} ms", self.indexes[slot], self.spans[slot]);
+        }
+
+        if closed > shown {
+            let _ = write!(tail, " (the last {shown} of {closed} closes, {} older spans no longer held)", closed - shown);
+        }
+
+        format!(" cascades closed since the last report:{tail}")
+    }
+}
+
+/// The ring out of the statics, the way a report reads it.
+fn cascade_span_ring() -> CascadeSpans {
+    let mut ring = CascadeSpans::default();
+
+    for slot in 0..CASCADE_SPAN_RING {
+        ring.spans[slot] = CASCADE_SPANS[slot].load(atomic::Ordering::Relaxed);
+        ring.indexes[slot] = CASCADE_SPAN_INDEXES[slot].load(atomic::Ordering::Relaxed);
+    }
+
+    ring.writes = CASCADE_SPAN_WRITES.load(atomic::Ordering::Relaxed);
+    ring
+}
+
+// The plate doors feed the cascade record: the numbers the UI holds are read again at each one, because a
+// number that changes mid cascade is the number the cascade is waiting on. These doors run per plate, not
+// per frame - `Update` and `UpdateSpeed`, which the game polls every frame, stay counted only. The plate
+// list door reads the same numbers through `open_plate_pass`.
+fn note_cascade_group_start(this: *mut Il2CppObject) {
+    with_cascade(|cascade| {
+        cascade.groups += 1;
+        read_cascade_numbers(cascade, this);
+    });
+}
+
+fn note_cascade_typewrite_start(this: *mut Il2CppObject) {
+    let now = elapsed_ms();
+
+    with_cascade(|cascade| {
+        cascade.plates += 1;
+        cascade.write_start_ms = now;
+
+        if cascade.first_start_ms < 0 {
+            cascade.first_start_ms = now;
+        }
+        else if let Some(step_ms) = span_from(cascade.last_start_ms, now) {
+            if cascade.beats_seen < CASCADE_BEAT_LIMIT {
+                cascade.beats[cascade.beats_seen] = step_ms;
+            }
+
+            cascade.beats_seen += 1;
+        }
+
+        cascade.last_start_ms = now;
+        read_cascade_numbers(cascade, this);
+    });
+}
+
+fn note_cascade_typewrite_end(this: *mut Il2CppObject) {
+    let now = elapsed_ms();
+
+    with_cascade(|cascade| {
+        // The plate's own type write: the leg `TrainingParamChangePlate.TYPEWRITE_DURATION` prices, and the
+        // only way to its size when the literal itself has no slot to read.
+        if let Some(leg_ms) = span_from(cascade.write_start_ms, now) {
+            cascade.write_ms += leg_ms;
+            cascade.write_runs += 1;
+        }
+
+        cascade.write_start_ms = -1;
+        cascade.write_end_ms = now;
+        read_cascade_numbers(cascade, this);
+    });
+}
+
+fn note_cascade_advance(this: *mut Il2CppObject) {
+    let now = elapsed_ms();
+
+    with_cascade(|cascade| {
+        cascade.advances += 1;
+
+        // The wait between one plate finishing and the next being started: the leg
+        // `TrainingParamChangePlate.NEXT_WAIT_DURATION` prices.
+        if let Some(leg_ms) = span_from(cascade.write_end_ms, now) {
+            cascade.wait_ms += leg_ms;
+            cascade.wait_runs += 1;
+        }
+
+        cascade.write_end_ms = -1;
+        read_cascade_numbers(cascade, this);
+    });
+}
+
+fn note_cascade_tap_screen(this: *mut Il2CppObject) {
+    with_cascade(|cascade| {
+        cascade.taps += 1;
+        read_cascade_numbers(cascade, this);
+    });
 }
 
 // How far apart the plates of one cascade arrive. The window is the cascade itself, so a spacing between
@@ -1980,39 +2812,62 @@ fn record_typewrite_cadence() {
     }
 }
 
-// Marks the moment a training cut-in finished. The door for it lives in `StoryEventProbe` because that is
-// where the cut-in helper doors are, and the hole it opens is measured here because the other end of it,
-// the status panel playing out, is a door this probe owns.
-pub(crate) fn note_cut_in_end() {
-    // A second cut-in ending while an earlier hole is still open means that hole never reached its status
-    // play out. Its tally is dropped rather than carried into the new window.
+// Marks one end of the wall a training cut spends between its cut-in finishing and its status panel
+// playing out. The door for the cut-in end lives in `StoryEventProbe` because that is where the cut-in
+// helper doors are; the door for the play out is one this probe owns. Either of them opens the window and
+// the other closes it, because run 57 and run 53 reached them the other way round from the runs this wall
+// was first named in, and a clock that only counts one order reports nothing at all about the other.
+fn pair_hole_end(end: usize, now_ms: i64) {
+    if now_ms < 0 {
+        return;
+    }
+
+    // Swapped rather than read: one window answers at most one far door.
+    let open_ms = CUT_HOLE_OPEN_MS.swap(-1, atomic::Ordering::Relaxed);
+    let open_end = CUT_HOLE_OPEN_END.swap(end, atomic::Ordering::Relaxed);
+
+    if let Some((span_ms, from_end)) = pair_hole_open(open_ms, open_end, end, now_ms) {
+        record_cut_hole(span_ms, from_end);
+
+        return;
+    }
+
+    // A second door on the same end is a window no far door ever answered. Its tally is dropped rather than
+    // carried into the new window.
     close_hole_census();
-    CUT_HOLE_FROM_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+    CUT_HOLE_OPEN_MS.store(now_ms, atomic::Ordering::Relaxed);
+    CUT_HOLE_OPEN_END.store(end, atomic::Ordering::Relaxed);
     open_hole_census();
     super::CutStateProbe::note_hole_open();
 }
 
-// Closes the hole at the status play out. The mark is swapped out rather than read so a cut that calls
-// `PlayOut` twice, which run 15 did twice, charges the wait once.
-fn record_cut_hole() {
-    let from_ms = CUT_HOLE_FROM_MS.swap(-1, atomic::Ordering::Relaxed);
+pub(crate) fn note_cut_in_end() {
+    pair_hole_end(HOLE_END_CUT_IN, elapsed_ms());
+}
 
-    if let Some(span_ms) = span_from(from_ms, elapsed_ms()) {
-        CUT_HOLE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
-        CUT_HOLE_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
-        CUT_HOLE_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
-        record_in_window(|window| {
-            window.holes += 1;
-            window.hole_ms += span_ms;
-        });
-        // Which doors the wait crossed, said once, at the moment the wait ends.
-        if let Some(table) = close_hole_census() {
-            info!("{}", hole_census_line(span_ms, &table));
-        }
-        // The same stretch read off the cut's own coroutine: whether the engine kept calling it while the
-        // status panel was held off decides whether this is a wait the fork can reach at all.
-        super::CutStateProbe::note_hole_closed(span_ms);
+// The stretch a hole closed, filed under the arm that was in force, with the doors it crossed and what the
+// cut's own coroutine did inside it.
+fn record_cut_hole(span_ms: i64, from_end: usize) {
+    CUT_HOLE_RUNS.fetch_add(1, atomic::Ordering::Relaxed);
+    CUT_HOLE_MS_TOTAL.fetch_add(span_ms, atomic::Ordering::Relaxed);
+    CUT_HOLE_WORST_MS.fetch_max(span_ms, atomic::Ordering::Relaxed);
+    CUT_HOLE_END_RUNS[from_end].fetch_add(1, atomic::Ordering::Relaxed);
+
+    record_in_window(|window| {
+        window.holes += 1;
+        window.hole_ms += span_ms;
+    });
+
+    let (from, to) = hole_stretch(from_end);
+
+    // Which doors the wait crossed, said once, at the moment the wait ends.
+    if let Some(table) = close_hole_census() {
+        info!("{}", hole_census_line(span_ms, from, to, &table));
     }
+
+    // The same stretch read off the cut's own coroutine: whether the engine kept calling it while the
+    // status panel was held off decides whether this is a wait the fork can reach at all.
+    super::CutStateProbe::note_hole_closed(span_ms, from, to);
 }
 
 // The gauge and plate animation doors run 11 never opened. Every argument is handed to the original
@@ -2591,7 +3446,7 @@ fn note_flash_label(door: &str, label: *mut Il2CppString) {
 }
 
 type FlashPlayActionFn = extern "C" fn(this: *mut Il2CppObject, on_end: *mut Il2CppObject);
-// `Play/1 -> void(class<System.Action>)` (`introspect.log:26461`), the play with no number on it.
+// `Play/1 -> void(class<System.Action>)` (`introspect-run45.log:26461`), the play with no number on it.
 def_detour! {
     FlashPlayer_PlayAction(this: *mut Il2CppObject, on_end: *mut Il2CppObject) {
             get_orig_fn!(FlashPlayer_PlayAction, FlashPlayActionFn)(this, on_end);
@@ -2604,7 +3459,7 @@ def_detour! {
 }
 
 type MotionPlayLabelFloatFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, value: f32);
-// `AnimateToUnity.AnMotion::SetMotionPlay/2 -> void(string<System.String>, float)` (`introspect.log:28805`): the play
+// `AnimateToUnity.AnMotion::SetMotionPlay/2 -> void(string<System.String>, float)` (`introspect-run45.log:28805`): the play
 // door on the motion object the cut-in lever writes its speed onto. This is the only place other than that lever a
 // float enters the effect, so the census records the float and names the label and writes nothing (C47).
 def_detour! {
@@ -2620,7 +3475,7 @@ def_detour! {
 }
 
 type MotionPlayLabelIntFn = extern "C" fn(this: *mut Il2CppObject, label: *mut Il2CppString, value: i32);
-// `SetMotionPlay/2 -> void(string<System.String>, int)` (`introspect.log:28806`), the overload a
+// `SetMotionPlay/2 -> void(string<System.String>, int)` (`introspect-run45.log:28806`), the overload a
 // `FlashPlayer::Play(label, action, int)` lands on, with the int the flash player was handed kept as the peak.
 def_detour! {
     AnMotion_SetMotionPlayLabelInt(this: *mut Il2CppObject, label: *mut Il2CppString, value: i32) {
@@ -2635,7 +3490,7 @@ def_detour! {
 }
 
 type MotionPlayFloatFn = extern "C" fn(this: *mut Il2CppObject, value: f32);
-// `SetMotionPlay/1 -> void(float)` (`introspect.log:28807`), the play with a number and no label.
+// `SetMotionPlay/1 -> void(float)` (`introspect-run45.log:28807`), the play with a number and no label.
 def_detour! {
     AnMotion_SetMotionPlayFloat(this: *mut Il2CppObject, value: f32) {
             MOTION_PLAY_FLOAT.observe(&[value as f64]);
@@ -2648,7 +3503,7 @@ def_detour! {
 }
 
 type MotionPlayFn = extern "C" fn(this: *mut Il2CppObject);
-// `SetMotionPlay/0 -> void()` (`introspect.log:28803`) and `SetMotionStop/0 -> void()` (`introspect.log:28816`):
+// `SetMotionPlay/0 -> void()` (`introspect-run45.log:28803`) and `SetMotionStop/0 -> void()` (`introspect-run45.log:28816`):
 // counted, because whether the motion is played at all on the object the lever writes on is the fact a run needs
 // before a lever on that object can be called working rather than installed.
 def_detour! {
@@ -2675,7 +3530,7 @@ def_detour! {
 }
 
 type FlashPauseFn = extern "C" fn(this: *mut Il2CppObject, pause: bool);
-// `Pause/1 -> void(bool)`, `Resume/0`, `Stop/0` and `End/0` (`introspect.log:26465` to `26468`): whether the game
+// `Pause/1 -> void(bool)`, `Resume/0`, `Stop/0` and `End/0` (`introspect-run45.log:26465` to `26468`): whether the game
 // ever parks a cut-in effect instead of letting it run out. Counted, arguments untouched.
 def_detour! {
     FlashPlayer_Pause(this: *mut Il2CppObject, pause: bool) {
@@ -2749,7 +3604,7 @@ fn note_flash_labels(door: &str, first: *mut Il2CppString, second: *mut Il2CppSt
 
 type FlashActionPlayWithTimeFn = extern "C" fn(this: *mut Il2CppObject, first: *mut Il2CppString, time: f32, second: *mut Il2CppString);
 // `FlashActionPlayer::Play/3 -> void(string<System.String>, float, string<System.String>)` and
-// `Play/2 -> void(string, string)` (`introspect.log:26411` to `26412`): the class that owns a flash player has a
+// `Play/2 -> void(string, string)` (`introspect-run45.log:26411` to `26412`): the class that owns a flash player has a
 // float on its play door, which is where a cut-in effect's length would be named apart from its speed. The float
 // and both labels go back untouched, and the float is what the census records.
 def_detour! {
@@ -2954,7 +3809,7 @@ type StatusPlayOutFn = extern "C" fn(this: *mut Il2CppObject, flag: bool, action
 def_detour! {
     TrainingCutStatus_PlayOut(this: *mut Il2CppObject, flag: bool, action: *mut Il2CppObject) {
             STATUS_PLAY_OUT.observe(&[bit(flag)]);
-        record_cut_hole();
+        pair_hole_end(HOLE_END_PLAY_OUT, elapsed_ms());
 
         get_orig_fn!(TrainingCutStatus_PlayOut, StatusPlayOutFn)(this, flag, action);
     }
@@ -3117,20 +3972,35 @@ pub(crate) fn class_for_label(image: *const Il2CppImage, label: &str) -> Option<
 }
 
 pub fn init(umamusume: *const Il2CppImage) {
-    let debug_mode = Hachimi::instance().config.load().debug_mode;
+    // One config read for the gate's arming: `debug_mode` says whether the census half is installed, and
+    // `disabled_hooks` says which of the gate's arming sites `new_hook!` is about to skip. Cold - hooking
+    // is over before the first frame, and `new_hook!` reads the same config for the same decision.
+    let hachimi = Hachimi::instance();
+    let config = hachimi.config.load();
+    let debug_mode = config.debug_mode;
 
     // The gate's pair is resolved and armed before the debug gate returns: the bound it keeps sits on a
     // lever this fork owns, and a player who has no probe installed still has that lever turned on. The
     // class lookup is the one the census below reuses, so the two halves still resolve the same class the
     // scaling modules resolved.
     let cutt_controller = class_for_label(umamusume, "Gallop.SingleModeMainTrainingCuttController");
-    let gate_doors = arm_cut_gate(cutt_controller);
+    let arming = arm_cut_gate(cutt_controller, &config.disabled_hooks);
+
+    // The gate's arming is told in both modes, and even when nothing armed. It used to be one line that
+    // required at least one door and a non-debug build, so the shape where the class resolved to nothing
+    // printed nothing in any mode, and the mode the measurement runs use printed nothing at all. Every
+    // miss is named here the way the census names its own (`:4069`, `:4356-4357`), in the two numbers the
+    // census counts, because the ui clock hold and the two high speed write guards now decide from this gate
+    // - including the miss that is not the client's fault, a door of the gate named in the player's own
+    // `disabled_hooks` (C57).
+    if arming.complete() {
+        info!("{}", cut_gate_armed_line(&arming));
+    }
+    else {
+        warn!("{}", cut_gate_missing_line(&arming, cutt_controller.is_some()));
+    }
 
     if !debug_mode {
-        if gate_doors > 0 {
-            info!("Cutt gate: ui clock held at 1.0 while a training cut plays, armed on {gate_doors} of 3 doors");
-        }
-
         return;
     }
 
@@ -3175,9 +4045,12 @@ pub fn init(umamusume: *const Il2CppImage) {
     }
 
     let mut missing: Vec<&str> = Vec::new();
-    // The gate's pair is already armed by the time the census is armed, so it counts here too: the totals
-    // line answers how many of the doors this module measures are live in the build the run used.
-    let mut installed = gate_doors;
+    // The census counts the same two facts the install line just printed, over every door it arms: how many
+    // resolved to an address, and how many `new_hook!` created a hook on. The gate's three doors were armed
+    // above the debug gate, so they enter here as `arm_cut_gate`'s two counts instead of a second
+    // resolution; every door below is counted as its own `new_hook!` runs, under the id that macro keys the
+    // site on.
+    let mut census = CensusCounts::from_gate(&arming);
 
     // Instance candidates go through the same matcher the scaling hooks use: the dumped parameter
     // types, the return type, the generic check, and reference flags. Nothing is installed on a name
@@ -3190,13 +4063,17 @@ pub fn init(umamusume: *const Il2CppImage) {
 
                     if addr != 0 {
                         new_hook!(addr, $hook);
-                        installed += 1;
+                        census.record_resolved($label, census_door_id!($hook), &config.disabled_hooks);
                     }
                     else {
                         missing.push($label);
+                        census.record_miss();
                     }
                 },
-                None => missing.push($label),
+                None => {
+                    missing.push($label);
+                    census.record_miss();
+                },
             }
         };
     }
@@ -3211,13 +4088,17 @@ pub fn init(umamusume: *const Il2CppImage) {
 
                     if addr != 0 {
                         new_hook!(addr, $hook);
-                        installed += 1;
+                        census.record_resolved($label, census_door_id!($hook), &config.disabled_hooks);
                     }
                     else {
                         missing.push($label);
+                        census.record_miss();
                     }
                 },
-                None => missing.push($label),
+                None => {
+                    missing.push($label);
+                    census.record_miss();
+                },
             }
         };
     }
@@ -3233,13 +4114,17 @@ pub fn init(umamusume: *const Il2CppImage) {
 
                     if addr != 0 {
                         new_hook!(addr, $hook);
-                        installed += 1;
+                        census.record_resolved($label, census_door_id!($hook), &config.disabled_hooks);
                     }
                     else {
                         missing.push($label);
+                        census.record_miss();
                     }
                 },
-                None => missing.push($label),
+                None => {
+                    missing.push($label);
+                    census.record_miss();
+                },
             }
         };
     }
@@ -3252,13 +4137,17 @@ pub fn init(umamusume: *const Il2CppImage) {
 
                     if addr != 0 {
                         new_hook!(addr, $hook);
-                        installed += 1;
+                        census.record_resolved($label, census_door_id!($hook), &config.disabled_hooks);
                     }
                     else {
                         missing.push($label);
+                        census.record_miss();
                     }
                 },
-                None => missing.push($label),
+                None => {
+                    missing.push($label);
+                    census.record_miss();
+                },
             }
         };
     }
@@ -3378,7 +4267,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     static_probe!(support_member, SupportMemberA2U_PlayAoharuSpSoulCutin, "PlayAoharuSpSoulCutin", SOUL_CUTIN_ARGS, CLASS, "TrainingParamChangeSupportMemberA2U::PlayAoharuSpSoulCutin");
     static_probe!(support_member, SupportMemberA2U_PlayOutMemberCutin, "PlayOutMemberCutin", PLAYER_INDEX_AND_ACTION, VOID, "TrainingParamChangeSupportMemberA2U::PlayOutMemberCutin");
 
-    // The class a training cut-in effect is played on (`introspect.log:26446`): it wraps an
+    // The class a training cut-in effect is played on (`introspect-run45.log:26446`): it wraps an
     // `AnimateToUnity.AnMotion`, and its `Play` doors are the only ones on it that take a number. Run 42 handed the
     // tag cut-in player 167 flash players through `SetResultFlashPlayer` and reached none of these doors because no
     // build had armed them, so this is the first measurement taken on the object the 1.2 s effect leg runs on.
@@ -3458,7 +4347,11 @@ pub fn init(umamusume: *const Il2CppImage) {
     // matcher (A3 for the missing `this`, C48 for the generic arguments).
     static_generic_probe!(main_view, SingleModeMain_SendCommandAsync, "SendCommandAsync", COMMAND_SEND_ARGS, CLASS, "SingleModeMainViewController::SendCommandAsync");
 
-    info!("Cutt probe: {installed} doors installed, {} of them carry a counted kind in the totals line, cut runs measured from the cut start doors to CleanUpCutt and attributed to the view they start on", PROBES.len());
+    info!("{}", census_line(&census, PROBES.len()));
+
+    if !census.disabled.is_empty() {
+        info!("{}", census_disabled_line(&census));
+    }
 
     if !missing.is_empty() {
         info!("Cutt probe: not installed, no class or no matching overload: {}", missing.join(", "));
@@ -3514,6 +4407,68 @@ fn silence_line(silence_sec: i64, exempt_since_last: usize, exempt_total: usize,
         "Cutt probe flow silence {silence_sec} s: {} ran {exempt_since_last} more times ({exempt_total} total) with no call on any other training door; Time.timeScale reads {scale}; {tail}",
         SILENCE_EXEMPT_LABELS[0]
     )
+}
+
+/// The cascade line C54 and C62 are owed, spelled as the shipped report prints it. A run cannot close an item
+/// on a wording its build does not print, so the whole line is here: label `Cutt probe plate cascade:`, then
+/// the aggregate half in this order - `{n} cascades closed mean {mean} ms worst {worst} ms` - then `typewrite
+/// starts {m} inside a cascade mean {mean} ms worst {worst} ms`, then the span tail.
+///
+/// What each half can be read for, stated as far as it actually goes (C56). The aggregate prices a running
+/// total over every cascade that has closed and the largest span among them, and it names one cascade's span
+/// only where exactly one cascade closed between two readings, as the difference of the two totals its mean
+/// prices. The tail is where a span is read rather than solved: the span of every cascade that closed since
+/// the previous reading, in close order, each said as `cascade number=span ms`, written by `close_plate_pass`
+/// at the close, where the probe still knows which cascade it is standing on. The tail holds
+/// `CASCADE_SPAN_RING` spans per reading and names the older spans it dropped instead of letting a replay
+/// assume it read them all.
+///
+/// Run 57 is the run the aggregate half cannot read: it printed this line 127 times, at closed counts 0, 0,
+/// 2, 3, 3, 4 and 5 x121 and never once at 1, and its build had no span tail and no per cascade line at all,
+/// so that log prices four running totals and leaves the run's first two cascades as one 2,552 ms sum. The
+/// spans a replay names for those two are the tail this change set prints for the same cascade boundaries,
+/// not a reading run 57 left behind.
+fn plate_cascade_line(closed: (usize, i64, i64), steps: (usize, i64, i64), ring: &CascadeSpans, printed: usize) -> String {
+    format!(
+        "Cutt probe plate cascade: {} cascades closed mean {:.1} ms worst {} ms, typewrite starts {} inside a cascade mean {:.1} ms worst {} ms{}",
+        closed.0,
+        mean_of(closed.1, closed.0),
+        closed.2,
+        steps.0,
+        mean_of(steps.1, steps.0),
+        steps.2,
+        ring.span_tail(printed)
+    )
+}
+
+/// The hole line C56 is owed, spelled as the shipped report prints it: label `Cutt probe cut holes:`, then
+/// `{n} holes mean {mean} ms worst {worst} ms`, then the pairing `between the training cut-in ending and the
+/// status play out`, then how many holes each of the two door orders produced - `{a} from the cut-in ending to
+/// the play out, {b} from the play out to the cut-in ending`.
+///
+/// The two orders are on the line because they are two different waits, and run 57 is the run that showed the
+/// pairing only reads when the line says which end opened the window: it printed `0 holes mean 0.0 ms` beside
+/// `cut runs 1 wall 8898 ms` because the panel played out first, 20:44:22.847, and the cut-in ended 1,400 ms
+/// later, 20:44:24.247. A line that only ever names the cut-in end reads that shape as a hole that never
+/// happened. This wording replaced the one that ran 16 to run 57 printed, `... worst {worst} ms from the
+/// training cut-in ending to the status play out`, and any owed line that still quotes that ending is a line
+/// no build in this fork prints any more.
+fn hole_line(runs: usize, total_ms: i64, worst_ms: i64, end_runs: &[usize; HOLE_END_COUNT]) -> String {
+    format!(
+        "Cutt probe cut holes: {runs} holes mean {:.1} ms worst {worst_ms} ms between the training cut-in ending and the status play out, {} from the cut-in ending to the play out, {} from the play out to the cut-in ending",
+        mean_of(total_ms, runs),
+        end_runs[HOLE_END_CUT_IN],
+        end_runs[HOLE_END_PLAY_OUT]
+    )
+}
+
+/// The line C54's closing pair names next to the cascade line: label `Cutt probe cut kinds:`, then the
+/// friendship split as `{kind} runs {n} wall {ms} ms` per kind reached, then the cut-in engine's own self
+/// report - `timeline self report total frames peak {frames} last frame peak {frame} target fps {fps}`. It is
+/// the pair that says whether a raised cut scale moved the cascade or only moved a number: the cascade line
+/// prices the cascades, this one says whether the cut-in timeline was stepping beside them.
+fn cut_kinds_line(kinds: &str, total_frames: u32, last_frame: u32, target_fps: u32) -> String {
+    format!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}")
 }
 
 pub fn report_if_due() {
@@ -3634,17 +4589,13 @@ pub fn report_if_due() {
     let gap_ms = CUT_GAP_MS_TOTAL.load(atomic::Ordering::Relaxed);
     let plate_runs = PLATE_STEP_RUNS.load(atomic::Ordering::Relaxed);
     let plate_ms = PLATE_STEP_MS_TOTAL.load(atomic::Ordering::Relaxed);
-    let mean_ms = |total: i64, count: usize| match count {
-        0 => 0.0,
-        n => total as f64 / n as f64,
-    };
 
     info!(
         "Cutt probe cut clocks: tap waits {tap_runs} of {runs} closes mean {:.1} ms, gaps between cuts {gap_runs} mean {:.1} ms worst {} ms, plate list steps {plate_runs} mean {:.1} ms worst {} ms",
-        mean_ms(tap_ms, tap_runs),
-        mean_ms(gap_ms, gap_runs),
+        mean_of(tap_ms, tap_runs),
+        mean_of(gap_ms, gap_runs),
         CUT_GAP_WORST_MS.load(atomic::Ordering::Relaxed),
-        mean_ms(plate_ms, plate_runs),
+        mean_of(plate_ms, plate_runs),
         PLATE_STEP_WORST_MS.load(atomic::Ordering::Relaxed)
     );
 
@@ -3654,12 +4605,14 @@ pub fn report_if_due() {
     let leg_runs = GAP_LEG_BEFORE_RUNS.load(atomic::Ordering::Relaxed);
 
     info!(
-        "Cutt probe gap legs: {leg_runs} of {gap_runs} gaps held a plate list pass, before it mean {:.1} ms worst {} ms, the pass itself mean {:.1} ms worst {} ms, after it mean {:.1} ms worst {} ms, {} gaps held none",
-        mean_ms(GAP_LEG_BEFORE_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
+        "Cutt probe gap legs: {leg_runs} of {gap_runs} gaps held a plate pass, before it mean {:.1} ms worst {} ms, the passes themselves mean {:.1} ms worst {} ms, between passes mean {:.1} ms worst {} ms, after it mean {:.1} ms worst {} ms, {} gaps held none",
+        mean_of(GAP_LEG_BEFORE_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
         GAP_LEG_BEFORE_WORST_MS.load(atomic::Ordering::Relaxed),
-        mean_ms(GAP_LEG_PLATE_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
+        mean_of(GAP_LEG_PLATE_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
         GAP_LEG_PLATE_WORST_MS.load(atomic::Ordering::Relaxed),
-        mean_ms(GAP_LEG_AFTER_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
+        mean_of(GAP_LEG_BETWEEN_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
+        GAP_LEG_BETWEEN_WORST_MS.load(atomic::Ordering::Relaxed),
+        mean_of(GAP_LEG_AFTER_MS_TOTAL.load(atomic::Ordering::Relaxed), leg_runs),
         GAP_LEG_AFTER_WORST_MS.load(atomic::Ordering::Relaxed),
         GAP_WITHOUT_PLATE_RUNS.load(atomic::Ordering::Relaxed)
     );
@@ -3673,9 +4626,9 @@ pub fn report_if_due() {
 
     info!(
         "Cutt probe command legs: {send_runs} sends, {send_to_open_runs} cut opens after a send mean {:.1} ms worst {} ms, {close_to_send_runs} sends after a cut close mean {:.1} ms worst {} ms",
-        mean_ms(SEND_TO_OPEN_MS_TOTAL.load(atomic::Ordering::Relaxed), send_to_open_runs),
+        mean_of(SEND_TO_OPEN_MS_TOTAL.load(atomic::Ordering::Relaxed), send_to_open_runs),
         SEND_TO_OPEN_WORST_MS.load(atomic::Ordering::Relaxed),
-        mean_ms(CLOSE_TO_SEND_MS_TOTAL.load(atomic::Ordering::Relaxed), close_to_send_runs),
+        mean_of(CLOSE_TO_SEND_MS_TOTAL.load(atomic::Ordering::Relaxed), close_to_send_runs),
         CLOSE_TO_SEND_WORST_MS.load(atomic::Ordering::Relaxed)
     );
 
@@ -3683,7 +4636,7 @@ pub fn report_if_due() {
 
     info!(
         "Cutt probe cut wall legs: {played_runs} of {runs} closes asked for a tap, the cut played mean {:.1} ms worst {} ms before it asked",
-        mean_ms(WALL_OPEN_TO_TAP_MS_TOTAL.load(atomic::Ordering::Relaxed), played_runs),
+        mean_of(WALL_OPEN_TO_TAP_MS_TOTAL.load(atomic::Ordering::Relaxed), played_runs),
         WALL_OPEN_TO_TAP_WORST_MS.load(atomic::Ordering::Relaxed)
     );
     let gauge_runs = GAUGE_PLAY_RUNS.load(atomic::Ordering::Relaxed);
@@ -3691,9 +4644,9 @@ pub fn report_if_due() {
 
     info!(
         "Cutt probe plate cadence: gauge plays {gauge_runs} inside a cut or a cascade mean {:.1} ms worst {} ms, plate icon plays {icon_runs} inside a cut or a cascade mean {:.1} ms worst {} ms",
-        mean_ms(GAUGE_PLAY_MS_TOTAL.load(atomic::Ordering::Relaxed), gauge_runs),
+        mean_of(GAUGE_PLAY_MS_TOTAL.load(atomic::Ordering::Relaxed), gauge_runs),
         GAUGE_PLAY_WORST_MS.load(atomic::Ordering::Relaxed),
-        mean_ms(PLATE_PLAY_MS_TOTAL.load(atomic::Ordering::Relaxed), icon_runs),
+        mean_of(PLATE_PLAY_MS_TOTAL.load(atomic::Ordering::Relaxed), icon_runs),
         PLATE_PLAY_WORST_MS.load(atomic::Ordering::Relaxed)
     );
 
@@ -3701,24 +4654,95 @@ pub fn report_if_due() {
     // neither: it counted 22 plate list calls 5,129.3 ms apart and said nothing about the time inside one
     // cascade, which is the difference between a cascade that runs for seconds and a controller that
     // starts a new one every few seconds. Those two need different doors (C54).
+    //
+    // What this line can be read for, stated as far as it actually goes (C56). The mean prices the total of
+    // every cascade closed so far - to within half a tenth of a millisecond per closed cascade, the rounding
+    // of a mean printed to one decimal - and the worst prices the largest of them. Those two give one
+    // cascade's span only when exactly one cascade closed between two readings, as the difference of the two
+    // totals they price. Run 57 is the run that shows the limit, and it is the run this comment used to cite
+    // as its proof: it printed this line 127 times, at closed counts 0 (`run log/hachimi-run57.log:1309`,
+    // `:1483`), 2 (`:1687`), 3 (`:1771`, `:1793`), 4 (`:1834`) and 5 (121 times from `:1879` on, `:3669`
+    // among them), and never once at 1 closed. Its first two cascades therefore left the log as the single
+    // 2,552 ms sum they add to. Reading them as 1,314 ms and 1,238 ms is not a reading off this line: it
+    // borrows the printed worst, which says only that the larger of the two is 1,314 ms and not which
+    // cascade it was, and with three or more cascades closing between readings - and the worst belonging to
+    // a cascade that closed before them - the line splits nothing at all.
+    // `run_57s_cascade_readings_do_not_name_which_of_its_first_two_cascades_was_the_worst` prints both
+    // orders, and each reproduces every reading that run logged.
+    //
+    // The rule has a positive case too. Run 31 printed this line at closed counts 0 (`run
+    // log/hachimi-run31.log:958`), 2 (`:1139`), 6 (`:1317`), 8 (`:1353`, `:1376`) and 9 (81 printings to
+    // `:2505`), so exactly one of its boundaries closed a single cascade: the totals its means price are 737,
+    // 2,196, 2,771 and 3,044 ms, and 3,044 less 2,771 is cascade 9's 273 ms.
+    // `run_31s_cascade_line_names_the_one_span_its_readings_allow_and_leaves_the_rest_as_sums` holds that
+    // arithmetic beside the run 57 half above: a run whose readings name nothing individually, and a run whose
+    // readings name exactly one thing.
+    //
+    // So each cascade's own span is printed here too, in close order, named with the number its window
+    // opened on. That tail is what a replay reads, and it is written at the close, where the probe still
+    // knows which cascade it is standing on. The mean and the worst stay what they always priced - a running
+    // total and a max - and a span is never recovered out of them when several cascades closed between two
+    // readings.
+    //
+    // What the tail holds, and where it stops: `CASCADE_SPAN_RING` spans per reading, oldest first in close
+    // order across the wrap, and a run that closed more than that between two readings is told how many
+    // spans the line is not showing (`the_span_ring_holds_the_last_closes_and_says_which_spans_it_dropped`).
+    // Run 57 read 5 cascades over 127 reports, so its four boundaries would each have fitted. Run 15 is the
+    // one to watch: 17 cascades, which is 16 plus one, and a report that saw all 17 close between two
+    // readings would name 16 and say one was gone.
+    //
+    // The per cascade reading is the narrower half, and it is the debug half. `close_plate_pass` prints
+    // `cascade_line` for the first `PROBE_DETAIL_LIMIT` cascades of a session and only under `debug_mode`:
+    // `core/log.rs:3-9` holds a played build with `debug_mode` off at `LevelFilter::Info`, so a census run
+    // that closes C54 or C62 is a `debug_mode` run by definition, and past cascade 8 the number a cascade
+    // waited on survives only as a count on the pacing line below, never as a line about that cascade. The
+    // spans are the part every cascade gets: the tail is an `info!` and covers every close since the last
+    // reading whether the detail line printed or not.
+    //
+    // A difference between the stamps of two door lines is still not a span either: the stamp is written by
+    // the logger inside the wrapper, the span is a pair of `Instant` reads taken around it, and run 57's
+    // stamp differences (1314.6 / 1237.7 / 1204.7 / 1828.4 / 5105.4 ms) bracket the measured spans within a
+    // millisecond without reproducing the first or the last. `run_57s_five_cascade_replay_prices_the_spans_its_readings_allow_and_its_first_two_as_one_sum`
+    // and `a_cascade_span_is_the_probes_clock_not_the_difference_of_two_log_stamps` hold that arithmetic.
     let pass_runs = PLATE_PASS_RUNS.load(atomic::Ordering::Relaxed);
     let typewrite_runs = PLATE_TYPEWRITE_RUNS.load(atomic::Ordering::Relaxed);
-
-    info!(
-        "Cutt probe plate cascade: {pass_runs} cascades closed mean {:.1} ms worst {} ms, typewrite starts {typewrite_runs} inside a cascade mean {:.1} ms worst {} ms",
-        mean_ms(PLATE_PASS_MS_TOTAL.load(atomic::Ordering::Relaxed), pass_runs),
+    let closed_cascades = (
+        pass_runs,
+        PLATE_PASS_MS_TOTAL.load(atomic::Ordering::Relaxed),
         PLATE_PASS_WORST_MS.load(atomic::Ordering::Relaxed),
-        mean_ms(PLATE_TYPEWRITE_MS_TOTAL.load(atomic::Ordering::Relaxed), typewrite_runs),
-        PLATE_TYPEWRITE_WORST_MS.load(atomic::Ordering::Relaxed)
     );
-    let hole_runs = CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed);
+    let plate_steps = (
+        typewrite_runs,
+        PLATE_TYPEWRITE_MS_TOTAL.load(atomic::Ordering::Relaxed),
+        PLATE_TYPEWRITE_WORST_MS.load(atomic::Ordering::Relaxed),
+    );
+    let ring = cascade_span_ring();
+    let already_printed = CASCADE_SPANS_PRINTED.load(atomic::Ordering::Relaxed);
+    let spans_line = plate_cascade_line(closed_cascades, plate_steps, &ring, already_printed);
 
-    info!(
-        "Cutt probe cut holes: {hole_runs} holes mean {:.1} ms worst {} ms from the training cut-in ending to the status play out",
-        mean_ms(CUT_HOLE_MS_TOTAL.load(atomic::Ordering::Relaxed), hole_runs),
-        CUT_HOLE_WORST_MS.load(atomic::Ordering::Relaxed)
-    );
-    info!("Cutt probe cut kinds:{kinds} timeline self report total frames peak {total_frames} last frame peak {last_frame} target fps {target_fps}");
+    // Every span the ring has taken has now been through a reading, whether the tail could name all of them
+    // or said it could not: a span older than the ring is no longer held, and the line says so rather than
+    // letting a replay assume it read them all.
+    CASCADE_SPANS_PRINTED.store(ring.writes, atomic::Ordering::Relaxed);
+
+    info!("{spans_line}");
+    // What each cascade that closed waits on, counted by the answer rather than by the peak: C54 found the
+    // interval is not the pacing number and C62 found it is a beat above about 0.25 s, and both answers are
+    // now per cascade. A cascade that advanced on none of these numbers is the run saying the wait sits on a
+    // constant this class carries as a literal, or on a door nobody has counted yet.
+    let pace_reported = CASCADE_REPORTED.load(atomic::Ordering::Relaxed);
+    let mut pace_names = String::new();
+
+    for index in 0..=PACE_NONE {
+        let _ = write!(pace_names, " {} {}", PACE_NAMES[index], PACE_RUNS[index].load(atomic::Ordering::Relaxed));
+    }
+
+    info!("Cutt probe plate cascade pacing: {pace_reported} cascades read what they hold, advanced on:{pace_names}");
+    let hole_runs = CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed);
+    let hole_end_runs = [CUT_HOLE_END_RUNS[HOLE_END_CUT_IN].load(atomic::Ordering::Relaxed), CUT_HOLE_END_RUNS[HOLE_END_PLAY_OUT].load(atomic::Ordering::Relaxed)];
+
+    info!("{}", hole_line(hole_runs, CUT_HOLE_MS_TOTAL.load(atomic::Ordering::Relaxed), CUT_HOLE_WORST_MS.load(atomic::Ordering::Relaxed), &hole_end_runs));
+    info!("{}", cut_kinds_line(&kinds, total_frames, last_frame, target_fps));
     info!("Cutt probe training scaling points reached:{doors}");
 
     // A window is printed once, after the picker has moved off it, so the arm a run was on and the cuts
@@ -3874,9 +4898,10 @@ mod tests {
             "a door crossed before the hole opened is not part of the hole"
         );
 
-        let line = hole_census_line(6583, &table);
+        let line = hole_census_line(6583, HOLE_END_NAMES[HOLE_END_CUT_IN], HOLE_END_NAMES[HOLE_END_PLAY_OUT], &table);
         assert!(line.contains("census door crossed three ways = 3"), "the census line names the door and its crossings: {line}");
         assert!(line.contains("over 6583 ms"), "the census line carries the hole it censuses: {line}");
+        assert!(line.contains("from the training cut-in ending to the status play out"), "the census line names the stretch it censused: {line}");
         assert!(!line.contains("before the hole"), "the census line does not carry a door the hole never crossed: {line}");
     }
 
@@ -3900,8 +4925,9 @@ mod tests {
         assert_eq!((entry.lowest, entry.highest), (1.5, 6.0), "the window keeps the spread it saw, not the run peak");
         assert!(entry.valued, "a door that handed a value is reported with one");
 
-        let line = hole_census_line(3400, &table);
+        let line = hole_census_line(3400, HOLE_END_NAMES[HOLE_END_PLAY_OUT], HOLE_END_NAMES[HOLE_END_CUT_IN], &table);
         assert!(line.contains("census clock door handed times = 4 (1.5 to 6 handed)"), "the census line prints the spread next to the crossings: {line}");
+        assert!(line.contains("from the status play out to the training cut-in ending"), "the same census read the other way round names the stretch it actually censused: {line}");
     }
 
     #[test]
@@ -3934,6 +4960,806 @@ mod tests {
         );
     }
 
+    // C56 is the pairing defect: the clock only counted the hole when the cut-in ended before the status
+    // panel played out, and runs 53 and 57 reached the two doors the other way round, so every 20 s report
+    // printed `cut holes: 0 holes` beside a cut that ran 8,898 ms. These drive `pair_hole_open`, the
+    // decision both shipped doors route through, at the timestamps those runs logged.
+    #[test]
+    fn a_cut_hole_pairs_whichever_end_of_it_the_game_reached_first() {
+        // Run 15's order: `OnEndCutIn` at 08:17:42.935, `PlayOut` at 08:17:50.156.
+        assert_eq!(pair_hole_open(-1, HOLE_END_CUT_IN, HOLE_END_CUT_IN, 42_935), None, "the first door opens the window rather than closing one");
+        assert_eq!(pair_hole_open(42_935, HOLE_END_CUT_IN, HOLE_END_PLAY_OUT, 50_156), Some((7_221, HOLE_END_CUT_IN)), "the far door closes it");
+
+        // Run 57's order: `PlayOut` at 20:44:22.847, `OnEndCutIn` at 20:44:24.247. Under the old pairing
+        // this half reported nothing at all, which is the 0 holes the run printed.
+        assert_eq!(pair_hole_open(-1, HOLE_END_PLAY_OUT, HOLE_END_PLAY_OUT, 22_847), None, "the first door opens the window whichever door it is");
+        assert_eq!(pair_hole_open(22_847, HOLE_END_PLAY_OUT, HOLE_END_CUT_IN, 24_247), Some((1_400, HOLE_END_PLAY_OUT)), "and the other door closes it, named from the end that opened it");
+    }
+
+    #[test]
+    fn one_cut_reports_one_hole_even_when_its_far_door_arrives_twice() {
+        // Run 15 called `PlayOut` twice for one cut-in end. The mark is swapped out when it is read, so the
+        // second call opens a fresh window instead of charging the same wait twice.
+        assert_eq!(pair_hole_open(10_000, HOLE_END_CUT_IN, HOLE_END_PLAY_OUT, 17_950), Some((7_950, HOLE_END_CUT_IN)));
+        assert_eq!(pair_hole_open(-1, HOLE_END_CUT_IN, HOLE_END_PLAY_OUT, 17_951), None, "a closed window has no mark left to pair with");
+    }
+
+    #[test]
+    fn two_doors_on_the_same_end_of_a_hole_replace_each_other_instead_of_pairing() {
+        // Two cut-in ends are not a hole, and neither are two play outs. The window moves to the later one
+        // so a cut that never reached its far end is not measured across two cuts.
+        assert_eq!(pair_hole_open(10_000, HOLE_END_CUT_IN, HOLE_END_CUT_IN, 18_000), None, "a cut-in end does not pair with a cut-in end");
+        assert_eq!(pair_hole_open(18_000, HOLE_END_CUT_IN, HOLE_END_PLAY_OUT, 19_000), Some((1_000, HOLE_END_CUT_IN)), "and the window stands on the later mark");
+    }
+
+    #[test]
+    fn a_hole_stretch_is_named_in_the_order_its_doors_were_reached() {
+        assert_eq!(hole_stretch(HOLE_END_CUT_IN), ("the training cut-in ending", "the status play out"));
+        assert_eq!(hole_stretch(HOLE_END_PLAY_OUT), ("the status play out", "the training cut-in ending"));
+    }
+
+    #[test]
+    fn a_hole_mark_a_cut_teardown_left_behind_pairs_with_nothing() {
+        let _turn = CENSUS_TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+
+        // A status play out opened the window and the cut was cleaned before any cut-in end arrived. This
+        // close counts as no cut run at all, and the reset still has to run: a mark standing across a
+        // teardown would be read as the next turn's hole.
+        CUT_HOLE_OPEN_MS.store(22_847, atomic::Ordering::Relaxed);
+        CUT_HOLE_OPEN_END.store(HOLE_END_PLAY_OUT, atomic::Ordering::Relaxed);
+        let holes_before = CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed);
+
+        close_cut_run();
+
+        assert_eq!(CUT_HOLE_OPEN_MS.load(atomic::Ordering::Relaxed), -1, "the teardown drops the mark rather than leaving it standing");
+        assert_eq!(CUT_HOLE_OPEN_END.load(atomic::Ordering::Relaxed), HOLE_END_CUT_IN, "and it forgets which end made it");
+        assert_eq!(
+            pair_hole_open(CUT_HOLE_OPEN_MS.load(atomic::Ordering::Relaxed), CUT_HOLE_OPEN_END.load(atomic::Ordering::Relaxed), HOLE_END_CUT_IN, 92_148),
+            None,
+            "the next turn's doors do not pair across this teardown"
+        );
+        assert_eq!(CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed), holes_before, "a dropped mark is not a hole");
+    }
+
+    // The same two orders driven through `pair_hole_end`, the function both shipped doors call, so the
+    // pairing is proven at the door and not only in the decision behind it.
+    #[test]
+    fn the_shipped_hole_doors_count_the_wall_in_the_order_the_game_reached_them() {
+        let _turn = CENSUS_TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        CUT_HOLE_OPEN_MS.store(-1, atomic::Ordering::Relaxed);
+        CUT_HOLE_OPEN_END.store(HOLE_END_CUT_IN, atomic::Ordering::Relaxed);
+        close_hole_census();
+
+        let holes_before = CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed);
+        let total_before = CUT_HOLE_MS_TOTAL.load(atomic::Ordering::Relaxed);
+        let cut_in_first_before = CUT_HOLE_END_RUNS[HOLE_END_CUT_IN].load(atomic::Ordering::Relaxed);
+        let play_out_first_before = CUT_HOLE_END_RUNS[HOLE_END_PLAY_OUT].load(atomic::Ordering::Relaxed);
+
+        // Run 57's turn: `TrainingCutStatus::PlayOut` at 20:44:22.847, `OnEndCutIn` at 20:44:24.247. Under
+        // the pairing this build replaces, these two calls charged nothing at all.
+        pair_hole_end(HOLE_END_PLAY_OUT, 22_847);
+        pair_hole_end(HOLE_END_CUT_IN, 24_247);
+
+        assert_eq!(CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed), holes_before + 1, "the turn has a hole and the probe counts it");
+        assert_eq!(CUT_HOLE_MS_TOTAL.load(atomic::Ordering::Relaxed) - total_before, 1_400, "and it is priced as the stretch the two doors name");
+        assert_eq!(CUT_HOLE_END_RUNS[HOLE_END_PLAY_OUT].load(atomic::Ordering::Relaxed), play_out_first_before + 1, "filed under the order this cut really walked");
+        assert_eq!(CUT_HOLE_OPEN_MS.load(atomic::Ordering::Relaxed), -1, "a closed pairing leaves no mark standing");
+
+        // Run 15's turn: `OnEndCutIn` at 08:17:42.935, `PlayOut` at 08:17:50.156.
+        pair_hole_end(HOLE_END_CUT_IN, 42_935);
+        pair_hole_end(HOLE_END_PLAY_OUT, 50_156);
+
+        assert_eq!(CUT_HOLE_RUNS.load(atomic::Ordering::Relaxed), holes_before + 2, "the older order still counts, as it always did");
+        assert_eq!(CUT_HOLE_MS_TOTAL.load(atomic::Ordering::Relaxed) - total_before, 1_400 + 7_221, "both orders price the stretch they name");
+        assert_eq!(CUT_HOLE_END_RUNS[HOLE_END_CUT_IN].load(atomic::Ordering::Relaxed), cut_in_first_before + 1);
+        assert!(CUT_HOLE_WORST_MS.load(atomic::Ordering::Relaxed) >= 7_221, "the worst hole is the longest of the two stretches");
+    }
+
+    // C54 asked what paces the group typewrite path and answered it for a whole run off peak values; C62
+    // answered what the interval costs and answered it for a whole run. These drive the per cascade reading.
+    #[test]
+    fn a_cascade_beat_is_the_wall_between_its_first_and_last_typewrite_start() {
+        // Run 57 cascade 3 at the three plate starts its door logging printed, which stops after
+        // `PROBE_DETAIL_LIMIT` calls (20:44:34.532, 34.999 and 35.166). The run's own count puts four
+        // `StartTypewrite` calls inside that cascade, so this is a three plate record of it, not the
+        // whole cascade: the number a replay has to read off the run is the span, not this beat.
+        let cascade = CascadeRead {
+            plates: 3,
+            first_start_ms: 34_532,
+            last_start_ms: 35_166,
+            ..CascadeRead::default()
+        };
+
+        assert_eq!(cascade.beat_ms(), Some(317), "the mean step from one plate start to the next");
+
+        // One plate types nothing after it, and a cascade that never started one has no beat to report.
+        assert_eq!(CascadeRead { plates: 1, first_start_ms: 100, last_start_ms: 100, ..CascadeRead::default() }.beat_ms(), None);
+        assert_eq!(CascadeRead::default().beat_ms(), None);
+    }
+
+    #[test]
+    fn a_cascade_names_the_number_its_plate_steps_land_on() {
+        // Run 57 cascade 3, at the two plate steps its door lines price. `StartTypewrite` calls 6, 7 and 8
+        // are stamped 20:44:34.53229, 34.99975 and 35.16670 (`:1738`/`:1743`/`:1748`), so its two steps are
+        // 467 ms and 167 ms to the millisecond - the probe's own clock reads the same pair within a
+        // millisecond, which is the drift `a_cascade_span_is_the_probes_clock_not_the_difference_of_two_log_stamps`
+        // measures on the spans. The caller hands 1.0 s while the UI holds `_groupInterval` and
+        // `_sequenceInterval` at 0.1666665 (its plate list line, `:1736`). The 167 ms step is that beat; the
+        // second the caller handed is not a step anyone took.
+        let mut cascade = cascade_with_steps(&[467, 167]);
+        cascade.interval = 1.0;
+        cascade.group_interval = 0.1666665;
+        cascade.sequence_interval = 0.1666665;
+
+        assert_eq!(cascade_pace(&cascade), (3, 1), "the two numbers the class holds here are equal, so the report names the one it carries first and the step count says only one step landed on it");
+
+        // The same step with the group interval out of the running names the sequence interval, which is the
+        // reading the line is for.
+        let mut sequence_only = cascade_with_steps(&[167]);
+        sequence_only.interval = 1.0;
+        sequence_only.group_interval = 0.5;
+        sequence_only.sequence_interval = 0.1666665;
+
+        assert_eq!(cascade_pace(&sequence_only), (4, 1), "_sequenceInterval when it is the number the step lands on");
+
+        // Run 57 cascade 5, at the one plate step that run prices for it. Its 5,106 ms span is the worst of
+        // the run's five cascades (`run log/hachimi-run57.log:1879`), and the same sentence quotes the run's
+        // worst plate-to-plate step, 4,220 ms. That step is one of this cascade's, and the record below
+        // carries no other: `run_57s_cascade_5_says_none_for_every_plate_step_its_reports_price` derives from
+        // the reports at `:1834` and `:1879` that the six steps this cascade added total 4,287 ms or 4,288 ms,
+        // so the five steps its door never printed share 67 ms or 68 ms between them. Those five are not
+        // printed at all - `StartTypewrite` call lines stop at call 8, `PROBE_DETAIL_LIMIT`, and this
+        // cascade's calls are the run's 14th to 20th - so they are left out of the record rather than filled
+        // in with numbers the run did not print. What the class held is this cascade's own plate list line
+        // (`:1864`): interval 1.0, `_delay` 0, `_tapWait` 0, `_groupInterval` and `_sequenceInterval`
+        // 0.1666665. Nothing the class holds prices a 4,220 ms step, so the line says none rather than naming
+        // the nearest number.
+        let mut stalled = cascade_with_steps(&[4_220]);
+        stalled.interval = 1.0;
+        stalled.group_interval = 0.1666665;
+        stalled.sequence_interval = 0.1666665;
+
+        assert_eq!(cascade_pace(&stalled), (PACE_NONE, 0), "a cascade waiting on a number the class does not carry says none");
+        assert!(fifth_cascade_carries_only_its_runs_steps(&stalled), "and a record naming this cascade carries only the plate steps run 57 prices for it");
+
+        // The same answer for a cascade that read more than one step and priced none of them. Built for that
+        // shape, not a run's numbers: run 57 supports exactly one step of cascade 5, and inventing a second
+        // one to make the shape is the mistake this test's data has to stay clear of.
+        let mut built = cascade_with_steps(&[1_350, 3_900]);
+        built.delay = 0.5;
+        built.tap_wait = 2.0;
+
+        assert_eq!(cascade_pace(&built), (PACE_NONE, 0), "two steps that land on no number the class holds say none together, not a nearest number each");
+
+        // A number the UI holds at 0 paces nothing, so it is never named as the answer.
+        let mut tap_waited = cascade_with_steps(&[2_100]);
+        tap_waited.tap_wait = 2.1;
+
+        assert_eq!(cascade_pace(&tap_waited), (2, 1), "_tapWait is named when the cascade really is waiting on it");
+    }
+
+    // Builds the record one cascade's doors produced, with the plate steps they measured.
+    fn cascade_with_steps(steps: &[i64]) -> CascadeRead {
+        let mut cascade = CascadeRead { plates: steps.len() + 1, ..CascadeRead::default() };
+
+        for (slot, step_ms) in steps.iter().enumerate().take(CASCADE_BEAT_LIMIT) {
+            cascade.beats[slot] = *step_ms;
+        }
+
+        cascade.beats_seen = steps.len().min(CASCADE_BEAT_LIMIT);
+        cascade
+    }
+
+    #[test]
+    fn a_cascade_line_prices_its_pass_entry_to_completion_and_names_its_pacing() {
+        let mut cascade = cascade_with_steps(&[167]);
+        cascade.index = 3;
+        cascade.open_ms = 34_527;
+        cascade.close_ms = 35_732;
+        cascade.closed_by = "its typewrite end";
+        cascade.interval = 1.0;
+        cascade.group_interval = 0.5;
+        cascade.sequence_interval = 0.1666665;
+        cascade.groups = 2;
+        cascade.advances = 3;
+        cascade.write_ms = 2;
+        cascade.write_runs = 2;
+        cascade.wait_ms = 500;
+        cascade.wait_runs = 2;
+
+        let line = cascade_line(&cascade);
+
+        assert!(line.contains("plate cascade 3 closed 1205 ms from its plate list call to its typewrite end"), "the pass is entry to completion, not entry to the next entry: {line}");
+        assert!(line.contains("held interval 1.0000 s _delay 0.0000 _tapWait 0.0000 _groupInterval 0.5000 s _sequenceInterval 0.1667 s"), "the numbers the class holds are printed next to the interval it was handed: {line}");
+        assert!(line.contains("the plates advance on TrainingParamChangeUI._sequenceInterval of 0.1667 s, in 1 of 1 plate step(s)"), "the verdict names the number the cascade waits on: {line}");
+        assert!(line.contains("type write leg mean 1.0 ms and wait to the next advance mean 250.0 ms"), "the legs the two unreachable constants own are measured off the doors: {line}");
+    }
+
+    // C56 is also a reporting rule, and it is the one a replay breaks on: a cascade's span is what this
+    // module measured at its two doors, and a difference between the stamps of those doors' log lines is
+    // not that span. Run 57 printed its cascade line 127 times over 20 s reports, at closed counts 0 twice
+    // (`run log/hachimi-run57.log:1309`, `:1483`), 2 once (`:1687`), 3 twice (`:1771`, `:1793`), 4 once
+    // (`:1834`) and 5 121 times (from `:1879`, `:3669` among them) - never once at 1 closed - and only the
+    // four readings below have a cascade in them to price: 2 closed mean 1276.0 worst 1314, 3 mean 1252.3
+    // worst 1314, 4 mean 1396.5 worst 1829, 5 mean 2138.4 worst 5106.
+    const RUN57_CASCADE_PRINTINGS: [(usize, usize); 5] = [(0, 2), (2, 1), (3, 2), (4, 1), (5, 121)];
+    const RUN57_CASCADE_READINGS: [(usize, &str, i64); 4] = [(2, "1276.0", 1_314), (3, "1252.3", 1_314), (4, "1396.5", 1_829), (5, "2138.4", 5_106)];
+
+    /// Every whole-millisecond total that formats to the mean a report printed. The mean is `mean_of` over
+    /// whole ms spans, so a printed mean prices its total to within half a tenth of a millisecond per
+    /// reading: one total usually answers it, and that is what makes a cascade's span readable off
+    /// successive reports. Where the count does not divide evenly the run is not readable more exactly than
+    /// the set this returns, so the whole set is kept rather than whichever member is convenient.
+    fn totals_a_mean_prices(count: usize, mean_text: &str) -> Vec<i64> {
+        let near = mean_text.parse::<f64>().expect("the report prints a number") * count as f64;
+        let half_window = count as f64 / 20.0 + 1.0;
+
+        ((near - half_window).floor() as i64..=(near + half_window).ceil() as i64).filter(|total| format!("{:.1}", mean_of(*total, count)) == mean_text).collect()
+    }
+
+    /// The one total a printed mean prices, for the readings whose count divides it cleanly.
+    fn cascade_total_a_mean_prices(count: usize, mean_text: &str) -> i64 {
+        let priced = totals_a_mean_prices(count, mean_text);
+
+        assert_eq!(priced.len(), 1, "the mean {mean_text} over {count} closed cascades prices {priced:?}");
+
+        priced[0]
+    }
+
+    /// The readings of run 57 a set of spans fails, each said the way `report` prints it. Empty says the set
+    /// reproduces the run. A span enters the fold the way the shipped close charges it - as the span the
+    /// guard answers for a window's two clock reads - and the pair of numbers compared is the pair the
+    /// shipped line prints: `mean_of` over the spans closed so far, and the worst of them.
+    fn cascade_readings_a_set_fails(spans: &[i64]) -> Vec<String> {
+        let mut failed = Vec::new();
+        let mut closed = 0usize;
+        let mut total_ms = 0i64;
+        let mut worst_ms = 0i64;
+
+        for (index, span_ms) in spans.iter().copied().enumerate() {
+            let Some(span_ms) = span_from(0, span_ms) else {
+                failed.push(format!("cascade {} closed before it opened", index + 1));
+                continue;
+            };
+
+            closed += 1;
+            total_ms += span_ms;
+            worst_ms = worst_ms.max(span_ms);
+
+            for (count, mean_text, worst_text) in RUN57_CASCADE_READINGS {
+                if count != closed {
+                    continue;
+                }
+
+                let mean = format!("{:.1}", mean_of(total_ms, closed));
+
+                if mean != mean_text {
+                    failed.push(format!("{closed} cascades closed mean {mean} ms, the run printed {mean_text} ms"));
+                }
+
+                if worst_ms != worst_text {
+                    failed.push(format!("{closed} cascades closed worst {worst_ms} ms, the run printed {worst_text} ms"));
+                }
+            }
+        }
+
+        failed
+    }
+
+    #[test]
+    fn run_57s_five_cascade_replay_prices_the_spans_its_readings_allow_and_its_first_two_as_one_sum() {
+        const RUN57_CASCADE_SPANS_MS: [i64; 5] = [1_314, 1_238, 1_205, 1_829, 5_106];
+
+        let failed = cascade_readings_a_set_fails(&RUN57_CASCADE_SPANS_MS);
+
+        assert!(failed.is_empty(), "the five spans this module measured reproduce every cascade report run 57 printed, failed {failed:?}");
+        assert_eq!(RUN57_CASCADE_SPANS_MS.iter().sum::<i64>(), 10_692, "a mean of 2138.4 over 5 closed cascades prices 10,692 ms in total");
+        assert_eq!(RUN57_CASCADE_SPANS_MS.iter().copied().max(), Some(5_106), "and the worst the same sentence quotes is one of the five, not a rounding of a stamp");
+
+        // What the run's readings do pin down: each mean prices exactly one running total, and a span is the
+        // difference of two successive totals wherever exactly one cascade closed between the two readings.
+        // That holds for cascades 3, 4 and 5 here and for nothing earlier. No reading of this run had one
+        // cascade closed, so the first two arrive as a 2,552 ms sum, and quoting them as 1,314 and 1,238
+        // borrows the printed worst. `run_57s_cascade_readings_do_not_name_which_of_its_first_two_cascades_was_the_worst`
+        // is these same four readings with that pair swapped, and it reproduces every one of them. The pair
+        // is priced here as the set its readings allow - the sum and the max - and never as two spans a
+        // replay could read off run 57: that build printed no span tail and no per cascade line at all.
+        let totals: Vec<i64> = RUN57_CASCADE_READINGS.iter().map(|&(count, mean_text, _)| cascade_total_a_mean_prices(count, mean_text)).collect();
+
+        assert_eq!(totals, [2_552, 3_757, 5_586, 10_692], "the four means price four running totals");
+        assert_eq!(RUN57_CASCADE_SPANS_MS[2], totals[1] - totals[0], "cascade 3 is a difference of two totals, the 1,205 ms its door lines also bracket (20:44:34.52773 to 35.73246)");
+        assert_eq!(RUN57_CASCADE_SPANS_MS[3], totals[2] - totals[1], "cascade 4 likewise, and it is also the worst the run printed at four closed");
+        assert_eq!(RUN57_CASCADE_SPANS_MS[4], totals[3] - totals[2], "and cascade 5, the run's worst, at 5,106 ms");
+        assert_eq!(RUN57_CASCADE_SPANS_MS[..2].iter().sum::<i64>(), totals[0], "the first two the aggregate leaves as their sum, which is all it says about them");
+        assert_eq!(RUN57_CASCADE_SPANS_MS[..2].iter().copied().max(), Some(RUN57_CASCADE_READINGS[0].2), "and the 1,314 ms printed as the worst with two closed is the larger of that pair - a premise about which cascade the max belonged to, not a reading off the line");
+        assert!(RUN57_CASCADE_SPANS_MS[..4].iter().copied().max().unwrap_or_default() < RUN57_WORST_PLATE_STEP_MS, "every cascade but the fifth spans less than the run's worst plate-to-plate step, so that 4,220 ms step sits inside cascade 5");
+
+        // The run's worst cascade through the shipped per cascade line. That line only ever prints
+        // `close_ms - open_ms` off the probe's own clock, so the pair here is the measured difference, not
+        // run 57's absolute clock, and it is the line the next census run has to print - at debug level, for
+        // the first `PROBE_DETAIL_LIMIT` cascades of the session - for a replay to be read rather than
+        // solved. Its span is also on the report's span tail, which every cascade gets. The record carries
+        // the one plate step this run prices for cascade 5; the other five are derived only as a bound, in
+        // `run_57s_cascade_5_says_none_for_every_plate_step_its_reports_price`, and never as numbers.
+        let mut fifth = cascade_with_steps(&[RUN57_WORST_PLATE_STEP_MS]);
+        fifth.index = 5;
+        fifth.open_ms = 0;
+        fifth.close_ms = 5_106;
+        fifth.closed_by = "its typewrite end";
+
+        let line = cascade_line(&fifth);
+
+        assert!(line.contains("plate cascade 5 closed 5106 ms from its plate list call to its typewrite end"), "the line says 5,106 ms, the figure the run's own report quotes: {line}");
+        assert!(line.contains("the plates advance on none of these numbers (1 plate step(s) read)"), "and 5,106 ms is still priced by none of the numbers the class holds: {line}");
+    }
+
+    #[test]
+    fn a_cascade_span_is_the_probes_clock_not_the_difference_of_two_log_stamps() {
+        // Run 57's five cascades at the stamps of the door lines that open and close them, in ms from
+        // 20:44:00.000: 8.0325018 -> 9.3470794, 12.657871 -> 13.8956125, 34.5277363 -> 35.7324691,
+        // 67.5799303 -> 69.4083793 and 92.6520255 -> 97.7574584 (`run log/hachimi-run57.log:1535`/`:1566`,
+        // `:1575`/`:1586`, `:1736`/`:1753`, `:1801`/`:1804`, `:1864`/`:1868`).
+        let stamp_pairs = [(8_032, 9_347), (12_657, 13_895), (34_527, 35_732), (67_579, 69_408), (92_652, 97_757)];
+        let stamped: Vec<i64> = stamp_pairs.iter().map(|&(open_ms, close_ms)| span_from(open_ms, close_ms).unwrap_or_default()).collect();
+
+        // Run the stamps through the same guard the shipped close uses and the numbers come out as the
+        // replay that was written for the run - which is the mistake, not the run.
+        assert_eq!(stamped, [1_315, 1_238, 1_205, 1_829, 5_105], "truncated logger stamps give the set the replay used");
+
+        let failed = cascade_readings_a_set_fails(&stamped);
+
+        assert_eq!(stamped.iter().sum::<i64>(), 10_692, "its five members do add to the total the run's last mean prices, which is why the total alone never caught it");
+        assert_eq!(failed.len(), 6, "and the set fails {failed:?} of the readings the same run printed");
+
+        // Moving the error onto cascade 4 to keep a worst of 5,106 is no better a replay. The run printed a
+        // worst of 1,829 ms with four cascades closed, so none of those four is 1,828 ms, and 1,315 ms is
+        // still above the 1,314 ms it printed with only two closed.
+        let shifted = [1_315, 1_238, 1_205, 1_828, 5_106];
+        let shifted_failed = cascade_readings_a_set_fails(&shifted);
+
+        assert_eq!(shifted.iter().sum::<i64>(), 10_692, "this one prices the right total too");
+        assert_eq!(shifted_failed.len(), 5, "and it fails {shifted_failed:?} of the run's readings, two cascades more than the set above");
+    }
+
+    #[test]
+    fn the_cascade_line_of_run_57_was_printed_at_every_report_and_never_with_one_cascade_closed() {
+        // The line is printed by every report, not once per cascade, so a replay works off the readings the
+        // run left and not the ones it would like. Run 57's cascade line printed 127 times at the closed
+        // counts the census above names, and the four readings quoted in the replay are four of those
+        // printings. A span falls out of the mean and the worst as a difference of two totals only where
+        // exactly one cascade closed between the two readings, and no reading of this run had one cascade
+        // closed: its first two cascades land between the reading at 0 closed and the one at 2.
+        let closed_counts: Vec<usize> = RUN57_CASCADE_PRINTINGS.iter().map(|&(count, _)| count).collect();
+        let printings: usize = RUN57_CASCADE_PRINTINGS.iter().map(|&(_, times)| times).sum();
+        let read_counts: Vec<usize> = RUN57_CASCADE_READINGS.iter().map(|&(count, _, _)| count).collect();
+
+        assert_eq!(printings, 127, "how many times the cascade line printed in run 57, not the four times a replay quotes");
+        assert_eq!(closed_counts, [0, 2, 3, 4, 5], "the closed counts it printed, in the order the log shows them");
+        assert!(!closed_counts.contains(&1), "no reading of the run had exactly one cascade closed, which is the only shape a span is a difference of two totals in");
+        assert_eq!(closed_counts[0] + 2, closed_counts[1], "two cascades closed between the first two readings, so the second priced them as one sum");
+        assert_eq!(read_counts, [2, 3, 4, 5], "the readings a replay quotes are one at each count that had a cascade in it");
+    }
+
+    #[test]
+    fn run_57s_cascade_readings_do_not_name_which_of_its_first_two_cascades_was_the_worst() {
+        const WORST_FIRST: [i64; 5] = [1_314, 1_238, 1_205, 1_829, 5_106];
+        const WORST_SECOND: [i64; 5] = [1_238, 1_314, 1_205, 1_829, 5_106];
+
+        assert_ne!(WORST_FIRST, WORST_SECOND, "cascade 1 and cascade 2 swapped, which is the one thing the run's readings leave free about them");
+        assert_eq!(WORST_FIRST.iter().sum::<i64>(), WORST_SECOND.iter().sum::<i64>(), "and the same total, which is why the totals alone never caught the reading that was never taken");
+        assert!(cascade_readings_a_set_fails(&WORST_SECOND).is_empty(), "the swapped pair reproduces every cascade reading run 57 printed");
+
+        let printed = aggregate_readings_a_set_prints(&WORST_FIRST, &[2, 3, 4, 5]);
+        let logged: Vec<(String, i64)> = RUN57_CASCADE_READINGS.iter().map(|&(_, mean_text, worst_ms)| (mean_text.to_string(), worst_ms)).collect();
+
+        assert_eq!(printed, logged, "the four readings folded out of these spans are the four the log holds");
+        assert_eq!(printed, aggregate_readings_a_set_prints(&WORST_SECOND, &[2, 3, 4, 5]), "and folding the swapped pair gives the same four lines, mean and worst alike, so the aggregate is not what picked an order out");
+
+        // The span tail does say it, because it is written at the close rather than read off the aggregate.
+        let first_tail = ring_of(&WORST_FIRST).span_tail(0);
+        let second_tail = ring_of(&WORST_SECOND).span_tail(0);
+
+        assert!(first_tail.contains(" 1=1314 ms 2=1238 ms"), "{first_tail}");
+        assert!(second_tail.contains(" 1=1238 ms 2=1314 ms"), "{second_tail}");
+        assert_ne!(first_tail, second_tail, "the line with the spans on it tells the two runs apart: {first_tail} against {second_tail}");
+    }
+
+    #[test]
+    fn cascades_closing_between_readings_leave_their_sum_and_nothing_else_in_the_aggregate() {
+        // The shape the old sentence generalised from, carried past the point it works in: two cascades close
+        // before the first reading, three between the first reading and the second, and none of those three
+        // reaches the 1,700 ms the first two already printed as the worst. The second reading prices three
+        // more cascades out of a total it cannot cut up, and its worst belongs to a cascade that closed
+        // before them.
+        const SHALLOW: [i64; 5] = [1_700, 300, 900, 400, 300];
+        const DEEP: [i64; 5] = [1_700, 300, 800, 500, 300];
+
+        assert_ne!(SHALLOW[2..], DEEP[2..], "three cascades measured differently");
+        assert_eq!(SHALLOW[2..].iter().sum::<i64>(), DEEP[2..].iter().sum::<i64>(), "with the same total");
+        assert!(SHALLOW[2..].iter().chain(DEEP[2..].iter()).all(|span| *span < 1_700), "and none of them is the worst either reading prints, so the worst says nothing about them");
+        assert_eq!(aggregate_readings_a_set_prints(&SHALLOW, &[2, 5]), aggregate_readings_a_set_prints(&DEEP, &[2, 5]), "two readings that a replay has at hand are the same line for both runs");
+
+        let shallow_tail = ring_of(&SHALLOW).span_tail(0);
+        let deep_tail = ring_of(&DEEP).span_tail(0);
+
+        assert!(shallow_tail.contains(" 3=900 ms 4=400 ms 5=300 ms"), "{shallow_tail}");
+        assert!(deep_tail.contains(" 3=800 ms 4=500 ms 5=300 ms"), "{deep_tail}");
+        assert_ne!(shallow_tail, deep_tail, "and the spans the line prints say which run the log is holding: {shallow_tail} against {deep_tail}");
+    }
+
+    #[test]
+    fn the_cascade_line_still_prints_the_aggregate_half_of_every_line_run_57_logged() {
+        // The five cascade lines run 57 logged (`run log/hachimi-run57.log:1309`, `:1687`, `:1771`, `:1834`,
+        // `:1879`), each rebuilt from the totals its own printed means price. The change set adds a tail to
+        // these lines; the half a replay already reads is held unchanged, byte for byte, by this test.
+        let logged: [(&str, usize, &str, i64, usize, &str, i64); 5] = [
+            ("Cutt probe plate cascade: 0 cascades closed mean 0.0 ms worst 0 ms, typewrite starts 0 inside a cascade mean 0.0 ms worst 0 ms", 0, "0.0", 0, 0, "0.0", 0),
+            ("Cutt probe plate cascade: 2 cascades closed mean 1276.0 ms worst 1314 ms, typewrite starts 3 inside a cascade mean 244.3 ms worst 433 ms", 2, "1276.0", 1_314, 3, "244.3", 433),
+            ("Cutt probe plate cascade: 3 cascades closed mean 1252.3 ms worst 1314 ms, typewrite starts 6 inside a cascade mean 266.8 ms worst 468 ms", 3, "1252.3", 1_314, 6, "266.8", 468),
+            ("Cutt probe plate cascade: 4 cascades closed mean 1396.5 ms worst 1829 ms, typewrite starts 9 inside a cascade mean 229.8 ms worst 468 ms", 4, "1396.5", 1_829, 9, "229.8", 468),
+            ("Cutt probe plate cascade: 5 cascades closed mean 2138.4 ms worst 5106 ms, typewrite starts 15 inside a cascade mean 423.7 ms worst 4220 ms", 5, "2138.4", 5_106, 15, "423.7", 4_220),
+        ];
+
+        for (text, closed, closed_mean, closed_worst, steps, steps_mean, steps_worst) in logged {
+            let closed_total = if closed == 0 { 0 } else { totals_a_mean_prices(closed, closed_mean)[0] };
+            let steps_total = if steps == 0 { 0 } else { totals_a_mean_prices(steps, steps_mean)[0] };
+            let line = plate_cascade_line((closed, closed_total, closed_worst), (steps, steps_total, steps_worst), &ring_of(&[]), 0);
+
+            assert_eq!(line, text, "the shipped line with no cascade closed since its reading, for the reading at {closed} closed");
+        }
+    }
+
+    #[test]
+    fn the_cascade_line_names_every_span_that_closed_between_its_readings() {
+        const RUN57_CASCADE_SPANS_MS: [i64; 5] = [1_314, 1_238, 1_205, 1_829, 5_106];
+        let ring = ring_of(&RUN57_CASCADE_SPANS_MS);
+
+        // Read at the boundaries run 57 actually had, each with the ring that reading found in front of it.
+        // The first reading that named any cascade named two at once, and it named them as two numbers rather
+        // than as the 2,552 ms sum the aggregate left behind.
+        let first = ring_of(&RUN57_CASCADE_SPANS_MS[..2]).span_tail(0);
+        let second = ring_of(&RUN57_CASCADE_SPANS_MS[..3]).span_tail(2);
+        let third = ring_of(&RUN57_CASCADE_SPANS_MS[..4]).span_tail(3);
+        let fourth = ring_of(&RUN57_CASCADE_SPANS_MS[..5]).span_tail(4);
+
+        assert_eq!(first, " cascades closed since the last report: 1=1314 ms 2=1238 ms", "the report run 57 had at two closed gives both cascades");
+        assert_eq!(second, " cascades closed since the last report: 3=1205 ms", "{second}");
+        assert_eq!(third, " cascades closed since the last report: 4=1829 ms", "{third}");
+        assert_eq!(fourth, " cascades closed since the last report: 5=5106 ms", "{fourth}");
+
+        let named: Vec<i64> = [&first, &second, &third, &fourth]
+            .iter()
+            .flat_map(|tail| tail.split_whitespace())
+            .filter_map(|piece| piece.split_once('=').map(|(_, span)| span))
+            .map(|span| span.parse::<i64>().expect("the tail prints whole milliseconds"))
+            .collect();
+
+        assert_eq!(named, RUN57_CASCADE_SPANS_MS, "the four readings name the five spans in close order, which is the replay the old sentence promised and the aggregate could not deliver");
+        assert_eq!(named.iter().sum::<i64>(), cascade_total_a_mean_prices(5, "2138.4"), "and they add up to the total that run's last mean prices, so the tail invented nothing");
+
+        // The shipped line, tail on it, aggregate half unchanged.
+        let line = plate_cascade_line((5, 10_692, 5_106), (15, 6_356, 4_220), &ring, 4);
+
+        assert!(line.starts_with("Cutt probe plate cascade: 5 cascades closed mean 2138.4 ms worst 5106 ms, typewrite starts 15 inside a cascade mean 423.7 ms worst 4220 ms"), "the run's line, as the run printed it: {line}");
+        assert!(line.ends_with(" cascades closed since the last report: 5=5106 ms"), "{line}");
+    }
+
+    #[test]
+    fn a_cascade_line_with_nothing_new_in_it_carries_no_spans() {
+        let ring = ring_of(&[1_314, 1_238]);
+
+        assert_eq!(ring.span_tail(2), "", "only four of run 57's 127 readings had a close no earlier reading had named; the other 123 carry no tail and cost nothing");
+        assert_eq!(plate_cascade_line((2, 2_552, 1_314), (3, 733, 433), &ring, 2), "Cutt probe plate cascade: 2 cascades closed mean 1276.0 ms worst 1314 ms, typewrite starts 3 inside a cascade mean 244.3 ms worst 433 ms", "the line a build before this change set printed, exactly, when nothing closed since the last reading");
+    }
+
+    // The lines the write ups hand to the human, re-derived from the format strings the shipped report builds
+    // them from. Two were quoted as the shipped build does not say them: the hole line ending `from the
+    // training cut-in ending to the status play out` is the wording run 16 through run 57 printed and the
+    // pairing repair replaced it, and the cascade line was quoted as its aggregate half alone, which is the
+    // line this build prints only when nothing closed since its reading. A run cannot close C56, C54 or C62
+    // on a sentence its own build never prints, so each line is pinned in full here - label, fields, order.
+    #[test]
+    fn the_cut_hole_line_c56_is_owed_is_the_both_orders_line_the_shipped_report_prints() {
+        let line = hole_line(2, 14_127, 7_881, &[1, 1]);
+
+        assert_eq!(line, "Cutt probe cut holes: 2 holes mean 7063.5 ms worst 7881 ms between the training cut-in ending and the status play out, 1 from the cut-in ending to the play out, 1 from the play out to the cut-in ending", "{line}");
+
+        // The ending the write up still quotes is not in this sentence any more. A run that went looking for
+        // it found nothing, which is how C56 stayed open on a run that did read the line.
+        assert!(!line.contains(" ms from the training cut-in ending to the status play out"), "the ending an earlier report owed is not a wording this build prints: {line}");
+
+        // Run 57's door order, driven through the shipped pairing at the stamps that run logged: the panel
+        // played out at 20:44:22.847 and the cut-in ended 1,400 ms later, at 20:44:24.247. The window stands
+        // on the play out end, so the orders name it, and the pairing prices the wait the build that run
+        // played left unpriced: that build printed `0 holes mean 0.0 ms worst 0 ms` beside a cut of 8,898 ms.
+        assert_eq!(pair_hole_open(-1, HOLE_END_PLAY_OUT, HOLE_END_PLAY_OUT, 22_847), None, "the panel opens the window");
+        assert_eq!(pair_hole_open(22_847, HOLE_END_PLAY_OUT, HOLE_END_CUT_IN, 24_247), Some((1_400, HOLE_END_PLAY_OUT)), "and the later cut-in end closes it, named from the end that opened it");
+
+        let held = hole_line(1, 1_400, 1_400, &[0, 1]);
+
+        assert_eq!(held, "Cutt probe cut holes: 1 holes mean 1400.0 ms worst 1400 ms between the training cut-in ending and the status play out, 0 from the cut-in ending to the play out, 1 from the play out to the cut-in ending", "the same session, on the line this build prints: {held}");
+    }
+
+    #[test]
+    fn the_plate_cascade_line_c54_and_c62_are_owed_carries_the_span_it_owes_after_the_aggregate_half() {
+        const RUN57_CASCADE_SPANS_MS: [i64; 5] = [1_314, 1_238, 1_205, 1_829, 5_106];
+        let ring = ring_of(&RUN57_CASCADE_SPANS_MS);
+        let line = plate_cascade_line((5, 10_692, 5_106), (15, 6_356, 4_220), &ring, 4);
+
+        assert_eq!(line, "Cutt probe plate cascade: 5 cascades closed mean 2138.4 ms worst 5106 ms, typewrite starts 15 inside a cascade mean 423.7 ms worst 4220 ms cascades closed since the last report: 5=5106 ms", "the whole line as the shipped report prints it at the reading run 57 ended on: {line}");
+
+        // What the line is owed for, and the half a replay has to read it for: the aggregate half prices a
+        // running total and a max, and the tail is where a span is named. A quote that stops at the aggregate
+        // half asks a run for the line of a reading at which no cascade closed, and hands it nothing to read
+        // a span off.
+        assert!(line.contains(" cascades closed since the last report: "), "a cascade line with a span in it is a cascade line with this tail on it: {line}");
+    }
+
+    #[test]
+    fn the_cut_kinds_line_named_beside_the_cascade_line_carries_the_probe_label_and_the_self_report() {
+        // Run 57's reading, kind name and all (`TAG_NAMES` spells them: "tag answer unknown", "friendship
+        // cut", "regular cut"): the run closed one friendship cut of 8,898 ms and its cut-in timeline never
+        // stepped. The line it printed, at `run log/hachimi-run57.log:1773` through `:3716`, is exactly this.
+        let line = cut_kinds_line(" friendship cut runs 1 wall 8898 ms", 0, 0, 0);
+
+        assert_eq!(line, "Cutt probe cut kinds: friendship cut runs 1 wall 8898 ms timeline self report total frames peak 0 last frame peak 0 target fps 0", "the pair C54 is closed on, in full: {line}");
+        assert!(line.starts_with("Cutt probe cut kinds:"), "the line a write up calls `cut kinds:` carries the probe label in front of it: {line}");
+    }
+
+    #[test]
+    fn the_per_cascade_line_c54_and_c62_are_owed_is_said_in_full_at_debug_for_the_first_eight_cascades() {
+        let mut cascade = cascade_with_steps(&[167]);
+        cascade.index = 3;
+        cascade.open_ms = 34_527;
+        cascade.close_ms = 35_732;
+        cascade.closed_by = "its typewrite end";
+        cascade.groups = 2;
+        cascade.advances = 3;
+        cascade.interval = 1.0;
+        cascade.group_interval = 0.5;
+        cascade.sequence_interval = 0.1666665;
+        cascade.write_ms = 2;
+        cascade.write_runs = 2;
+        cascade.wait_ms = 500;
+        cascade.wait_runs = 2;
+
+        assert_eq!(cascade_line(&cascade), "Cutt probe plate cascade 3 closed 1205 ms from its plate list call to its typewrite end: 2 plate start(s), no step between them, 2 group start(s), 3 advance(s), 0 tap screen(s); the UI held interval 1.0000 s _delay 0.0000 _tapWait 0.0000 _groupInterval 0.5000 s _sequenceInterval 0.1667 s; type write leg mean 1.0 ms and wait to the next advance mean 250.0 ms; the plates advance on TrainingParamChangeUI._sequenceInterval of 0.1667 s, in 1 of 1 plate step(s)", "the per cascade line as `close_plate_pass` prints it: {}", cascade_line(&cascade));
+
+        // The limit that belongs on the line a run is told to look for. Run 15 closed 17 cascades, so under
+        // this cap its ninth to seventeenth never got one; their spans were on the report's aggregate, which
+        // prices no span of its own, so those cascades were never readable per cascade at all. The next census
+        // run reads the tail for every span and this line for the first `PROBE_DETAIL_LIMIT` pace answers.
+        assert_eq!(PROBE_DETAIL_LIMIT, 8, "the per cascade line prints for eight cascades of a session, and that is the number a run that needs a ninth one has to plan around");
+    }
+
+    #[test]
+    fn the_span_ring_holds_the_last_closes_and_says_which_spans_it_dropped() {
+        // Twenty cascades close between two readings on a ring that holds sixteen, driven through the writer
+        // the shipped close uses and the reader the shipped report uses. The reading names the last sixteen in
+        // close order and says four are gone, so a replay can tell a partial census from a whole one.
+        let spans: Vec<i64> = (0..CASCADE_SPAN_RING + 4).map(|index| 1_000 + 10 * index as i64).collect();
+
+        for (index, span_ms) in spans.iter().copied().enumerate() {
+            record_cascade_span(index + 1, span_ms);
+        }
+
+        let ring = cascade_span_ring();
+        let tail = ring.span_tail(0);
+
+        assert_eq!(ring.writes, spans.len(), "one span recorded per cascade close");
+        assert_eq!(ring.indexes[..4], [17, 18, 19, 20], "the ring wrapped: its oldest slots now hold the newest closes");
+        assert_eq!(ring.indexes[4], 5, "and the slot after them holds the oldest span still kept");
+        assert!(tail.contains(" cascades closed since the last report: 5=1040 ms"), "and the tail still reads them in close order: {tail}");
+        assert!(tail.contains(" 16=1150 ms 17=1160 ms"), "straight across the wrap: {tail}");
+        assert!(tail.contains(" 20=1190 ms"), "{tail}");
+        assert!(tail.contains(" (the last 16 of 20 closes, 4 older spans no longer held)"), "and says what it cannot hold: {tail}");
+        assert!(!tail.contains(" 1=1000 ms"), "the four spans older than the ring are named as missing, not quietly dropped: {tail}");
+    }
+
+    // The same rule read off a log that does have a one cascade boundary, so the rule is not only a limit.
+    // Run 31 printed the cascade line 86 times, at closed counts 0 (`run log/hachimi-run31.log:958`), 2
+    // (`:1139`), 6 (`:1317`), 8 (`:1353`, `:1376`) and 9 (81 printings from `:1409` to `:2505`), and its build
+    // had no span tail. Only the last of those boundaries closed a single cascade.
+    #[test]
+    fn run_31s_cascade_line_names_the_one_span_its_readings_allow_and_leaves_the_rest_as_sums() {
+        let readings: [(usize, &str, i64); 4] = [(2, "368.5", 378), (6, "366.0", 390), (8, "346.4", 390), (9, "338.2", 390)];
+        let mut totals: Vec<i64> = vec![0];
+
+        totals.extend(readings.iter().map(|(closed, printed, _)| {
+            let candidates: Vec<i64> = (0..=20_000_i64).filter(|total| format!("{:.1}", mean_of(*total, *closed)) == *printed).collect();
+
+            assert_eq!(candidates.len(), 1, "a printed mean and closed count price one running total, and more than one candidate would mean the readings are not pinned: {candidates:?}");
+            candidates[0]
+        }));
+
+        assert_eq!(totals, [0, 737, 2_196, 2_771, 3_044], "each reading prices exactly one total over the cascades closed so far: {totals:?}");
+
+        // The 8 to 9 boundary closed one cascade, so its span is the difference of two totals the log prints,
+        // and nothing else about that cascade is needed to price it.
+        assert_eq!(totals[4] - totals[3], 273, "cascade 9 closed 273 ms, and run 31's readings are what show it");
+
+        // Every other boundary closed several cascades. The 2 to 6 boundary is four cascades inside 1,459 ms,
+        // and two different span sets answer every reading that run logged, so the log cannot say which of
+        // them ran.
+        assert_eq!(totals[2] - totals[1], 1_459, "the 2 to 6 boundary is a four cascade sum, not a span");
+
+        let pinned = [378, 359, 390, 390, 345, 334, 300, 275, 273];
+        let swapped = [359, 378, 390, 389, 340, 340, 300, 275, 273];
+        let at_closed = [2, 6, 8, 9];
+
+        assert_eq!(
+            aggregate_readings_a_set_prints(&pinned, &at_closed),
+            aggregate_readings_a_set_prints(&swapped, &at_closed),
+            "two different cascade sets print run 31's readings identically, so only the 273 ms span is a span that log shows"
+        );
+        assert_eq!(pinned[8], swapped[8], "and the one span both sets have to share is the one the readings name");
+    }
+
+    /// The pair the cascade line prints - `mean_of` over every span closed so far, and the worst of them -
+    /// at each closed count in `at_closed`, folded the way `close_plate_pass` charges a span. Two span sets
+    /// that answer this identically are a pair the aggregate cannot tell apart, however different the
+    /// cascades they describe are.
+    fn aggregate_readings_a_set_prints(spans: &[i64], at_closed: &[usize]) -> Vec<(String, i64)> {
+        let mut printed = Vec::new();
+        let mut closed = 0usize;
+        let mut total_ms = 0i64;
+        let mut worst_ms = 0i64;
+
+        for span_ms in spans.iter().copied() {
+            closed += 1;
+            total_ms += span_ms;
+            worst_ms = worst_ms.max(span_ms);
+
+            if at_closed.contains(&closed) {
+                printed.push((format!("{:.1}", mean_of(total_ms, closed)), worst_ms));
+            }
+        }
+
+        printed
+    }
+
+    /// The span ring as `record_cascade_span` leaves it for a run that closed `spans.len()` cascades, fewer
+    /// than the ring holds: slot order is close order, and no reading has named any of them yet.
+    fn ring_of(spans: &[i64]) -> CascadeSpans {
+        let mut ring = CascadeSpans::default();
+
+        for (index, span_ms) in spans.iter().copied().enumerate() {
+            ring.spans[index] = span_ms;
+            ring.indexes[index] = index + 1;
+        }
+
+        ring.writes = spans.len();
+        ring
+    }
+
+    // The cascade reading prices every cascade closed so far, and the typewrite reading prices every plate
+    // step taken inside those cascades, so two successive readings price the steps of the cascade that
+    // closed between them. That is the only way run 57's fifth cascade can be said step by step: the door
+    // prints eight `StartTypewrite` calls (`PROBE_DETAIL_LIMIT`) and that cascade walked the run's 14th to
+    // 20th, so not one of its six steps was ever printed. The four readings, each with the cascade count the
+    // same report printed: 2 closed and 3 steps mean 244.3 worst 433 (`run log/hachimi-run57.log:1687`), 3
+    // closed and 6 steps mean 266.8 worst 468 (`:1771`), 4 closed and 9 steps mean 229.8 worst 468 (`:1834`),
+    // 5 closed and 15 steps mean 423.7 worst 4220 (`:1879`).
+    const RUN57_STEPS_WHEN_FOUR_CLOSED: usize = 9;
+    const RUN57_STEPS_WHEN_FIVE_CLOSED: usize = 15;
+    const RUN57_WORST_PLATE_STEP_MS: i64 = 4_220;
+
+    // What those two readings leave the fifth cascade's plate steps, both re-derived from the means a test
+    // asserts rather than carried here on trust: its steps total 4,287 ms or 4,288 ms, so a step the door
+    // never printed is at most 4,288 - 4,220 = 68 ms.
+    const RUN57_FIFTH_CASCADE_STEPS_TOTAL_MS: i64 = 4_288;
+    const RUN57_UNPRINTED_STEP_CEILING_MS: i64 = 68;
+
+    /// What run 57's fifth cascade held, read off its own `InitializePlateList` call 5 line
+    /// (`run log/hachimi-run57.log:1864`: 1.0, 0.0, 0.0, 0.16666650772094727, 0.16666650772094727), carrying
+    /// the plate steps `steps`.
+    fn run_57s_fifth_cascade(steps: &[i64]) -> CascadeRead {
+        let mut cascade = cascade_with_steps(steps);
+        cascade.index = 5;
+        cascade.interval = 1.0;
+        cascade.group_interval = 0.1666665;
+        cascade.sequence_interval = 0.1666665;
+        cascade
+    }
+
+    /// Whether a record of run 57's fifth cascade carries only plate steps that run can price for it. The
+    /// run printed exactly one step of it, its worst at 4,220 ms, and left five steps that share 67 ms or 68
+    /// ms between them, so a record of this cascade may hold any share of that 68 ms, or that printed step,
+    /// or the printed step beside a share of it - but never a second step above the ceiling, and never more
+    /// in total than the cascade's steps cost. A record that fails this names a step the run did not price:
+    /// a number invented for the cascade rather than read off it.
+    fn fifth_cascade_carries_only_its_runs_steps(cascade: &CascadeRead) -> bool {
+        let steps: Vec<i64> = cascade.beats.iter().copied().take(cascade.beats_seen).collect();
+        let printed: Vec<i64> = steps.iter().copied().filter(|step| *step > RUN57_UNPRINTED_STEP_CEILING_MS).collect();
+        let total_ms: i64 = steps.iter().sum();
+
+        match printed.as_slice() {
+            [] => !steps.is_empty() && total_ms <= RUN57_UNPRINTED_STEP_CEILING_MS,
+            [worst_ms] => *worst_ms == RUN57_WORST_PLATE_STEP_MS && total_ms <= RUN57_FIFTH_CASCADE_STEPS_TOTAL_MS,
+            _ => false,
+        }
+    }
+
+    /// Does a plate step of `step_ms` land on candidate `index` of the numbers `held` carries? A candidate
+    /// the class holds at 0 paces nothing and `cascade_pace` skips it, so no step lands on it either.
+    fn a_step_lands_on(held: &CascadeRead, index: usize, step_ms: i64) -> bool {
+        let value_ms = f64::from(pace_value(held, index)) * f64::from(MS_PER_SECOND);
+
+        value_ms > 0.0 && beats_against(&cascade_with_steps(&[step_ms]), value_ms).0 == 1
+    }
+
+    #[test]
+    fn run_57s_cascade_5_says_none_for_every_plate_step_its_reports_price() {
+        // Each reading's mean prices its whole millisecond total, and the difference between two successive
+        // totals is what the cascade that closed between them cost in plate steps.
+        let before_ms = cascade_total_a_mean_prices(RUN57_STEPS_WHEN_FOUR_CLOSED, "229.8");
+        let after_ms = totals_a_mean_prices(RUN57_STEPS_WHEN_FIVE_CLOSED, "423.7");
+
+        assert_eq!(before_ms, 2_068, "the plate steps taken when four cascades had closed price 2,068 ms");
+        assert_eq!(after_ms, [6_355, 6_356], "the run's last mean 423.7 over 15 steps prices {after_ms:?} ms, and the run is not readable more exactly than that");
+
+        // The fifth cascade is the only one that closed between those two readings, and it closed inside the
+        // interval they bracket: its plate list call is at 20:45:32.652 and its typewrite end at
+        // 20:45:37.757 (`:1864`/`:1868`), against the fourth cascade's typewrite end at 20:45:09.408
+        // (`:1804`), which is before the nine step reading taken at 20:45:23. A plate step needs both its
+        // ends inside one open cascade and `close_plate_pass` drops the previous mark, so no step spans two
+        // cascades and the idle between them priced nothing. The steps the later reading adds are the fifth
+        // cascade's, and only its.
+        let fifth_ms: Vec<i64> = after_ms.iter().map(|total| total - before_ms).collect();
+        let unprinted_ms: Vec<i64> = fifth_ms.iter().map(|total| total - RUN57_WORST_PLATE_STEP_MS).collect();
+
+        assert_eq!(fifth_ms, [4_287, 4_288], "the plate steps the fifth cascade added total {fifth_ms:?} ms");
+        assert!(fifth_ms.iter().all(|total| *total <= 5_106), "steps inside a cascade cannot total more than that cascade's own 5,106 ms span");
+        assert_eq!(unprinted_ms, [67, 68], "the worst step counted with four cascades closed was 468 ms and the worst with five is 4,220 ms, so the 4,220 ms step is one of these and the steps the door never printed share {unprinted_ms:?} ms");
+
+        // The same six read off the call totals rather than the step totals: 13 `StartTypewrite` calls with
+        // four cascades closed (`:1827`) and 20 with five (`:1872`), and a cascade's first call has no step
+        // in front of it.
+        const RUN57_TYPEWRITE_CALLS_WITH_FOUR_CLOSED: usize = 13;
+        const RUN57_TYPEWRITE_CALLS_WITH_FIVE_CLOSED: usize = 20;
+
+        assert_eq!(RUN57_TYPEWRITE_CALLS_WITH_FIVE_CLOSED - RUN57_TYPEWRITE_CALLS_WITH_FOUR_CLOSED - 1, RUN57_STEPS_WHEN_FIVE_CLOSED - RUN57_STEPS_WHEN_FOUR_CLOSED, "seven calls make the six steps the step totals already said");
+        assert_eq!(fifth_ms.iter().copied().max(), Some(RUN57_FIFTH_CASCADE_STEPS_TOTAL_MS), "so the total the record helper quotes is the larger of the two this reading prices");
+        assert_eq!(unprinted_ms.iter().copied().max(), Some(RUN57_UNPRINTED_STEP_CEILING_MS), "and no single step the door left unprinted can be more than {RUN57_UNPRINTED_STEP_CEILING_MS} ms");
+
+        // And every step this run prices for that cascade says none, printed or not. The 4,220 ms step is
+        // 3,220 ms from the 1.0 s interval the caller handed and 4,053 ms from the 0.1666665 s beat the class
+        // holds; a step at or under the 68 ms the unprinted ones share at most is at least 98 ms from that
+        // beat and 932 ms from the interval, and 68 ms is the nearest a step that small gets to either, both
+        // numbers standing above it. So `none` is the cascade's answer, not an artefact of the one step a
+        // record is allowed to carry.
+        let held = run_57s_fifth_cascade(&[]);
+
+        assert_eq!(cascade_pace(&run_57s_fifth_cascade(&[RUN57_WORST_PLATE_STEP_MS])), (PACE_NONE, 0), "the one plate step the run printed for this cascade prices none of the numbers it held");
+
+        for index in 0..PACE_CANDIDATES {
+            assert!(!a_step_lands_on(&held, index, RUN57_WORST_PLATE_STEP_MS), "the run's 4,220 ms plate step does not land on {}", PACE_NAMES[index]);
+
+            for step_ms in 0..=RUN57_UNPRINTED_STEP_CEILING_MS {
+                assert!(!a_step_lands_on(&held, index, step_ms), "nor does a step of {step_ms} ms, which is as close as any step the door left unprinted gets to {}", PACE_NAMES[index]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_record_of_run_57s_fifth_cascade_is_refused_when_it_names_a_step_that_run_did_not_price() {
+        // The record the pace reading carries for this cascade: the one step the run prices for it.
+        assert!(fifth_cascade_carries_only_its_runs_steps(&run_57s_fifth_cascade(&[RUN57_WORST_PLATE_STEP_MS])), "the run's printed step is a record of this cascade");
+        assert!(fifth_cascade_carries_only_its_runs_steps(&run_57s_fifth_cascade(&[RUN57_UNPRINTED_STEP_CEILING_MS])), "so is a step the size of everything its door left unprinted");
+        assert!(fifth_cascade_carries_only_its_runs_steps(&run_57s_fifth_cascade(&[RUN57_WORST_PLATE_STEP_MS, RUN57_UNPRINTED_STEP_CEILING_MS])), "and the printed step beside that whole share, which is what its six steps cost in total");
+
+        // The pair this test's data once carried: the run's worst step beside a second step of 3,100 ms.
+        // 4,220 ms plus 3,100 ms is 7,320 ms of plate steps in a cascade whose six steps total 4,288 ms at
+        // the outside and whose whole span is 5,106 ms, and it is more than the 6,355 ms the run priced for
+        // all fifteen plate steps of all five cascades. Two steps above the ceiling is two printed steps,
+        // and this run printed one of this cascade's.
+        assert!(!fifth_cascade_carries_only_its_runs_steps(&run_57s_fifth_cascade(&[RUN57_WORST_PLATE_STEP_MS, 3_100])), "a second step that big is refused, whatever it makes the pace answer");
+
+        // And a record cannot quietly invent several small ones either: the unprinted steps share 68 ms in
+        // total, not 68 ms each.
+        assert!(!fifth_cascade_carries_only_its_runs_steps(&run_57s_fifth_cascade(&[RUN57_UNPRINTED_STEP_CEILING_MS, RUN57_UNPRINTED_STEP_CEILING_MS])), "two steps of the ceiling are more than the unprinted steps share between them");
+    }
+
     #[test]
     fn peak_merge_keeps_the_largest_finite_non_negative_value() {
         let after = peak_merge(0, 1.5);
@@ -3945,30 +5771,51 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_splits_at_the_plate_list_calls_inside_it() {
-        // The shape run 12 read four times: a close, a plate list pass during the idle, then the next cut
-        // opening. The three legs are the whole gap, so whatever the plate list was not doing stays
-        // visible as time on one side of it instead of disappearing into a mean.
-        let legs = gap_legs(1_000, 2_000, 6_000, 9_000).expect("a gap with a plate list pass between its ends has legs");
+    fn a_gap_splits_at_the_plate_passes_inside_it() {
+        // The shape run 12 read four times: a close, a plate pass during the idle, then the next cut
+        // opening. The four legs are the whole gap, so whatever the pass was not doing stays visible as time
+        // on one side of it or as the idle between two passes, instead of disappearing into a mean.
+        let legs = gap_legs(1_000, 2_000, 6_000, 4_000, 9_000).expect("a gap with a plate pass between its ends has legs");
 
-        assert_eq!(legs, (1_000, 4_000, 3_000), "before the plate list, the pass itself, after it");
-        assert_eq!(legs.0 + legs.1 + legs.2, 9_000 - 1_000, "the legs are the gap, with nothing invented and nothing lost");
+        assert_eq!(legs, (1_000, 4_000, 0, 3_000), "before the pass, the pass itself, nothing between passes, after it");
+        assert_eq!(legs.0 + legs.1 + legs.2 + legs.3, 9_000 - 1_000, "the legs are the gap, with nothing invented and nothing lost");
     }
 
     #[test]
-    fn a_plate_list_mark_out_of_order_leaves_the_gap_whole() {
+    fn a_gap_leg_prices_a_pass_entry_to_completion_and_names_the_idle_between_passes() {
+        // Run 49b read `the pass itself mean 26,634.3 ms worst 79,903 ms` out of a door bounded at 0.25 s per
+        // plate. Two passes that each took 500 ms inside a 9 s gap are the same reading: the pass is its
+        // entry to its completion, and what sits between one completion and the next entry is its own leg.
+        let legs = gap_legs(1_000, 2_000, 8_500, 1_000, 10_000).expect("a gap with two passes between its ends has legs");
+
+        assert_eq!(legs, (1_000, 1_000, 5_500, 1_500), "the passes are charged 1,000 ms, not the 6,500 ms from the first call to the last");
+        assert_eq!(legs.0 + legs.1 + legs.2 + legs.3, 10_000 - 1_000, "the legs are still the whole gap");
+    }
+
+    #[test]
+    fn a_pass_span_that_reaches_past_the_gap_is_trimmed_rather_than_inventing_a_negative_leg() {
+        // The sum the probe accumulated and the marks the gap is cut at come from different doors. A sum
+        // larger than the span between the first entry and the last completion is a pairing this probe did
+        // not earn, and the trim keeps the legs a reading rather than an artefact.
+        let legs = gap_legs(1_000, 2_000, 3_000, 9_000, 9_000).expect("a gap with a pass between its ends has legs");
+
+        assert_eq!(legs, (1_000, 1_000, 0, 6_000), "the pass leg is what the gap can hold");
+    }
+
+    #[test]
+    fn a_plate_pass_mark_out_of_order_leaves_the_gap_whole() {
         // Every mark comes from one clock, so a mark outside the gap is a pairing this probe did not earn.
         // A leg made from it would move the claim rather than support it.
-        assert_eq!(gap_legs(1_000, 500, 6_000, 9_000), None, "a plate list call before the close is not in the gap");
-        assert_eq!(gap_legs(1_000, 2_000, 12_000, 9_000), None, "a plate list call after the next open is not in the gap");
-        assert_eq!(gap_legs(-1, 2_000, 6_000, 9_000), None, "a gap with no close is not a gap");
+        assert_eq!(gap_legs(1_000, 500, 6_000, 1_000, 9_000), None, "a pass entry before the close is not in the gap");
+        assert_eq!(gap_legs(1_000, 2_000, 12_000, 1_000, 9_000), None, "a pass completion after the next open is not in the gap");
+        assert_eq!(gap_legs(-1, 2_000, 6_000, 1_000, 9_000), None, "a gap with no close is not a gap");
     }
 
     #[test]
-    fn a_gap_with_no_plate_list_pass_counts_as_one_gap() {
-        // The caller counts these apart so the report cannot read three legs of zero as an explanation of
+    fn a_gap_with_no_plate_pass_counts_as_one_gap() {
+        // The caller counts these apart so the report cannot read four legs of zero as an explanation of
         // an idle the probe never saw a door in.
-        assert_eq!(gap_legs(1_000, -1, -1, 9_000), None);
+        assert_eq!(gap_legs(1_000, -1, -1, 0, 9_000), None);
     }
 
     // A door that reports its values and keeps a peak counts one call. The peaked doors that printed
@@ -4290,5 +6137,557 @@ mod tests {
         }
 
         assert_eq!(gate.tick(), Some(CUT_GATE_HOLD_TICKS));
+    }
+
+    // The gate's arming, which is what the C57 write guard now stands on. Every one of these shapes used
+    // to reach a played build as nothing at all: the resolver's own miss lines are debug level
+    // (`AnimationSpeed.rs:1692`, `:1709`), the file filter is Info whenever `debug_mode` is off
+    // (`core/log.rs:3-9`), and the install line required at least one armed door and a non-debug build.
+    //
+    // `gate_arming` only asks whether the resolver answered, so the two addresses below stand in for that
+    // answer and neither is ever dereferenced: a test proves the decision, never the hook.
+    const RESOLVED: usize = 0x1000;
+    const NO_TARGET: usize = 0;
+
+    fn gate_keys(keys: &[&'static str]) -> FnvHashSet<String> {
+        keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    // The ids the `new_hook!:` lines of a played build print for this module's gate sites, and for the two
+    // `probe!` sites the census tests below arm. Spelled out because the whole point of checking them is
+    // that they are the strings a run reads, not an approximation of them.
+    const GATE_OPEN_ID: &str = "umamusume::TrainingCuttProbe::TrainingCutt_PlayTrainingCut";
+    const GATE_SCENARIO_ID: &str = "umamusume::TrainingCuttProbe::TrainingCutt_PlayScenarioTrainingCut";
+    const GATE_CLOSE_ID: &str = "umamusume::TrainingCuttProbe::TrainingCutt_CleanUpCutt";
+    const GATE_DOOR_IDS: [&str; 3] = [GATE_OPEN_ID, GATE_SCENARIO_ID, GATE_CLOSE_ID];
+    const PLAY_TRAINING_CUT_END_ID: &str = "umamusume::TrainingCuttProbe::TrainingCutt_PlayTrainingCutEndAsync";
+    const PLAY_IN_TRAINING_STATUS_ID: &str = "umamusume::TrainingCuttProbe::TrainingCutt_PlayInTrainingStatus";
+
+    #[test]
+    fn the_gate_arms_behind_the_ids_new_hook_keys_those_sites_on() {
+        use crate::il2cpp::hook::hook_is_disabled;
+
+        // `disabled_hooks` is keyed on the arming site, and `new_hook!` builds that key as
+        // `hook_id(module_path!() + "::" + the wrapper name)` (`hook/mod.rs:291`). The door check has to
+        // spell the same key or it answers for a hook this file does not arm - the C27 mistake pointed the
+        // other way. These are the three ids the log prints for these sites.
+        let ids: Vec<&'static str> = gate_doors().iter().map(|door| door.id).collect();
+        assert_eq!(
+            ids,
+            [
+                "umamusume::TrainingCuttProbe::TrainingCutt_PlayTrainingCut",
+                "umamusume::TrainingCuttProbe::TrainingCutt_PlayScenarioTrainingCut",
+                "umamusume::TrainingCuttProbe::TrainingCutt_CleanUpCutt",
+            ],
+            "the gate is checking ids these arming sites do not answer to"
+        );
+
+        // And it answers with the same rule the shipped arming path decides from, for every shape of key a
+        // config may hold: the id, the bare wrapper name a config written before ids existed holds,
+        // another hook's id, a typo, a half written module path.
+        let shapes: [&'static str; 4] = [
+            "TrainingCutt_CleanUpCutt",
+            "umamusume::NowLoading::Hide",
+            "TrainingCutt_PlayTrainingCutt2",
+            "TrainingCuttProbe::TrainingCutt_CleanUpCutt",
+        ];
+
+        for shape in shapes {
+            let configured = gate_keys(&[shape]);
+
+            for door in gate_doors() {
+                assert_eq!(
+                    key_putting_door_down(&configured, door.id).is_some(),
+                    hook_is_disabled(&configured, door.id),
+                    "the gate's door check and `hook_is_disabled` disagree about {shape:?} and {}",
+                    door.id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_config_naming_nothing_arms_every_door_the_gate_asks_for() {
+        // The neutral half: `Config::disabled_hooks` is `#[serde(default)]`, an empty set is what a config
+        // that says nothing about it holds, and an empty set changes nothing about this gate - the same
+        // three doors and the same install line `529e4f5` was measured with in game.
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&[]));
+
+        assert_eq!(arming.armed, 3);
+        assert_eq!(arming.resolved, 3);
+        assert!(arming.complete());
+        assert!(arming.open_armed && arming.close_armed);
+        assert!(arming.unresolved.is_empty() && arming.disabled.is_empty());
+
+        let line = cut_gate_armed_line(&arming);
+        assert!(line.contains("ui clock held at 1.0 while a training cut plays"), "{line}");
+        assert!(line.contains("armed on 3 of 3 doors"), "{line}");
+        assert!(line.contains("3 of 3 resolved"), "{line}");
+        assert!(!line.contains("inert"), "{line}");
+    }
+
+    #[test]
+    fn a_door_that_resolved_and_was_put_down_is_not_counted_as_armed() {
+        // The C57 shape. `resolve_method` answered an address for all three doors - the half the count used
+        // to stop at - and the player's config named one of them, so `new_hook!` took its other branch and
+        // created no hook. The gate has two doors, and the number a run reads has to say two rather than
+        // print `armed on 3 of 3 doors` about a gate missing a door it armed nothing on.
+        let key = "umamusume::TrainingCuttProbe::TrainingCutt_PlayTrainingCut";
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys([key].as_slice()));
+
+        assert_eq!(arming.resolved, 3, "the client does have all three methods; that half is still true");
+        assert_eq!(arming.armed, 2, "a door a `disabled_hooks` key put down was counted as armed");
+        assert!(!arming.complete(), "an incomplete gate took the all-armed line");
+        assert!(arming.open_armed, "`PlayScenarioTrainingCut` is armed, so this gate can still open a hold");
+        assert!(arming.close_armed);
+        assert!(arming.unresolved.is_empty());
+        assert_eq!(arming.disabled.len(), 1);
+        assert_eq!(arming.disabled[0].0, GATE_DOOR_LABELS[0]);
+        assert_eq!(arming.disabled[0].1, key);
+
+        let line = cut_gate_missing_line(&arming, true);
+        assert!(line.contains("armed on 2 of 3 doors"), "{line}");
+        assert!(line.contains("3 of 3 resolved"), "{line}");
+        assert!(line.contains(key), "{line}");
+        assert!(line.contains(GATE_DOOR_LABELS[0]), "{line}");
+        assert!(!line.contains("inert"), "{line}");
+    }
+
+    #[test]
+    fn a_bare_wrapper_name_key_puts_a_gate_door_down_the_way_it_puts_any_hook_down() {
+        // A config written while `disabled_hooks` matched on the wrapper name still reaches the door
+        // (C27), and the gate counts it as unarmed the same way it counts an id.
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&["TrainingCutt_CleanUpCutt"]));
+
+        assert_eq!(arming.resolved, 3);
+        assert_eq!(arming.armed, 2, "the bare key put the close door down and it still counted as armed");
+        assert!(arming.open_armed);
+        assert!(!arming.close_armed);
+        assert_eq!(arming.disabled[0].0, GATE_DOOR_LABELS[2]);
+
+        // What that costs is the tick bound, and the line says it.
+        let line = cut_gate_missing_line(&arming, true);
+        assert!(line.contains("armed on 2 of 3 doors"), "{line}");
+        assert!(line.contains(&format!("only on its {} game tick bound", CUT_GATE_HOLD_TICKS)), "{line}");
+        assert!(!line.contains("the cut gate is inert"), "{line}");
+    }
+
+    #[test]
+    fn a_gate_whose_doors_disabled_hooks_put_down_reports_itself_inert() {
+        // Every door resolved, every door put down: the shape a played build used to read as a working
+        // gate. `armed > 0` called it armed, `engaged()` answered the way a closed cut answers, no
+        // refusal was ever reachable, and the install line printed
+        // `Cutt gate: ui clock held at 1.0 while a training cut plays, armed on 3 of 3 doors`.
+        let arming = gate_arming(
+            RESOLVED,
+            RESOLVED,
+            RESOLVED,
+            &gate_keys(&[
+                "umamusume::TrainingCuttProbe::TrainingCutt_PlayTrainingCut",
+                "umamusume::TrainingCuttProbe::TrainingCutt_PlayScenarioTrainingCut",
+                "TrainingCutt_CleanUpCutt",
+            ]),
+        );
+
+        assert_eq!(arming.resolved, 3);
+        assert_eq!(arming.armed, 0);
+        assert!(!arming.open_armed && !arming.close_armed);
+
+        // The answer the three shipped decisions read is `false` all session for this build, and only the
+        // install line says that no door able to open a hold armed.
+        let line = cut_gate_missing_line(&arming, true);
+        assert!(line.contains("armed on 0 of 3 doors"), "{line}");
+        assert!(line.contains("3 of 3 resolved"), "{line}");
+        assert!(line.contains("the cut gate is inert"), "{line}");
+        assert!(!line.contains("no matching overload"), "{line}");
+
+        for door in gate_doors() {
+            assert!(line.contains(door.label), "{line}");
+        }
+
+        // Each door is named with the key the player actually wrote, which is not always the id: the close
+        // door of this fixture was put down by its bare wrapper name.
+        assert_eq!(arming.disabled.len(), 3);
+        assert_eq!(arming.disabled[2].1, "TrainingCutt_CleanUpCutt");
+
+        for (_label, key) in &arming.disabled {
+            assert!(line.contains(&format!("key {key:?}")), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_gate_with_only_its_close_door_armed_cannot_open_a_hold() {
+        // `armed > 0` called this a guard. `CutGate::engage` is reached only from the two start doors
+        // (`TrainingCutt_PlayTrainingCut`, `TrainingCutt_PlayScenarioTrainingCut`), so with both put down
+        // `engaged()` answers the way a closed cut answers for the whole session and no door ever ends a
+        // hold that never started.
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&["TrainingCutt_PlayTrainingCut", "TrainingCutt_PlayScenarioTrainingCut"]));
+
+        assert_eq!(arming.armed, 1);
+        assert!(arming.close_armed, "the close door did arm");
+        assert!(!arming.open_armed, "one armed door was reported as an armed gate");
+
+        // The reproduction of the finding, kept in the test that closes it: this gate has an armed door,
+        // so the count rule this build no longer uses counts it as armed, while the half that matters -
+        // a door able to call `CutGate::engage` - is not armed at all.
+        assert!(arming.armed > 0, "the count this build stopped reading still counts this gate as armed");
+        assert!(!arming.open_armed, "the gate has no door that can open a hold");
+
+        let line = cut_gate_missing_line(&arming, true);
+        assert!(line.contains("armed on 1 of 3 doors"), "{line}");
+        assert!(line.contains("the cut gate is inert"), "{line}");
+    }
+
+    #[test]
+    fn a_gate_whose_start_doors_resolved_nothing_cannot_observe_a_cut() {
+        // The same gate as above from the other cause: this client answered for the close door and for
+        // neither start door. `armed == 1` is the number the install line prints, and `armed > 0` is the
+        // rule that used to turn that number into "the gate is armed" - the count and the flag answer
+        // different questions, and only the flag is what the two write passes stand on.
+        let arming = gate_arming(NO_TARGET, NO_TARGET, RESOLVED, &gate_keys(&[]));
+
+        assert_eq!(arming.armed, 1, "the close door did arm");
+        assert_eq!(arming.resolved, 1);
+        assert!(arming.close_armed);
+        assert!(!arming.open_armed, "a gate with no door that opens a hold was counted as armed");
+        assert_eq!(arming.unresolved, [GATE_DOOR_LABELS[0], GATE_DOOR_LABELS[1]]);
+
+        // The count armed nothing: no door that opens a hold armed, whatever `armed` says.
+        assert!(arming.armed > 0);
+        assert!(!arming.open_armed, "the armed door is the close door, and a close door opens nothing");
+
+        // Named from the client's side: no `disabled_hooks` key put these doors down, the resolver did
+        // not answer for them.
+        let line = cut_gate_missing_line(&arming, true);
+        assert!(line.contains("armed on 1 of 3 doors"), "{line}");
+        assert!(line.contains("1 of 3 resolved"), "{line}");
+        assert!(line.contains("no matching overload"), "{line}");
+        assert!(line.contains(GATE_DOOR_LABELS[0]), "{line}");
+        assert!(line.contains(GATE_DOOR_LABELS[1]), "{line}");
+        assert!(!line.contains("disabled_hooks"), "{line}");
+        assert!(line.contains("the cut gate is inert"), "{line}");
+
+        // Not the tick bound clause: with no start door there is no hold for the close door to end, and
+        // the line that warns about a bounded hold would point a run at the wrong cost.
+        assert!(!line.contains("game tick bound"), "{line}");
+    }
+
+    #[test]
+    fn a_gate_with_one_start_door_armed_is_a_gate_that_can_still_see_a_cut() {
+        // The boundary the fix must not overshoot: `open_armed` answers that some door able to open a
+        // hold armed, not that every one did. Half the pair still opens holds, still answers
+        // `ArmedOpen` for a cut that came through it, and the install line still names the door that is
+        // missing - which is what tells a run that a cut played through that door is outside the window.
+        let arming = gate_arming(NO_TARGET, RESOLVED, RESOLVED, &gate_keys(&[]));
+
+        assert_eq!(arming.armed, 2);
+        assert!(arming.open_armed, "`PlayScenarioTrainingCut` opens a hold on its own");
+
+        let line = cut_gate_missing_line(&arming, true);
+        assert!(line.contains(GATE_DOOR_LABELS[0]), "{line}");
+        assert!(!line.contains(GATE_DOOR_LABELS[1]), "{line}");
+        assert!(!line.contains("inert"), "{line}");
+        assert!(!line.contains("game tick bound"), "{line}");
+    }
+
+    #[test]
+    fn an_install_that_arms_nothing_names_every_door_it_could_not_arm() {
+        // The whole chain on this side, driven by the function `init` calls rather than by its inputs.
+        // With no class there is nothing to resolve, so `arm_cut_gate` never reaches il2cpp on this path
+        // and a test can run it: the answer it returns is the one `init` prints, and that line is what a
+        // run reads to know the gate behind the ui clock hold and the two write passes does not exist.
+        let arming = arm_cut_gate(None, &gate_keys(&[]));
+
+        assert_eq!(arming.armed, 0);
+        assert_eq!(arming.resolved, 0);
+        assert!(!arming.open_armed && !arming.close_armed);
+        assert!(!arming.unresolved.is_empty(), "the gate names the doors it could not arm");
+        assert_eq!(arming.unresolved, GATE_DOOR_LABELS);
+
+        let line = cut_gate_missing_line(&arming, false);
+        assert!(line.contains("armed on 0 of 3 doors"), "{line}");
+        assert!(line.contains("no class"), "{line}");
+        assert!(line.contains("the cut gate is inert"), "{line}");
+    }
+
+    #[test]
+    fn a_gate_with_no_class_names_every_door_it_could_not_arm() {
+        // The 0-of-3 shape: `class_for_label` answering None for
+        // `Gallop.SingleModeMainTrainingCuttController`. It printed nothing in either mode, so a build
+        // whose guard was inert read in `hachimi.log` exactly like a build whose guard worked.
+        let line = cut_gate_missing_line(&GateArming { unresolved: GATE_DOOR_LABELS.to_vec(), ..GateArming::default() }, false);
+
+        assert!(line.contains("armed on 0 of 3 doors"), "{line}");
+        assert!(line.contains("0 of 3 resolved"), "{line}");
+        assert!(line.contains("no class"), "{line}");
+        assert!(line.contains("SingleModeMainTrainingCuttController::PlayTrainingCut(info)"), "{line}");
+        assert!(line.contains("SingleModeMainTrainingCuttController::PlayScenarioTrainingCut(info)"), "{line}");
+        assert!(line.contains("SingleModeMainTrainingCuttController::CleanUpCutt()"), "{line}");
+        assert!(line.contains("the cut gate is inert"), "{line}");
+    }
+
+    #[test]
+    fn a_gate_missing_its_close_door_says_that_every_cut_costs_the_tick_bound() {
+        // The 2-of-3 shape: with no `CleanUpCutt` wrapper armed nothing calls `CutGate::release`, so a hold
+        // ends only on its tick bound and every cut of the session costs the window in which both write
+        // passes refuse the raise and its owed restore. This is where that becomes readable before the
+        // first cut instead of after one.
+        let arming = gate_arming(RESOLVED, RESOLVED, NO_TARGET, &gate_keys(&[]));
+        let line = cut_gate_missing_line(&arming, true);
+
+        assert!(line.contains("armed on 2 of 3 doors"), "{line}");
+        assert!(line.contains("2 of 3 resolved"), "{line}");
+        assert!(line.contains("no matching overload"), "{line}");
+        assert!(line.contains("SingleModeMainTrainingCuttController::CleanUpCutt()"), "{line}");
+        assert!(line.contains(&format!("only on its {} game tick bound", CUT_GATE_HOLD_TICKS)), "{line}");
+        assert!(!line.contains("the cut gate is inert"), "{line}");
+    }
+
+    #[test]
+    fn the_install_line_names_the_same_doors_the_census_counts() {
+        // A door named as missing in the install line is the door the totals line counts, so a run can
+        // check the arming against the calls the session actually made.
+        assert_eq!(GATE_DOOR_LABELS[0], CUTT_PLAY_TRAINING_CUT.label());
+        assert_eq!(GATE_DOOR_LABELS[1], CUTT_PLAY_SCENARIO_TRAINING_CUT.label());
+        assert_eq!(GATE_DOOR_LABELS[2], CUTT_CLEAN_UP_CUTT.label());
+
+        let doors = gate_doors();
+
+        assert_eq!(doors[0].label, GATE_DOOR_LABELS[0]);
+        assert_eq!(doors[1].label, GATE_DOOR_LABELS[1]);
+        assert_eq!(doors[2].label, GATE_DOOR_LABELS[2]);
+        assert!(!doors[0].closes && !doors[1].closes, "the two start doors are the pair that opens a hold");
+        assert!(doors[2].closes, "the close door is the one that ends one");
+    }
+
+    #[test]
+    fn the_gate_publishes_only_the_answer_529e4f5_shipped() {
+        // `cut_gate_engaged` is the whole public surface of the gate: `AnimationSpeed::tween_clocks`,
+        // `HighSpeedSetting::apply` and both of `StoryTimelineController`'s writes read that one bool and
+        // nothing else, so no reader can be handed a richer answer than the shipped one and no reader has
+        // to work out on its own whether the doors behind the answer armed.
+        assert!(!cut_gate_engaged(), "a gate no install armed reported a cut it never saw");
+
+        // The shape the gate was measured with in game, and the line a run reads for it: every door armed,
+        // so `false` from here on is a closed cut and not an unarmed gate.
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&[]));
+        assert!(arming.open_armed && arming.close_armed);
+        assert!(cut_gate_armed_line(&arming).contains("armed on 3 of 3 doors"), "the armed line does not name the doors it armed");
+    }
+
+    // The census half of the same arming. `init` prints two lines off one install - the gate's and the
+    // census's - and they used to count differently: the census was seeded off `arming.armed` while its body
+    // still added a door for every address `resolve_method` answered, so `Cutt probe: 5 doors installed`
+    // described a build that created 4 hooks. `the_census_counts_a_door_new_hook_never_arms_as_resolved_only`
+    // is that reproduction, run against the counting `init` uses now.
+    //
+    // The ids are the ones these arming sites answer to: `census_door_id!` spells an id the way `new_hook!`
+    // does (`hook/mod.rs:291`), and run 33 prints the same spelling for the doors `probe!` arms
+    // (`run log/hachimi-run33.log:530-544`). `TrainingCutt_PlayTrainingCut` and
+    // `TrainingCutt_PlayTrainingCutEndAsync` share a prefix, not a name, which is what the bare-name half of
+    // the key rule is exact about.
+    const PLAY_TRAINING_CUT_END_LABEL: &str = "SingleModeMainTrainingCuttController::PlayTrainingCutEndAsync";
+    const PLAY_IN_TRAINING_STATUS_LABEL: &str = "SingleModeMainTrainingCuttController::PlayInTrainingStatus";
+
+    #[test]
+    fn the_census_counts_a_door_under_the_id_its_arming_site_answers_to() {
+        // A census that matched a key against a name instead of the id `new_hook!` builds would answer for
+        // hooks this build does not arm - the C27 mistake pointed the other way. These are the strings the
+        // `new_hook!:` lines print for these sites.
+        let censused: Vec<&'static str> = census_fixture_doors().iter().map(|(_, id)| *id).collect();
+        let armed_here: Vec<&'static str> = gate_doors().iter().map(|door| door.id).collect();
+
+        assert_eq!(censused, [PLAY_TRAINING_CUT_END_ID, PLAY_IN_TRAINING_STATUS_ID], "the census matched keys against ids these sites do not answer to");
+        assert_eq!(armed_here, GATE_DOOR_IDS, "the gate checked keys against ids these sites do not answer to");
+    }
+
+    #[test]
+    fn a_bare_wrapper_name_reaches_the_door_whose_name_it_is_and_not_the_door_it_only_resembles() {
+        use crate::il2cpp::hook::hook_key_match;
+
+        // TrainingCutt's doors share a prefix, so this is where a bare key could take down a door the player
+        // did not name. The bare half of the rule is string equality on the last segment of the id.
+        let mut doors: Vec<&'static str> = gate_doors().iter().map(|door| door.id).collect();
+        doors.extend_from_slice(&census_fixture_doors().iter().map(|(_, id)| *id).collect::<Vec<&'static str>>());
+
+        let reached: Vec<&'static str> = doors.iter().copied().filter(|id| hook_key_match("TrainingCutt_PlayTrainingCut", id).is_some()).collect();
+
+        assert_eq!(reached, [GATE_OPEN_ID], "a bare key put down {} door(s) besides the one its name is", reached.len());
+
+        // A half written id reaches nothing, and the census leaves that door armed.
+        let half = "TrainingCuttProbe::TrainingCutt_CleanUpCutt";
+        assert!(doors.iter().all(|id| hook_key_match(half, id).is_none()), "a half written id reached a door");
+    }
+
+    #[test]
+    fn the_census_counts_a_door_new_hook_never_arms_as_resolved_only() {
+        use crate::il2cpp::hook::hook_is_disabled;
+
+        // The reproduction, run against the counting `init` uses now. The old body counted
+        // `arming.armed + 1` for every address the resolver answered, which read 5 doors installed for the
+        // build this fixture describes; `new_hook!` created 4 hooks (`hook/mod.rs:293` took its other branch
+        // for the cut end async door).
+        let doors = census_fixture_doors();
+        let disabled = gate_keys(&[doors[0].1]);
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &disabled);
+        let mut census = CensusCounts::from_gate(&arming);
+
+        for (label, id) in doors {
+            census.record_resolved(label, id, &disabled);
+        }
+
+        let ids: Vec<&'static str> = gate_doors().iter().map(|door| door.id).chain(doors.iter().map(|(_, id)| *id)).collect();
+        let created = ids.iter().filter(|id| !hook_is_disabled(&disabled, id)).count();
+
+        assert_eq!(census.resolved, 5, "every door that resolved is still accounted for");
+        assert_eq!(census.armed, created, "the census armed {} doors for a build that creates {created} hooks", census.armed);
+        assert_eq!(census.disabled, vec![(PLAY_TRAINING_CUT_END_LABEL, doors[0].1.to_string())], "the census did not name the door and the key that put it down");
+
+        let line = census_line(&census, 5);
+        assert!(line.contains("armed on 4 of 5 doors"), "{line}");
+        assert!(line.contains("5 of 5 resolved"), "{line}");
+        assert!(!line.contains("installed"), "the census line collapsed the two facts back into one count: {line}");
+
+        let named = census_disabled_line(&census);
+        assert!(named.contains("armed nothing on 1 resolved door"), "{named}");
+        assert!(named.contains(PLAY_TRAINING_CUT_END_LABEL), "{named}");
+        assert!(named.contains(&format!("key {:?}", doors[0].1)), "{named}");
+    }
+
+    #[test]
+    fn a_census_that_arms_every_door_says_resolved_and_armed_are_the_same_number_only_here() {
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&[]));
+        let census = CensusCounts::from_gate(&arming);
+
+        assert_eq!((census.asked, census.resolved, census.armed), (3, 3, 3));
+        assert!(census.disabled.is_empty());
+
+        // Both lines a run reads, from one arming, with the two facts named apart.
+        let gate_line = cut_gate_armed_line(&arming);
+        let probe_line = census_line(&census, 3);
+
+        for line in [&gate_line, &probe_line] {
+            assert!(line.contains("armed on 3 of 3 doors"), "{line}");
+            assert!(line.contains("3 of 3 resolved"), "{line}");
+        }
+
+        assert!(probe_line.contains("3 doors carry a counted kind"), "{probe_line}");
+    }
+
+    #[test]
+    fn a_census_door_put_down_by_a_disabled_hooks_id_counts_as_resolved_and_never_as_armed() {
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&[GATE_SCENARIO_ID]));
+        let census = CensusCounts::from_gate(&arming);
+
+        assert_eq!((census.asked, census.resolved, census.armed), (3, 3, 2), "a door the config named still counted as armed");
+
+        let line = census_line(&census, 2);
+        assert!(line.contains("armed on 2 of 3 doors"), "{line}");
+        assert!(line.contains("3 of 3 resolved"), "{line}");
+
+        // The census half of the clause names the door and the key, the way the gate line does.
+        let mut doors = CensusCounts::default();
+        doors.record_resolved(PLAY_IN_TRAINING_STATUS_LABEL, PLAY_IN_TRAINING_STATUS_ID, &gate_keys(&[PLAY_IN_TRAINING_STATUS_ID]));
+
+        assert_eq!((doors.asked, doors.resolved, doors.armed), (1, 1, 0), "a door armed nothing and still counted as armed");
+        assert_eq!(doors.disabled[0].1, PLAY_IN_TRAINING_STATUS_ID);
+    }
+
+    #[test]
+    fn a_census_door_put_down_by_a_bare_wrapper_name_counts_as_resolved_and_names_the_key_written() {
+        // A config written while `disabled_hooks` matched on the wrapper name still reaches the door (C27),
+        // and the census counts it unarmed the same way it counts an id - while the door that merely shares
+        // the prefix stays armed.
+        let arming = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&["TrainingCutt_CleanUpCutt"]));
+        let census = CensusCounts::from_gate(&arming);
+
+        assert_eq!((census.asked, census.resolved, census.armed), (3, 3, 2), "the bare key put the close door down and it still counted as armed");
+
+        let mut doors = CensusCounts::default();
+        doors.record_resolved(PLAY_TRAINING_CUT_END_LABEL, PLAY_TRAINING_CUT_END_ID, &gate_keys(&["TrainingCutt_PlayTrainingCutEndAsync", "TrainingCutt_PlayInTrainingStatus"]));
+        doors.record_resolved(PLAY_IN_TRAINING_STATUS_LABEL, PLAY_IN_TRAINING_STATUS_ID, &gate_keys(&["TrainingCutt_PlayTrainingCut"]));
+
+        // Two doors asked and resolved; the first armed nothing under its own bare name, the second armed
+        // because the key written next to it is a different door's name.
+        assert_eq!((doors.asked, doors.resolved, doors.armed), (2, 2, 1), "the bare-name half of the rule reached a door it only resembles");
+        assert_eq!(doors.disabled, vec![(PLAY_TRAINING_CUT_END_LABEL, "TrainingCutt_PlayTrainingCutEndAsync".to_string())]);
+
+        let named = census_disabled_line(&doors);
+        assert!(named.contains("armed nothing on 1 resolved door"), "{named}");
+        assert!(named.contains(&format!("key {:?}", "TrainingCutt_PlayTrainingCutEndAsync")), "{named}");
+        assert!(!named.contains("TrainingCutt_PlayInTrainingStatus"), "the line named a door the key did not reach: {named}");
+    }
+
+    #[test]
+    fn a_census_door_that_resolved_nothing_counts_as_neither_number() {
+        // The client has no such method: that is the `resolved` half answering no, and it is not the same
+        // shape as a door the player switched off.
+        let arming = gate_arming(RESOLVED, RESOLVED, NO_TARGET, &gate_keys(&[]));
+        let mut census = CensusCounts::from_gate(&arming);
+        census.record_resolved(PLAY_IN_TRAINING_STATUS_LABEL, PLAY_IN_TRAINING_STATUS_ID, &gate_keys(&[]));
+        census.record_miss();
+
+        assert_eq!((census.asked, census.resolved, census.armed), (5, 3, 3));
+        assert!(census.disabled.is_empty(), "a door the resolver never answered for was reported as disabled");
+
+        let line = census_line(&census, 3);
+        assert!(line.contains("armed on 3 of 5 doors"), "{line}");
+        assert!(line.contains("3 of 5 resolved"), "{line}");
+    }
+
+    #[test]
+    fn a_module_with_no_class_resolves_and_arms_nothing_in_either_line() {
+        // `class_for_label` answering None for `Gallop.SingleModeMainTrainingCuttController`: the census
+        // takes the same 0-of-3 answer the gate line prints instead of counting doors it never asked for.
+        let arming = arm_cut_gate(None, &gate_keys(&[]));
+        let census = CensusCounts::from_gate(&arming);
+
+        assert_eq!((census.asked, census.resolved, census.armed), (3, 0, 0));
+        assert!(census.disabled.is_empty());
+
+        let line = census_line(&census, 0);
+        assert!(line.contains("armed on 0 of 3 doors"), "{line}");
+        assert!(line.contains("0 of 3 resolved"), "{line}");
+
+        let gate_line = cut_gate_missing_line(&arming, false);
+        assert!(gate_line.contains("armed on 0 of 3 doors"), "{gate_line}");
+        assert!(gate_line.contains("0 of 3 resolved"), "{gate_line}");
+    }
+
+    #[test]
+    fn the_gate_line_and_the_census_line_report_one_arming_in_the_same_two_numbers() {
+        // The five shapes, read both ways. A run that only ever looks at the census line and a run that only
+        // ever looks at the gate line have to come away with the same resolved count and the same armed
+        // count; before this they could not, because only the gate line consulted the key rule.
+        let all_armed = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&[]));
+        let id_down = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&[GATE_OPEN_ID]));
+        let name_down = gate_arming(RESOLVED, RESOLVED, RESOLVED, &gate_keys(&["TrainingCutt_CleanUpCutt"]));
+        let unresolved = gate_arming(NO_TARGET, RESOLVED, RESOLVED, &gate_keys(&[]));
+        let no_class = arm_cut_gate(None, &gate_keys(&[]));
+
+        let shapes: [(&GateArming, bool); 5] = [(&all_armed, true), (&id_down, true), (&name_down, true), (&unresolved, true), (&no_class, false)];
+
+        for (arming, class_found) in shapes {
+            let census = CensusCounts::from_gate(arming);
+            let armed = arming.armed;
+            let resolved = arming.resolved;
+
+            assert_eq!(census.armed, armed, "the census armed {} doors, the gate line armed {armed}", census.armed);
+            assert_eq!(census.resolved, resolved, "the census resolved {} doors, the gate line resolved {resolved}", census.resolved);
+            assert_eq!(census.asked, 3);
+
+            let gate_line = if arming.complete() {
+                cut_gate_armed_line(arming)
+            }
+            else {
+                cut_gate_missing_line(arming, class_found)
+            };
+            let probe_line = census_line(&census, armed);
+
+            for line in [&gate_line, &probe_line] {
+                assert!(line.contains(&format!("armed on {armed} of 3 doors")), "{line}");
+                assert!(line.contains(&format!("{resolved} of 3 resolved")), "{line}");
+            }
+        }
     }
 }

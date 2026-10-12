@@ -18,7 +18,9 @@ use crate::{
 };
 
 // Observe only hooks over the cut-in a story event plays, the family of short animated beats a story or
-// event screen drops into the middle of its text.
+// event screen drops into the middle of its text. Every `L<digits>` below is a line of
+// `run log/introspect-run45.log`, the dump the run 45 build wrote; the client's reused `introspect.log`
+// stops before any of these classes and cannot answer them.
 //
 // The training probe measures the career screen's own cut controller. A story event cut-in does not go
 // through it: it goes through `Gallop.CutInHelper`, the cut-in door the story, event and mode screens
@@ -186,9 +188,14 @@ fn elapsed_ms() -> i64 {
 // at 302 s and 21,427 at 322 s, with `ContextExtension::SetTimeAll(helpers, time)` pinned at the
 // cut's own 4.000 s: a runtime that was still being stepped and never terminated. Both high speed
 // options write settings such a runtime reads, and that run's write landed at 09:03:24 inside the
-// window, so a recent tick is the signal those writes wait for. One second is a whole second of
+// window, so a recent tick is one of the signals those writes wait for. One second is a whole second of
 // frames for a door that fires every frame, so a runtime that stopped advancing stops holding the
 // writes back forever.
+//
+// It is a proxy, and a mode-bounded one: this file installs only when `debug_mode` is on (`init`), so
+// in a played build nothing stamps it and the answer is `false` for the whole session. That is the shape
+// `25ccda1` shipped and the shape run 57 ran, and the half of the write guard that works whatever
+// `debug_mode` says is `TrainingCuttProbe::cut_gate_engaged()`, which `arm_cut_gate` arms in both modes.
 const CUT_IN_TICK_QUIET_MS: i64 = 1000;
 static CUT_IN_TICK_MS: AtomicI64 = AtomicI64::new(-1);
 
@@ -196,6 +203,10 @@ fn a_cut_in_tick_is_recent(last_tick: i64, now: i64) -> bool {
     last_tick >= 0 && now - last_tick <= CUT_IN_TICK_QUIET_MS
 }
 
+/// The cut-in half of what `HighSpeedSetting::plan_pass` and `StoryTimelineController::plan_pass` refuse a
+/// write on, beside the career screen answer and `TrainingCuttProbe::cut_gate_engaged()`. A pass is held by
+/// any one of the three, so this answer being `false` - a quiet door, or no door armed at all - does not by
+/// itself make a write allowed. This is C57's cut-in half of that guard; only its citations moved here.
 pub(crate) fn cut_in_engine_driving() -> bool {
     a_cut_in_tick_is_recent(CUT_IN_TICK_MS.load(atomic::Ordering::Relaxed), elapsed_ms())
 }
@@ -350,8 +361,8 @@ def_detour! {
     }
 }
 
-// Dumped on `Gallop.CutInHelper`: `OnStart/0 -> void()` (L26462), `OnEnd/0 -> void()` (L26463),
-// `OnEndCutIn/0 -> void()` (L26438), `OnRestart/0 -> void()` (L26434), `StopRequest/0 -> void()` (L26428).
+// Dumped on `Gallop.CutInHelper`: `OnStart/0 -> void()` (L26830), `OnEnd/0 -> void()` (L26831),
+// `OnEndCutIn/0 -> void()` (L26806), `OnRestart/0 -> void()` (L26802), `StopRequest/0 -> void()` (L26796).
 // These are the lifecycle the base helper runs around a cut-in and no hook has ever asked for them. Which
 // of them this client actually walks through, next to `Play` and `CleanupPlaying`, is what C50 needs to know
 // before anything on this screen is paired or scaled.
@@ -417,7 +428,7 @@ def_detour! {
 }
 
 type CutInPauseFn = extern "C" fn(this: *mut Il2CppObject, play: bool, second: bool);
-// Dumped: `Pause/2 -> void(bool, bool)` (L26430) with `IsPause/0 -> bool()` (L26431). The game's own pause
+// Dumped: `Pause/2 -> void(bool, bool)` (L26798) with `IsPause/0 -> bool()` (L26799). The game's own pause
 // door for a cut-in. Both booleans are handed back exactly as they arrived and neither is read here, so the
 // only thing this detour can change is nothing (C50, item 41).
 def_detour! {
@@ -441,7 +452,7 @@ def_detour! {
 }
 
 type CutInStatusFn = extern "C" fn(this: *mut Il2CppObject, status: u32);
-// Dumped: `set_Status/1 -> void(struct<Gallop.CutInHelper.CutInStatus:4B>)` (L26410). A four byte enum is
+// Dumped: `set_Status/1 -> void(struct<Gallop.CutInHelper.CutInStatus:4B>)` (L26778). A four byte enum is
 // proven to travel in a general purpose register (A5), so the wrapper declares it as one word, passes it
 // back untouched, and samples the value it was given. That turns the cut-in's own state machine into a set
 // of numbers this fork can read instead of guess.
@@ -458,7 +469,7 @@ def_detour! {
 
 type CutInControllerFn = extern "C" fn(this: *mut Il2CppObject, controller: *mut Il2CppObject);
 // Dumped on `Gallop.SingleModeTrainingCutInHelper`: `OnTerminateRuntime/1 -> void(class<
-// Gallop.CutIn.Cutt.CutInTimelineController>)` (L26595). The controller is held as an address and returned
+// Gallop.CutIn.Cutt.CutInTimelineController>)` (L26963). The controller is held as an address and returned
 // to the original untouched.
 def_detour! {
     TrainingCutInHelper_OnTerminateRuntime(this: *mut Il2CppObject, controller: *mut Il2CppObject) {
@@ -472,8 +483,23 @@ def_detour! {
     }
 }
 
-// `OnTimelineUpdatePost/1 -> void(float)` (L26607): the per frame post update a training cut-in runs, with
+// `OnTimelineUpdatePost/1 -> void(float)` (L26975): the per frame post update a training cut-in runs, with
 // the time value it is stepped by. The argument is sampled as a peak and written back untouched.
+//
+// Counting this door is not a reading of whether a cut is playing. Run 16 logged it flat at 788 calls from
+// 09:00:49 to 09:01:29, when nothing was playing, and then 7,151 to 21,427 across the window where its last
+// cut sat open for 90,492 ms with `ContextExtension::SetTimeAll` pinned at that cut's own 4.000 s
+// (`LEDGER.md:2743-2744`, `:2733`, `:2739`; run 16's log file itself is gone from the tree, `LEDGER.md:2701`).
+// So the stamp it feeds is one input of the write guard and not the whole of it: `25ccda1` guarded on this stamp
+// and the current view id alone, which held writes back over whole career turns and still let run 57's raise
+// land at 20:45:18.071 (`run log/hachimi-run57.log:1812-1813`) with a `CleanUpCutt` 55.6 ms later (`:1815`).
+// The measured boundary `529e4f5` added - `TrainingCuttProbe`'s cut gate, opened by `PlayTrainingCut` and
+// closed by `CleanUpCutt` - reaches a cut this door does not, and run 57's 20:44:23.512 story refusal sits
+// inside that window (`:1691`). What neither reaches is a cut-in the game plays while no cut is open: run 57's
+// two, closed at 20:45:25.846 and 20:45:26.514 after 343 ms and 662 ms on view 1200 (`:1844`, `:1850`) with
+// the gate shut since 20:44:28.080 (`:1720`), and they crossed this door no times - it reads 230 at 20:45:25
+// (`:1840`) and 230 again at 20:45:45 (`:1884`) - so the stamp was quiet there and the write the pass at
+// 20:45:29.864 owed refused on the career screen half alone (`:1854`).
 def_detour! {
     TrainingCutInHelper_OnTimelineUpdatePost(this: *mut Il2CppObject, time: f32) {
             TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.observe_peak(&[time as f64], time);
@@ -515,7 +541,7 @@ def_detour! {
     }
 }
 
-// `OnStartCutIn/0 -> bool()` (L26600): the game's own answer to whether the cut-in may start at all. Read,
+// `OnStartCutIn/0 -> bool()` (L26968): the game's own answer to whether the cut-in may start at all. Read,
 // reported as a peak of 1.0 when it ever said yes, and returned untouched.
 def_detour! {
     TrainingCutInHelper_OnStartCutIn(this: *mut Il2CppObject) -> bool {
@@ -821,18 +847,25 @@ mod tests {
     use crate::il2cpp::hook::umamusume::{SceneDefine::ViewId, TrainingCuttProbe::ViewBucket};
 
     #[test]
-    fn a_recent_cut_in_tick_is_what_holds_a_high_speed_write_back() {
+    fn a_recent_cut_in_tick_is_one_of_the_reasons_a_high_speed_write_is_held() {
         // The quiet window is one second, and the door that stamps it fires every frame, so a
-        // runtime that is advancing is held and a runtime that stopped is not. Run 16 is the case
-        // the shape has to catch: its last cut teardown was 09:02:41 and the timeline door was
-        // still firing at 09:04:58, which is a tick 137 seconds old at the moment of the write.
+        // runtime that is advancing is held and a runtime that stopped is not. The four numbers
+        // driving it are synthetic counterexamples at the boundary: exactly the window, 1 ms inside
+        // it, 2 ms outside it, and 138 s outside it. Run 16 is the case the shape has to catch: its
+        // last cut teardown was `CleanUpCutt` at 09:02:41.384 and the door was still firing at the
+        // 09:04:49 totals with 21,427 calls, 128 s after that close with no cut run open to read it
+        // from (`LEDGER.md:2726`, `:2743-2744`, as printed 2026-10-12), and the log's next write of
+        // these settings is at 09:04:51 (`:2761`).
         assert!(a_cut_in_tick_is_recent(1_000, 1_000));
         assert!(a_cut_in_tick_is_recent(1_000, 1_999));
         assert!(!a_cut_in_tick_is_recent(1_000, 2_001));
         assert!(!a_cut_in_tick_is_recent(1_000, 138_000));
 
-        // Nothing has been stamped, which is the menu and the loading screen. Holding a write back
-        // there would make an option that works look broken.
+        // Nothing has been stamped, which is the menu and the loading screen, and also every build
+        // played without `debug_mode`: this file installs no door there. Run 57's raise at
+        // 20:45:18.071 landed in the other cold state - the door armed and quiet, its last crossing
+        // at least 44 s before the pass (`run log/hachimi-run57.log:1730`, `:1840`) - which is why
+        // that write is held by the guard's other two inputs and not by this one.
         assert!(!a_cut_in_tick_is_recent(-1, 40_000));
         assert!(!a_cut_in_tick_is_recent(-1, -1));
     }

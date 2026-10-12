@@ -901,11 +901,11 @@ pub(crate) fn note_hole_open() {
     snapshot_hole_flags();
 }
 
-// Says what the cut's own coroutine did while the status panel was being held off. Zero steps and a branch
-// that never moved says the driver stopped calling the coroutine, which a fork may not answer. Many steps
-// with a branch that never moved says the coroutine is being driven every frame while it waits on a
-// condition, and the yield census says which condition it is handing Unity.
-pub(crate) fn note_hole_closed(span_ms: i64) {
+// Says what the cut's own coroutine did inside the hole `TrainingCuttProbe` measured (C58). The two ends
+// are named by the caller because the probe pairs them in whichever order the game reached them: the
+// cut-in ending first is the shape runs 14 to 26 measured, the status play out first is the shape runs
+// 53 and 57 measured, and a line that assumed the first order described the second one wrongly.
+pub(crate) fn note_hole_closed(span_ms: i64, opened_at: &str, closed_at: &str) {
     if HOLE_OPEN_MS.load(atomic::Ordering::Relaxed) < 0 {
         return;
     }
@@ -928,7 +928,7 @@ pub(crate) fn note_hole_closed(span_ms: i64) {
     let yielded = unsafe { yield_name(longest.class) };
 
     info!(
-        "Cut state probe cut hole {span_ms} ms with the cut coroutine in it: branch {open_branch} at the cut-in end, {close_branch} at the play out, {steps} MoveNext steps, {changes} branch changes over {distinct} branches, worst gap between steps {worst_gap} ms, {yielded} yielded {yield_steps} times in a row over {yields} yields, {nothing} steps yielding nothing"
+        "Cut state probe cut hole {span_ms} ms with the cut coroutine in it: branch {open_branch} at the {opened_at}, {close_branch} at the {closed_at}, {steps} MoveNext steps, {changes} branch changes over {distinct} branches, worst gap between steps {worst_gap} ms, {yielded} yielded {yield_steps} times in a row over {yields} yields, {nothing} steps yielding nothing"
     );
 
     HOLE_YIELDS.reset();
