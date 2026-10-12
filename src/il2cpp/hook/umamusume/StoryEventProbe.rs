@@ -192,12 +192,14 @@ fn elapsed_ms() -> i64 {
 // frames for a door that fires every frame, so a runtime that stopped advancing stops holding the
 // writes back forever.
 //
-// It is a proxy, and a mode-bounded one: this file installs only when `debug_mode` is on (`init`), so
-// in a played build nothing stamps it and the answer is `false` for the whole session. That is the shape
-// `25ccda1` shipped and the shape run 57 ran, and the half of the write guard that works whatever
-// `debug_mode` says is `TrainingCuttProbe::cut_gate_engaged()`, which `arm_cut_gate` arms in both modes.
+// It is a proxy. Until C67 this file stamped only under `debug_mode`, so a played build answered `false` for the whole
+// session. `arm_cut_in_stamp` installs the stamp in a played build too, so the answer follows the cut-in engine whatever
+// `debug_mode` says. The other half of the write guard that works in both modes is `TrainingCuttProbe::cut_gate_engaged()`,
+// which `arm_cut_gate` arms in both modes.
 const CUT_IN_TICK_QUIET_MS: i64 = 1000;
 static CUT_IN_TICK_MS: AtomicI64 = AtomicI64::new(-1);
+// Counts the calls of the stamp below, so its first call is logged and a played run shows the hook was reached.
+static CUT_IN_STAMP_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 fn a_cut_in_tick_is_recent(last_tick: i64, now: i64) -> bool {
     last_tick >= 0 && now - last_tick <= CUT_IN_TICK_QUIET_MS
@@ -679,12 +681,46 @@ def_detour! {
     }
 }
 
-pub fn init(umamusume: *const Il2CppImage) {
-    if !Hachimi::instance().config.load().debug_mode {
+// C67: the stamp `cut_in_engine_driving` answers from, on the one door a played build needs from this file. The census
+// half of `TrainingCutInHelper_OnTimelineUpdatePost`, the peak it observes, is `debug_mode` work, so this detour carries
+// the stamp and the original call and nothing else. `init` installs one of the two, never both.
+def_detour! {
+    TrainingCutInStamp(this: *mut Il2CppObject, time: f32) {
+        CUT_IN_TICK_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+        if CUT_IN_STAMP_CALLS.fetch_add(1, atomic::Ordering::Relaxed) == 0 {
+            info!("Story cut-in stamp: first call, the cut-in engine clock is stamped in this build");
+        }
+
+        get_orig_fn!(TrainingCutInStamp, CutInRateFn)(this, time);
+    }
+    bail {
+        get_orig_fn!(TrainingCutInStamp, CutInRateFn)(this, time)
+    }
+}
+
+fn arm_cut_in_stamp(umamusume: *const Il2CppImage) {
+    let Some(training_cut_in_helper) = class_for_label(umamusume, "Gallop.SingleModeTrainingCutInHelper") else {
+        info!("Story cut-in stamp: not installed, no class Gallop.SingleModeTrainingCutInHelper");
+        return;
+    };
+
+    let addr = unsafe { AnimationSpeed::resolve_method(training_cut_in_helper, "OnTimelineUpdatePost", ONE_FLOAT, VOID) };
+    if addr == 0 {
+        info!("Story cut-in stamp: not installed, no matching overload of SingleModeTrainingCutInHelper::OnTimelineUpdatePost");
         return;
     }
 
+    new_hook!(addr, TrainingCutInStamp);
+}
+
+pub fn init(umamusume: *const Il2CppImage) {
+    // The clock is set before the gate, because the stamp above answers from it in a played build as well.
     let _ = START.set(Instant::now());
+
+    if !Hachimi::instance().config.load().debug_mode {
+        arm_cut_in_stamp(umamusume);
+        return;
+    }
 
     let cut_in_helper = class_for_label(umamusume, "Gallop.CutInHelper");
     let training_cut_in_helper = class_for_label(umamusume, "Gallop.SingleModeTrainingCutInHelper");
@@ -861,11 +897,10 @@ mod tests {
         assert!(!a_cut_in_tick_is_recent(1_000, 2_001));
         assert!(!a_cut_in_tick_is_recent(1_000, 138_000));
 
-        // Nothing has been stamped, which is the menu and the loading screen, and also every build
-        // played without `debug_mode`: this file installs no door there. Run 57's raise at
-        // 20:45:18.071 landed in the other cold state - the door armed and quiet, its last crossing
-        // at least 44 s before the pass (`run log/hachimi-run57.log:1730`, `:1840`) - which is why
-        // that write is held by the guard's other two inputs and not by this one.
+        // Nothing has been stamped, which is the menu and the loading screen before any cut-in has played. Run 57's
+        // raise at 20:45:18.071 landed in the other cold state - the door armed and quiet, its last crossing at least
+        // 44 s before the pass (`run log/hachimi-run57.log:1730`, `:1840`) - which is why that write is held by the
+        // guard's other two inputs and not by this one.
         assert!(!a_cut_in_tick_is_recent(-1, 40_000));
         assert!(!a_cut_in_tick_is_recent(-1, -1));
     }
