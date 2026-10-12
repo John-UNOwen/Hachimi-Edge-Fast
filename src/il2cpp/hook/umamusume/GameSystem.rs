@@ -92,6 +92,9 @@ def_detour! {
         // game's own close door is exactly the one a stalled cut never reaches. One atomic load on a tick
         // with nothing held.
         super::TrainingCuttProbe::tick_cut_gate();
+        // How much tween time one `DG.Tweening.Core.TweenManager::Update` tick actually carried, on the
+        // same rule and the same tick: C58's census of the time one tick really moved the tween clock.
+        super::AnimationSpeed::report_if_due();
         super::StoryFrameProbe::report_if_due();
         // The training cut-in measurement reports on the same tick and on the same quiet path rule.
         super::TrainingCuttProbe::report_if_due();

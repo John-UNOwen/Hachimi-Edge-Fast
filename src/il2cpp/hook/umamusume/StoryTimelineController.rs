@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::{
     core::{hachimi::recover_lock, Hachimi},
     il2cpp::{
-        hook::umamusume::{AnimationSpeed, HighSpeedSetting, StoryEventProbe},
+        hook::umamusume::{AnimationSpeed, HighSpeedSetting, StoryEventProbe, TrainingCuttProbe},
         symbols::{get_method_addr, GCHandle},
         types::*,
     },
@@ -114,7 +114,7 @@ def_detour! {
 // skip hooks forward into each other (C34: `133 -> 733`, then `733 -> 1333`), and it is a
 // candidate index into the game's readonly `_highSpeedFrameCountArray`. Dividing an index does
 // not shorten anything, it moves the request to a different slot of that array, and
-// `AnimationSpeed::scale_frame_count` floors a positive result at 1 (AnimationSpeed.rs:210-221),
+// `AnimationSpeed::scale_frame_count` floors a positive result at 1 (`AnimationSpeed.rs:1227-1236`),
 // so the slot it lands on can hold a longer frame count than the entry the game chose. That is
 // the run 5 failure shape: a frame target pushed past the block the timeline stands in stops
 // advancement. No link here is proven safe, so this is the decision already taken for
@@ -274,7 +274,7 @@ impl_addr_wrapper_fn!(IsStoryHighSpeedMode, IS_HIGH_SPEED_MODE_ADDR, bool,);
 
 // The static `SetHighSpeedType` writes is game state, so writing it needs the bookkeeping
 // AnimationSpeed uses for the fields it rewrites: remember the value the game had, and put it
-// back once when the option is turned off (AnimationSpeed.rs :136-151, :728, :756). The value
+// back once when the option is turned off (`AnimationSpeed.rs:6-9`, `:236-241`, `:3869-3881`). The value
 // the game last put there is recorded by the detour below, in the shape Time.rs's
 // GAME_REQUESTED has and for the same reason - the state can only be read back as the value
 // this module wrote. No HighSpeedType the game reports can be i32::MIN, so it stands for
@@ -376,6 +376,70 @@ fn already_written_for_state(applied_generation: usize, state_generation: usize)
     applied_generation != NO_GENERATION && applied_generation == state_generation
 }
 
+// Which pass a call on the game's story high speed static is, kept free of il2cpp so the sequence is
+// testable the way `pick_high_speed_baseline`, `already_written_for_state` and
+// `HighSpeedSetting::plan_pass` are, and taking each guard input as an argument the way
+// `AnimationSpeed::tween_clocks_holding` does.
+//
+// Two inputs say whether an owed pass runs:
+//
+// - `cut_in_running` is `StoryEventProbe::cut_in_engine_driving()`, the one second stamp on
+//   `SingleModeTrainingCutInHelper::OnTimelineUpdatePost`. It is the whole condition `25ccda1` shipped and
+//   `529e4f5` (HEAD) held both of this module's writes on, and it is still asked: `held_by_the_engine` below
+//   is that condition spelled once, so "this guard refuses at least what HEAD refused" is a function a test
+//   compares against rather than a sentence in a comment.
+// - `cut_open` is `TrainingCuttProbe::cut_gate_engaged()`: the measured boundary of a training cut in the
+//   game, open from `PlayTrainingCut` / `PlayScenarioTrainingCut`, closed by `CleanUpCutt`, aged on the game
+//   thread's own tick and ended at its 900 tick bound when the close door never arrives, armed whatever
+//   `debug_mode` says (`TrainingCuttProbe.rs`'s `CUT_GATE_HOLD_TICKS` and `arm_cut_gate`, `529e4f5`).
+//
+// `write_owed` is the marker that says this module has a write to undo. A pass that would touch the static
+// under either input is `Hold`: it writes nothing, and for the restore it leaves the owed marker set, so the
+// write is deferred rather than lost. The refusal set is `HEAD's condition ∪ the gate` and nothing wider.
+//
+// Run 16 is why the pass asks a boundary at all. Its cut-in runtime was stepped every frame and never
+// terminated, `ContextExtension::SetTimeAll` pinned at that cut's own 4.000 s, and the setting half of the
+// same option wrote back to its own saved values (`story high speed 2 -> 1` at 09:03:24.9) 3.5 s before that
+// cut opened; the static this module writes is one of the values such a runtime reads. Run 57 shows what each
+// answer does and does not reach. The gate's one open stretch, `PlayTrainingCut(info) call 1` at 20:44:19.183
+// to `CleanUpCutt() call 1` at 20:44:28.080 (`run log/hachimi-run57.log:1604-1605`, `:1720`), holds one logged
+// pass, the refusal at 20:44:23.512 (`:1691`), and `529e4f5` - the build that printed it - reached it on the
+// stamp alone: the door's counter is absent from the 20:44:14 totals, which is how a zero prints
+// (`StoryEventProbe.rs:800-802`, `:1589`), and it reads 230 at 20:44:33 (`:1730`). Both shapes refuse that
+// pass. What the gate does not reach is the 20:45:18 to 20:45:40 window, where `PlayTrainingCut` stayed at 1
+// (`:1872`): the engage that wrote at 20:45:23.529 (`:1838`) is handed by all three shapes, and the two
+// cut-ins that window played, 343 ms and 662 ms on view 1200 (`:1844`, `:1850`), crossed neither door.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pass {
+    Idle,
+    // A pass owed a write and one of the two inputs says wait: refused here, owed on the next pass.
+    Hold,
+    Engage,
+    Restore,
+}
+
+/// The condition `25ccda1` shipped and `529e4f5` held: the cut-in engine stepped inside the last second.
+fn held_by_the_engine(cut_in_running: bool) -> bool {
+    cut_in_running
+}
+
+/// The shipped refusal: HEAD's condition, or an open training cut. Never neither, and never a fourth thing.
+fn hold_write_asked(cut_in_running: bool, cut_open: bool) -> bool {
+    held_by_the_engine(cut_in_running) || cut_open
+}
+
+fn plan_pass(option_on: bool, write_owed: bool, cut_in_running: bool, cut_open: bool) -> Pass {
+    let owed = if option_on {
+        Pass::Engage
+    } else if write_owed {
+        Pass::Restore
+    } else {
+        Pass::Idle
+    };
+
+    if owed != Pass::Idle && hold_write_asked(cut_in_running, cut_open) { Pass::Hold } else { owed }
+}
+
 // Put the static back the way the game had it, once, when the option is turned off.
 //
 // The baseline is the last value the game itself passed to its own setter, which is safe by
@@ -388,21 +452,24 @@ fn already_written_for_state(applied_generation: usize, state_generation: usize)
 static RESTORE_HOLD_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn restore_high_speed_type() {
-    // The owed write is not spent by a held pass. A restore that returns after the marker is
-    // consumed would leave this module's value on the static for the rest of the session, and
-    // putting the game's value back while a cut-in runtime is being stepped is the shape run 16
-    // measured, so the pass waits and the next game tick runs it again.
-    if StoryEventProbe::cut_in_engine_driving() {
-        if !RESTORE_HOLD_WARNED.swap(true, atomic::Ordering::AcqRel) {
-            warn!("StoryTimelineController: story high speed restore waiting, a cut in runtime is still being stepped");
+    // The owed write is not spent by a pass the guard holds. A restore that returns after the marker is
+    // consumed would leave this module's value on the static for the rest of the session, and putting the
+    // game's value back while a cut-in runtime is being stepped is the shape run 16 measured, so the pass
+    // waits and the next `apply_config` - the next view change or config change - runs it again.
+    let owed = HIGH_SPEED_WAS_SET.load(atomic::Ordering::Acquire);
+    let cut_in_running = StoryEventProbe::cut_in_engine_driving();
+    let cut_open = TrainingCuttProbe::cut_gate_engaged();
+
+    if plan_pass(false, owed, cut_in_running, cut_open) != Pass::Restore {
+        // A hold has a write to say it is waiting for; an idle pass has nothing.
+        if owed && !RESTORE_HOLD_WARNED.swap(true, atomic::Ordering::AcqRel) {
+            warn!("StoryTimelineController: story high speed restore waiting, a training cut was open or a cut in runtime was still being stepped");
         }
 
         return;
     }
 
-    if !HIGH_SPEED_WAS_SET.swap(false, atomic::Ordering::AcqRel) {
-        return;
-    }
+    HIGH_SPEED_WAS_SET.store(false, atomic::Ordering::Release);
 
     // The engage marker is dropped with the write it stands for: this pass undoes that write (or
     // finds it already undone), so nothing is owed for the current state any more, and turning the
@@ -516,13 +583,23 @@ const REASON_ALREADY_ON: usize = 1 << 2;
 const REASON_ATTEMPT: usize = 1 << 3;
 const REASON_ALREADY_WRITTEN: usize = 1 << 4;
 const REASON_NO_SETTER: usize = 1 << 5;
-const REASON_CUT_IN_RUNNING: usize = 1 << 6;
+const REASON_CUT_OPEN: usize = 1 << 6;
 
 static ENGAGE_REASONS: AtomicUsize = AtomicUsize::new(0);
 
 fn note_engage(bit: usize, message: &str) {
     if ENGAGE_REASONS.fetch_or(bit, atomic::Ordering::AcqRel) & bit == 0 {
         debug!("StoryTimelineController: {message}");
+    }
+}
+
+// The same once-per-session budget at the level a played build keeps. `note_engage` is debug level, and
+// the file filter is Info whenever `debug_mode` is off (`core/log.rs:3-9`), so a refusal told through it
+// left the run with no evidence the guard ran at all. The cut refusal is the one exit here a run has to
+// be able to read without turning the dump on.
+fn warn_engage(bit: usize, message: &str) {
+    if ENGAGE_REASONS.fetch_or(bit, atomic::Ordering::AcqRel) & bit == 0 {
+        warn!("StoryTimelineController: {message}");
     }
 }
 
@@ -543,7 +620,9 @@ fn note_engage(bit: usize, message: &str) {
 // mode the game engaged on its own, not as the reason to write. The interval stays as a rate cap:
 // several state changes inside one interval are one write when the interval opens.
 pub fn engage_high_speed_mode() {
-    if !HIGH_SPEED_ENABLED.load(atomic::Ordering::Relaxed) {
+    let option_on = HIGH_SPEED_ENABLED.load(atomic::Ordering::Relaxed);
+
+    if !option_on {
         return;
     }
 
@@ -568,12 +647,22 @@ pub fn engage_high_speed_mode() {
 
     ENGAGE_LAST_SEC.store(now, atomic::Ordering::Relaxed);
 
-    // A cut-in runtime that is still being stepped is the state run 16 stalled in, and this static
-    // is one of the values that runtime reads. The pass is re-run by the next game tick, so waiting
-    // for the cut costs a later write rather than a lost one, and the interval gate above is what
-    // keeps this check off the per tick path.
-    if StoryEventProbe::cut_in_engine_driving() {
-        note_engage(REASON_CUT_IN_RUNNING, "story high speed mode left alone, a cut in runtime is still being stepped");
+    // Both guard inputs are asked, the stamp `25ccda1` shipped and `529e4f5` kept, and the cut boundary
+    // `529e4f5` measured. A cut-in runtime that is still being stepped is the state run 16 stalled in, and
+    // this static is one of the values that runtime reads, so the pass waits while either one says wait. The
+    // pass is re-run by the next game tick, so waiting costs a later write rather than a lost one, and the
+    // interval gate above is what keeps these two reads off the per tick path. The `write_owed` argument is
+    // `false` because an engage has no write to undo; the owed marker belongs to the restore pass.
+    //
+    // The refusal is told at warn level, once. It used to sit in the debug-only reason budget, so a
+    // played build - where the file filter is Info (`core/log.rs:3-9`) - refused this write and printed
+    // nothing, the same silence C57 records for the gate's own failed arming. Run 57 read it at debug level
+    // at 20:44:23.512 (`run log/hachimi-run57.log:1691`).
+    let cut_in_running = StoryEventProbe::cut_in_engine_driving();
+    let cut_open = TrainingCuttProbe::cut_gate_engaged();
+
+    if plan_pass(option_on, false, cut_in_running, cut_open) == Pass::Hold {
+        warn_engage(REASON_CUT_OPEN, "story high speed mode left alone, a training cut was open or a cut in runtime was still being stepped");
         return;
     }
 
@@ -850,6 +939,11 @@ mod tests {
         recorder: bool,
         setter_resolved: bool,
         zero_is_high_speed: bool,
+        // What `StoryEventProbe::cut_in_engine_driving()` and `TrainingCuttProbe::cut_gate_engaged()`
+        // answer, stood in as the two bools the shipped readers get, so the shipped `plan_pass` makes this
+        // sim's passes too.
+        cut_in_running: bool,
+        cut_open: bool,
         writes: Vec<i32>,
     }
 
@@ -866,6 +960,9 @@ mod tests {
                 recorder,
                 setter_resolved: true,
                 zero_is_high_speed: false,
+                // Nothing armed, nothing open: the guard is asked and answers that it has no reason to hold.
+                cut_in_running: false,
+                cut_open: false,
                 writes: Vec::new(),
             }
         }
@@ -894,6 +991,13 @@ mod tests {
         }
 
         fn engage(&mut self, target: i32) {
+            // The shipped pass decision: a stepped cut-in runtime or an open training cut turns this into a
+            // Hold that writes nothing. The option is on in every engage test, which is what
+            // engage_high_speed_mode returns on before it reaches the guard.
+            if plan_pass(true, false, self.cut_in_running, self.cut_open) == Pass::Hold {
+                return;
+            }
+
             let before = self.mode_on;
             let accepted = self.reads_as_high_speed(target);
 
@@ -932,7 +1036,9 @@ mod tests {
         }
 
         fn restore(&mut self) {
-            if !self.was_set {
+            // The shipped pass decision, including the half that keeps the owed marker set when the guard
+            // holds the restore back.
+            if plan_pass(false, self.was_set, self.cut_in_running, self.cut_open) != Pass::Restore {
                 return;
             }
 
@@ -1085,5 +1191,289 @@ mod tests {
         assert_eq!(numbers.len(), 3);
         assert!(numbers.windows(2).all(|pair| pair[1] == pair[0] + 1), "the numbers are not a running total: {numbers:?}");
         assert!(numbers[0] > before, "the first write number did not come after the writes already counted");
+    }
+
+    // HEAD (`529e4f5`) held both of this module's writes on `StoryEventProbe::cut_in_engine_driving()`
+    // alone. Spelled here as HEAD's own expression - not as a call into this file's helper - so the two
+    // tests below compare the shipped decision against the decision it has to cover, and not against itself.
+    fn head_held(cut_in_running: bool) -> bool {
+        cut_in_running
+    }
+
+    // Every pass that owes a write: the engage (option on), the restore (option off, a write owed), and the
+    // engage the option wins even though a write is owed.
+    const OWED_PASSES: [(bool, bool); 3] = [(true, false), (false, true), (true, true)];
+
+    #[test]
+    fn every_pass_head_held_is_still_held_whatever_the_cut_gate_answers() {
+        // The superset direction, over both answers of HEAD's input and both answers of the gate.
+        for (option_on, write_owed) in OWED_PASSES {
+            for cut_in_running in [false, true] {
+                for cut_open in [false, true] {
+                    if !head_held(cut_in_running) {
+                        continue;
+                    }
+
+                    assert_eq!(
+                        plan_pass(option_on, write_owed, cut_in_running, cut_open),
+                        Pass::Hold,
+                        "the gate let through a pass HEAD held: cut_in_running {cut_in_running}, cut_open {cut_open}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_guard_holds_nothing_beyond_head_held_or_an_open_cut() {
+        // The other direction: the refusal set is exactly HEAD's condition union the gate, with no fourth
+        // reason hiding in it.
+        let mut head_holds = 0;
+        let mut shipped_holds = 0;
+
+        for (option_on, write_owed) in OWED_PASSES {
+            for cut_in_running in [false, true] {
+                for cut_open in [false, true] {
+                    let head = head_held(cut_in_running);
+                    let shipped = plan_pass(option_on, write_owed, cut_in_running, cut_open);
+
+                    head_holds += usize::from(head);
+                    shipped_holds += usize::from(shipped == Pass::Hold);
+
+                    assert_eq!(
+                        shipped,
+                        if head || cut_open { Pass::Hold } else { if option_on { Pass::Engage } else { Pass::Restore } },
+                        "the refusal is not HEAD's condition union the gate: cut_in_running {cut_in_running}, cut_open {cut_open}",
+                    );
+                }
+            }
+        }
+
+        // 3 owed shapes x 2 x 2 = 12 input shapes: HEAD holds 6 of them, the union 9.
+        assert_eq!(head_holds, 6, "HEAD's own refusal set is not what its condition says");
+        assert_eq!(shipped_holds, 9, "the union did not add the gate's refusal half");
+    }
+
+    #[test]
+    fn the_cut_gate_adds_a_refusal_head_did_not_make() {
+        // The half that is genuinely new: a training cut open with the cut-in door quiet. HEAD hands this
+        // pass - its only input is the stamp - and the shipped guard holds it.
+        assert!(!head_held(false));
+        assert_eq!(plan_pass(true, false, false, true), Pass::Hold, "an open cut did not add a refusal");
+        assert_eq!(plan_pass(false, true, false, true), Pass::Hold, "an open cut did not hold the restore");
+    }
+
+    #[test]
+    fn plan_pass_holds_either_write_for_either_input() {
+        assert_eq!(plan_pass(true, false, true, true), Pass::Hold);
+        assert_eq!(plan_pass(false, true, true, true), Pass::Hold);
+        assert_eq!(plan_pass(false, false, true, true), Pass::Idle, "nothing owed is not a refusal");
+        assert_eq!(plan_pass(true, false, false, false), Pass::Engage);
+        assert_eq!(plan_pass(false, true, false, false), Pass::Restore);
+        assert_eq!(plan_pass(false, false, false, false), Pass::Idle);
+    }
+
+    #[test]
+    fn a_cut_in_stepped_inside_the_last_second_holds_the_engage_the_gate_alone_leaves_closed() {
+        // Run 16's shape read through the sim: a cut-in runtime being stepped, with no open cut run for the
+        // gate to report. The gate-only guard answers closed there and writes; this one waits, and the write
+        // lands when the runtime stops advancing.
+        let mut sim = Sim::new(true);
+        sim.cut_in_running = true;
+
+        for _ in 0..20 {
+            sim.engage(2);
+            sim.clip_boundary();
+        }
+
+        assert!(sim.writes.is_empty(), "a stepped cut-in runtime did not hold the engage: {:?}", sim.writes);
+
+        sim.cut_in_running = false;
+        sim.engage(2);
+        assert_eq!(sim.writes, vec![2], "the engage stayed held after the runtime stopped");
+    }
+
+    /// One logged pass of the story half inside run 57's 20:45:18 to 20:45:40 window, plus the gate's own
+    /// open stretch for comparison: the stamp, what the build that ran it did, and the two inputs the guard
+    /// reads. `wrote_in_the_run` is read off `run log/hachimi-run57.log`, not derived.
+    struct Run57Pass {
+        at: &'static str,
+        printed: &'static str,
+        cut_in_running: bool,
+        cut_open: bool,
+        wrote_in_the_run: bool,
+    }
+
+    const RUN_57_PASSES: [Run57Pass; 2] = [
+        Run57Pass {
+            // The refusal HEAD's stamp made, inside the gate's only open stretch: `PlayTrainingCut(info)
+            // call 1` at 20:44:19.183 to `CleanUpCutt() call 1` at 20:44:28.080 (`:1604-1605`, `:1720`). The
+            // stamp was hot there whatever the gate said, and the line itself is the proof: `529e4f5`, the
+            // build this run ran, printed this reason only under `cut_in_engine_driving`. The cut-in door
+            // crossed 0 times at the 20:44:14 totals - a zero is printed by leaving the counter out
+            // (`StoryEventProbe.rs:800-802`, `:1589`) - and 230 times at the 20:44:33 totals (`:1730`), so
+            // every crossing it made sits inside the 19 s bracket that holds this stretch.
+            at: "20:44:23.512",
+            printed: "`story high speed mode left alone, a cut in runtime is still being stepped` (:1691)",
+            cut_in_running: true,
+            cut_open: true,
+            wrote_in_the_run: false,
+        },
+        Run57Pass {
+            // The story pass in the window the task names. `write 5, story state 22` landed (`:1838`) 6.3 s
+            // before the setting half refused its write on view 1200 (`:1854`). The gate was closed - it
+            // closed at 20:44:28.080 (`:1720`) and `PlayTrainingCut` stayed at 1 for the rest of the run
+            // (`:1872`, `:3707`) - and the stamp was cold: the door read 230 at the 20:44:33 totals (`:1730`)
+            // and 230 again at 20:45:25 (`:1840`), so its last crossing was 50.3 s before this pass. The two
+            // cut-ins this window did play, 343 ms and 662 ms on view 1200 (`:1844`, `:1850`), crossed neither
+            // door.
+            at: "20:45:23.529",
+            printed: "`asked the story timeline for high speed type 2 (write 5, story state 22), IsHighSpeedMode \
+                      0 -> 1` (:1838)",
+            cut_in_running: false,
+            cut_open: false,
+            wrote_in_the_run: true,
+        },
+    ];
+
+    #[test]
+    fn run_57s_window_from_20_45_18_to_20_45_40_hands_what_head_handed_and_holds_what_head_held() {
+        for pass in RUN_57_PASSES.iter() {
+            // HEAD's condition reproduces what the build that ran this pass did. A row failing this is a row
+            // whose inputs were read wrong off the log.
+            assert_eq!(
+                head_held(pass.cut_in_running),
+                !pass.wrote_in_the_run,
+                "HEAD's condition does not reproduce {} ({}): head_held {}, the run wrote {}",
+                pass.at, pass.printed, head_held(pass.cut_in_running), pass.wrote_in_the_run,
+            );
+
+            if head_held(pass.cut_in_running) {
+                assert_eq!(
+                    plan_pass(true, true, pass.cut_in_running, pass.cut_open),
+                    Pass::Hold,
+                    "the shipped guard handed {} ({}), which HEAD held", pass.at, pass.printed,
+                );
+            }
+            else {
+                assert_ne!(
+                    plan_pass(true, true, pass.cut_in_running, pass.cut_open),
+                    Pass::Hold,
+                    "the shipped guard holds {} ({}), which HEAD handed - the union added a fourth reason", pass.at, pass.printed,
+                );
+            }
+        }
+
+        // The reproduction shape the change set shipped - refuse on the gate alone - asked of the same two
+        // rows. On the story half it agrees with HEAD at both: it holds 20:44:23.512 because the gate was
+        // open there too, and it hands 20:45:23.529 because the gate was closed and HEAD's stamp was cold.
+        // What run 57 shows for this module is that the boundary-only shape lost no coverage here, and that
+        // neither shape reaches the two cut-ins the window did play.
+        let gate_only_holds = |cut_open: bool| cut_open;
+
+        for pass in RUN_57_PASSES.iter() {
+            assert_eq!(
+                gate_only_holds(pass.cut_open),
+                !pass.wrote_in_the_run,
+                "the boundary-only shape does not reproduce {} ({}), so the claim that it lost coverage here is wrong", pass.at, pass.printed,
+            );
+        }
+
+        // Stated plainly: on run 57 the gate half adds no refusal at all. Its only open stretch is the one
+        // where the stamp was hot anyway, and in the 20:45:18 to 20:45:40 window it is closed for every pass,
+        // so refusing HEAD's condition union the gate is refusing HEAD's condition. What the gate is for on
+        // this run is `529e4f5`'s own subject, the ui clock hold, not these writes.
+        assert!(RUN_57_PASSES.iter().any(|pass| pass.cut_open && head_held(pass.cut_in_running)), "run 57 has no gate window HEAD did not already refuse");
+        assert!(RUN_57_PASSES.iter().all(|pass| !pass.cut_open || head_held(pass.cut_in_running)), "the gate opened somewhere HEAD's condition did not already hold");
+    }
+
+    #[test]
+    fn an_open_training_cut_holds_the_engage_and_the_write_stays_askable() {
+        // Run 16 asked this static for its value again at 09:04:51, inside the window where its last cut
+        // sat open and its cut-in was stepped every frame. The gate now covers that window from the
+        // game's own cut doors (up to its tick bound), and `engage_high_speed_mode` is re-run on the
+        // next game tick, so the write is later rather than lost.
+        let mut sim = Sim::new(true);
+        sim.cut_open = true;
+
+        for _ in 0..20 {
+            sim.engage(2);
+            sim.clip_boundary();
+        }
+
+        assert!(sim.writes.is_empty(), "the engage wrote through an open cut: {:?}", sim.writes);
+        assert_eq!(sim.applied_generation, NO_GENERATION, "a pass that wrote nothing remembered a write");
+
+        sim.cut_open = false;   // `CleanUpCutt`, or the gate's 900 game tick bound
+        sim.engage(2);
+        assert_eq!(sim.writes, vec![2], "the deferred engage never landed");
+    }
+
+    #[test]
+    fn a_restore_held_by_an_open_cut_does_not_consume_the_owed_marker() {
+        // A restore is the write that puts the game's own value back on a static a live cut-in runtime
+        // reads, which is the window run 16 stalled in. Dropping `HIGH_SPEED_WAS_SET` on a held pass
+        // would leave this module's value on the static for the rest of the session, so the marker is
+        // what carries the write to the next pass.
+        let mut sim = Sim::new(true);
+
+        // The value the game held, recorded as the baseline. Run 6 polled IsHighSpeedMode 19737 times
+        // and read 0 while the timeline was running, so an off value is what this client leaves on
+        // record.
+        sim.game_write(0);
+        sim.engage(2);
+        assert_eq!(sim.writes, vec![2]);
+
+        sim.cut_open = true;
+
+        for _ in 0..20 {
+            sim.restore();      // the option off while a cut is open
+        }
+
+        assert_eq!(sim.writes, vec![2], "the restore ran through an open cut");
+        assert!(sim.was_set, "a held restore consumed the marker that makes the write owed");
+        assert_eq!(sim.applied_value, 2, "a held restore cleared the write it still owed");
+        assert_eq!(sim.applied_generation, 1, "a held restore cleared the state it was written for");
+
+        sim.cut_open = false;
+        sim.restore();
+        assert_eq!(sim.writes, vec![2, 0], "the deferred restore never landed");
+        assert_eq!(sim.applied_value, HIGH_SPEED_UNSET);
+        assert_eq!(sim.applied_generation, NO_GENERATION);
+    }
+
+    #[test]
+    fn a_gate_that_can_never_engage_still_asks_for_the_mode() {
+        // The 0-of-3 shape: `arm_cut_gate` armed no door that opens a hold, so `CutGate::engage` is never
+        // reachable, `Pass::Hold` is never returned, and the gate answers closed for the whole session.
+        // Holding on that answer would switch the option off in silence, so the engage still runs, and the
+        // build says the shape at install - `TrainingCuttProbe::cut_gate_missing_line`, at warn level.
+        let mut sim = Sim::new(true);
+
+        for _ in 0..20 {
+            sim.engage(2);
+            sim.clip_boundary();
+        }
+
+        assert_eq!(sim.writes, vec![2], "a gate that cannot engage stopped the option working at all");
+    }
+
+    #[test]
+    fn a_gate_that_can_never_engage_does_not_hold_the_restore_that_owes_the_game_its_value_back() {
+        // The same answer on the other direction, and it is the honest one: with nothing able to open a
+        // hold there is no window for the restore to wait for, and a value this module wrote on the game's
+        // own static has to be put back when the option goes off. The 2-of-3 shape - a gate missing only
+        // its close door - still refuses while the gate says a cut is open, and `TrainingCuttProbe`'s
+        // install line names that door and what its tick bound costs.
+        let mut sim = Sim::new(true);
+        sim.game_write(0);      // the value the game held, recorded as the baseline
+        sim.engage(2);
+
+        for _ in 0..20 {
+            sim.restore();      // the option off, with no gate to wait for
+        }
+
+        assert_eq!(sim.writes, vec![2, 0], "the restore was held behind a gate that does not exist");
+        assert!(!sim.was_set, "a restore that ran left the write owed");
     }
 }
