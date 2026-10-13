@@ -876,7 +876,41 @@ pub fn delta_clock() -> f32 { delta_clock_of(ui_animation_scale(), time_scale_pr
 /// clock carried 674 ms, more than the whole entry sequence whose button never appeared (C58, LEDGER item 107).
 /// `tween_tick_advance` is where that lands, and it never hands back less than the delta the game wrote.
 pub fn tween_clocks(delta_time: f32, independent_time: f32) -> (f32, f32) {
-    tween_clocks_holding(delta_time, independent_time, TrainingCuttProbe::cut_gate_engaged())
+    tween_clocks_in(delta_time, independent_time, TrainingCuttProbe::cut_gate_engaged(), plate_window_open())
+}
+
+// How long one plate list may keep the independent channel on the ui clock. The window opens at the plate list
+// door and has no close door of its own: `OnAllTypewriteEnd` is armed by the probe alone, which installs nothing
+// unless debug_mode is on, and one address cannot carry two hooks. Run 61's Inspiration list, the longest on the
+// record, closed in 7,721 ms at the game's own pace (14 plates, `wait to the next advance mean 476.1 ms`), which is
+// under 0.4 s at 20x, so 5 s covers the whole list with room to spare and gives back the C5 rule within seconds
+// of any list that never closes (item 111).
+pub const PLATE_WINDOW_US: i64 = 5_000_000;
+
+static PLATE_WINDOW_BASE: OnceLock<Instant> = OnceLock::new();
+// When the latest plate list opened, on `plate_window_clock_us`; -1 while no list has opened.
+static PLATE_WINDOW_OPENED_US: AtomicI64 = AtomicI64::new(-1);
+static PLATE_WINDOWS: AtomicUsize = AtomicUsize::new(0);
+
+fn plate_window_clock_us() -> i64 {
+    PLATE_WINDOW_BASE.get_or_init(Instant::now).elapsed().as_micros() as i64
+}
+
+/// The plate list door calls this once per list. It answers which window of the session this is, so the caller
+/// names only the first few. A list that opens while another is still open re-arms the clock from its own start.
+pub fn open_plate_window() -> usize {
+    PLATE_WINDOW_OPENED_US.store(plate_window_clock_us(), Ordering::Release);
+    PLATE_WINDOWS.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Read once per tween tick. While no list has opened this is one atomic load.
+fn plate_window_open() -> bool {
+    let opened_us = PLATE_WINDOW_OPENED_US.load(Ordering::Acquire);
+    opened_us >= 0 && plate_window_open_at(opened_us, plate_window_clock_us())
+}
+
+pub fn plate_window_open_at(opened_us: i64, now_us: i64) -> bool {
+    opened_us >= 0 && now_us >= opened_us && now_us - opened_us < PLATE_WINDOW_US
 }
 
 /// The same pair with the training cut gate handed in as an argument, which is the half a test can drive
@@ -886,6 +920,18 @@ pub fn tween_clocks(delta_time: f32, independent_time: f32) -> (f32, f32) {
 /// multiplied clock, and runs 54 and 55 ran the same turn whole at 1.0. What the hold covers is one cut, so
 /// every other screen keeps the speed the lever was bought for.
 pub fn tween_clocks_holding(delta_time: f32, independent_time: f32, cut_holds_the_clock: bool) -> (f32, f32) {
+    tween_clocks_in(delta_time, independent_time, cut_holds_the_clock, false)
+}
+
+/// The pair with both windows handed in. A plate list window puts the independent channel on the ui lever too,
+/// and nothing else does (C5 keeps it on real time everywhere else). Run 61 stepped the Inspiration plates at
+/// 476 ms each with the delta channel at 17x, the cut gate shut and the plate interval already cut to its floor,
+/// while runs 33 and 47 typed the same group plates within about 50 ms: a step that tracks none of the clocks
+/// this fork scales is the step of a tween the game marked time scale independent, which upstream's lever has
+/// always multiplied (item 111). Time.timeScale does not reach that channel, so the multiplier is the lever
+/// alone, already clamped to `MAX_UI_ANIMATION_SCALE`, and the tick is held under the same per tick ceiling as
+/// the delta channel. A training cut's hold still wins: inside a cut both channels run on the game's own clock.
+pub fn tween_clocks_in(delta_time: f32, independent_time: f32, cut_holds_the_clock: bool, plate_window: bool) -> (f32, f32) {
     let census = TWEEN_TICK_CENSUS_ON.load(Ordering::Relaxed);
 
     if cut_holds_the_clock {
@@ -916,7 +962,16 @@ pub fn tween_clocks_holding(delta_time: f32, independent_time: f32, cut_holds_th
         note_tween_tick(asked, handed, false);
     }
 
-    (handed, independent_time)
+    if !plate_window {
+        return (handed, independent_time);
+    }
+
+    let ui = ui_animation_scale();
+    if ui <= 1.0 || !ui.is_finite() {
+        return (handed, independent_time);
+    }
+
+    (handed, tween_tick_advance(independent_time, independent_time * ui))
 }
 
 // The census that prices the ceiling above: how much tween time one tick actually carried, all session.
@@ -3463,6 +3518,18 @@ def_detour! {
             let scaled = plate_cascade_handoff(interval);
 
         hit(12, "TrainingParamChangeUI.InitializePlateList", interval, scaled);
+
+        // Opening the window costs one store, and it is opened whatever the lever says, because the tween
+        // detour is what reads the lever. Only the first few are named.
+        let window = open_plate_window();
+        if window <= 3 && ui_animation_scale() > 1.0 {
+            info!(
+                "Plate window {}: the independent tween clock runs on ui_animation {}x for up to {} s from this plate list",
+                window,
+                ui_animation_scale(),
+                PLATE_WINDOW_US / 1_000_000
+            );
+        }
         TrainingCuttProbe::note_plate_call(this, interval);
 
         get_orig_fn!(TrainingParamChangeUI_InitializePlateListSpeed, PlateInitializeListFn)(this, list, scaled);
@@ -4553,6 +4620,43 @@ mod tests {
     // watching for had already finished on the multiplied clock; runs 54 and 55 ran the same turn whole at
     // 1.0, with the cut's own levers the same in each pair. The hold is one cut wide, so every other screen
     // keeps the speed the lever was bought for.
+    // Item 111: a plate list puts the independent channel on the ui lever for its own window, a cut's hold still
+    // wins inside it, and the window ends on its own wall clock bound.
+    #[test]
+    fn a_plate_window_scales_the_independent_channel_and_nothing_else_does() {
+        let _turn = pass_turn();
+
+        mirror_config(&timing_config(1.0, 1.0, 1.0, MAX_UI_ANIMATION_SCALE));
+
+        let (_, outside) = tween_clocks_in(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC, false, false);
+        assert_eq!(outside, TICK_CEILING_FRAME_SEC, "the independent channel left real time outside a plate list");
+
+        let (delta, inside) = tween_clocks_in(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC, false, true);
+        assert!(ms_is(inside, TICK_CEILING_FRAME_SEC * MAX_UI_ANIMATION_SCALE), "a plate list's independent tick was not on the lever: {inside}");
+        assert!(ms_is(delta, TICK_CEILING_FRAME_SEC * MAX_UI_ANIMATION_SCALE), "the window changed the delta channel: {delta}");
+
+        // The per tick ceiling holds on this channel too.
+        let long_frame = 1.0 / 60.0;
+        let (_, bounded) = tween_clocks_in(long_frame, long_frame, false, true);
+        assert!(ms_is(bounded, MAX_TWEEN_TICK_ADVANCE_SEC), "a plate window tick carried {bounded} s, past the ceiling");
+
+        let (held_delta, held) = tween_clocks_in(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC, true, true);
+        assert_eq!((held_delta, held), (TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC), "a plate window reached into a training cut's hold");
+
+        mirror_config(&timing_config(1.0, 1.0, 1.0, 1.0));
+        let (_, neutral) = tween_clocks_in(TICK_CEILING_FRAME_SEC, TICK_CEILING_FRAME_SEC, false, true);
+        assert_eq!(neutral, TICK_CEILING_FRAME_SEC, "the neutral lever changed a plate list's tick");
+    }
+
+    #[test]
+    fn a_plate_window_ends_on_its_own_bound() {
+        assert!(!plate_window_open_at(-1, 0), "a window was open before any plate list");
+        assert!(plate_window_open_at(1_000, 1_000), "a window was shut at its own start");
+        assert!(plate_window_open_at(1_000, 1_000 + PLATE_WINDOW_US - 1), "a window shut before its bound");
+        assert!(!plate_window_open_at(1_000, 1_000 + PLATE_WINDOW_US), "a window outlasted its bound");
+        assert!(!plate_window_open_at(1_000, 999), "a window opened before its own start");
+    }
+
     #[test]
     fn a_training_cut_hold_leaves_the_tween_clock_on_the_games_own_rate() {
         let _turn = pass_turn();
