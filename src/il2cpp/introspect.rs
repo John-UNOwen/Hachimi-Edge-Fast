@@ -118,6 +118,11 @@ const FULL_DUMP_NAMES: &[&str] = &[
     // flash player's own surface names no speed door of its own, so the class that actually advances a cut-in
     // effect has to be read before a lever is written on it.
     "AnMotion", "AnRoot",
+    // The Inspiration screen (view 1501, and the career start's 1500). Run 31's stuck screen showed a `Skip` button on it
+    // (C62), and a skip lever has to stand on the game's own skip rather than on a guessed jump, so the controller, its
+    // result part and the view that holds the button get their own blocks (item 111). A name the client lacks prints
+    // nothing.
+    "SingleModeSuccessionEventViewController", "SingleModeSuccessionEventView", "PartsSingleModeSuccessionCutResult",
 ];
 
 /// A field whose held class the walk cannot reach by name. `AnimateToUnity.AnMotion` and `AnRoot` are in no image
@@ -134,11 +139,12 @@ const REACHED_VIA_FIELDS: &[(&str, &str)] = &[
 
 /// Allowlisted classes get their own budget so a spent general cap cannot hide them. The list above
 /// is bounded, so the log grows by these classes and not by whatever else matches a filter. One simple name can
-/// match in more than one image, so the dumps print more allowlist blocks than the list has names: 48 in the run 42
-/// dump (`introspect-run42.log:27687`) and 61 in the run 45 dump
-/// (`introspect-run45.log:29078`), and the budget is sized over the widest of those: a client that renames a state machine
-/// takes the slot rather than crowding a name the C58 cascade is measured against out.
-const MAX_ALLOWLIST_CLASSES: usize = 64;
+/// match in more than one image, so a dump can print more allowlist blocks than the list has names: 61 in the run 45 dump
+/// (`introspect-run45.log:29078`) and 48 in the run 42 dump
+/// (`introspect-run42.log:27687`). The budget is sized over the widest of those plus the three Inspiration names added
+/// after them (item 111): a client that renames a state machine takes the slot rather than crowding a name the C58
+/// cascade is measured against out.
+const MAX_ALLOWLIST_CLASSES: usize = 72;
 
 /// Shape of the dump itself, stamped into the file. Bump it when the log gains or loses a
 /// kind of line so an older file fails the comparison and is rewritten rather than reused as
