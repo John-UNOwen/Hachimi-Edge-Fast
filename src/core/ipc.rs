@@ -179,6 +179,7 @@ fn on_http_request(request: &mut Request) -> Result<CommandResponse, Error> {
         Command::SoftReset { exec } => {
             if exec {
                 Thread::main_thread().schedule(|| {
+                    info!("Soft reset requested over IPC");
                     GameSystem::SoftwareReset(GameSystem::instance());
                 });
                 if let Some(mutex) = Gui::instance() {

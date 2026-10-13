@@ -3976,6 +3976,8 @@ impl Gui {
                             show_window = Some(Box::new(SimpleYesNoDialog::new(&t!("confirm_dialog_title"), &t!("soft_restart_confirm_content"), |ok| {
                                 if !ok { return; }
                                 Thread::main_thread().schedule(|| {
+                                    // The reset itself prints nothing, so without this a session's log cannot tell a player's restart from a fault.
+                                    info!("Soft reset requested from the menu");
                                     GameSystem::SoftwareReset(GameSystem::instance());
                                 });
                             })));
