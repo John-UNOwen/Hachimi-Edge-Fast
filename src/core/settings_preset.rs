@@ -211,6 +211,7 @@ impl SettingsPreset {
                 // The tag cut and the cut skip are this fork's levers too. Upstream has neither, so this arm turns both off.
                 config.training_tag_cut_speed = 1.0;
                 config.skip_training_cut = false;
+                config.skip_inspiration_cut = false;
             }),
         }
     }
@@ -248,6 +249,7 @@ impl SettingsPreset {
                 // plain flag, so the arm names it on rather than inheriting whatever the live config held.
                 config.training_tag_cut_speed = AnimationSpeed::MAX_TAG_CUT_ANIMATOR_SPEED;
                 config.skip_training_cut = true;
+                config.skip_inspiration_cut = true;
             }),
         }
     }
@@ -282,6 +284,7 @@ impl SettingsPreset {
                 // The tag cut and the cut skip are this fork's levers too. Upstream has neither, so this arm turns both off.
                 config.training_tag_cut_speed = 1.0;
                 config.skip_training_cut = false;
+                config.skip_inspiration_cut = false;
             }),
         }
     }
@@ -389,6 +392,7 @@ mod tests {
         let mut live = Config::default();
         live.training_tag_cut_speed = 5.0;
         live.skip_training_cut = true;
+        live.skip_inspiration_cut = true;
         let preset = SettingsPreset::neutral(&live);
         let config = &preset.config;
 
@@ -406,6 +410,7 @@ mod tests {
         assert!(!config.cyspring_mono_uncap_frame_scale);
         assert_eq!(config.training_tag_cut_speed, 1.0, "upstream has no tag cut, so the inert arm turns it off even when the live config has it up");
         assert!(!config.skip_training_cut, "upstream has no cut skip, so the inert arm turns it off even when the live config has it on");
+        assert!(!config.skip_inspiration_cut, "upstream has no Inspiration skip, so the inert arm turns it off even when the live config has it on");
 
         assert_eq!(config.story_tcps_multiplier, 1.0, "the shipped text multiplier is 3.0, a raised lever that belongs to another arm");
         assert_eq!(config.story_choice_auto_select_delay, AnimationSpeed::CHOICE_AUTO_SELECT_TRIGGER_TIME);
@@ -432,6 +437,7 @@ mod tests {
         assert!(config.training_cut_speed <= AnimationSpeed::MAX_TRAINING_CUT_TIME_SCALE, "the cut-in arm asks the scale door for more than that door may hand");
         assert_eq!(config.training_tag_cut_speed, AnimationSpeed::MAX_TAG_CUT_ANIMATOR_SPEED, "the tag cut lever is a speed lever too, and an arm that leaves it at the live value is not the all levers arm");
         assert!(config.skip_training_cut, "the cut skip is a speed lever too, and the arm names it on");
+        assert!(config.skip_inspiration_cut, "the Inspiration skip is a speed lever too, and the arm names it on");
         assert!(config.auto_skip_result_screens);
         assert_eq!(config.high_speed_settings, live.high_speed_settings, "the hidden high speed option is not an all levers lever, so the arm keeps the live value");
         assert!(config.story_high_speed_mode);
@@ -444,6 +450,7 @@ mod tests {
         let mut live = Config::default();
         live.training_tag_cut_speed = 5.0;
         live.skip_training_cut = true;
+        live.skip_inspiration_cut = true;
         let config = SettingsPreset::hachimi_fast(&live).config;
 
         assert_eq!(config.ui_animation_scale, 10.0);
@@ -459,6 +466,7 @@ mod tests {
         assert_eq!(config.training_cut_speed, 1.0, "this fork's cut-in lever is not an upstream option either");
         assert_eq!(config.training_tag_cut_speed, 1.0, "upstream has no tag cut, so the arm turns it off even when the live config has it up");
         assert!(!config.skip_training_cut, "upstream has no cut skip, so the arm turns it off even when the live config has it on");
+        assert!(!config.skip_inspiration_cut, "upstream has no Inspiration skip, so the arm turns it off even when the live config has it on");
         assert!(!config.auto_skip_result_screens);
         assert!(!config.high_speed_settings);
         assert!(!config.story_high_speed_mode);

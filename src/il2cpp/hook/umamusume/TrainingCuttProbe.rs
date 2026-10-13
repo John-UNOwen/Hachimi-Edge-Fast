@@ -2302,6 +2302,7 @@ def_detour! {
             stall_census(this, elapsed_ms());
         }
         pump_training_cut_cutt(this);
+        pump_inspiration_cut(this);
 
         get_orig_fn!(CuttTimeline_UpdateSpeed, CuttUpdateSpeedFn)(this);
     }
@@ -2368,6 +2369,83 @@ fn pump_training_cut_cutt(this: *mut Il2CppObject) {
         skip_cutt_time(this, AnimationSpeed::TRAINING_CUT_SKIP_TIME_SEC);
         SKIP_INSIDE_DOOR.store(false, atomic::Ordering::Release);
     }
+}
+
+// The Inspiration skip lever (`skip_inspiration_cut`, ledger item 111). The Inspiration cut-in runs on two timelines at
+// once (`SingleModeSuccessionEventViewController::CUTT_COUNT`; run 61's census printed two controllers on view 1501), so
+// each timeline is remembered by its address from the first frame it ticks on an Inspiration view, and asked once,
+// `INSPIRATION_SKIP_AFTER_MS` later, for the client's own skip to the end. Only the game thread reaches `UpdateSpeed`,
+// so the slots need no lock. A slot older than `INSPIRATION_SLOT_STALE_MS` is free again: two Inspiration events are
+// turns apart, and a cut-in lasts 3.24 s.
+const INSPIRATION_SLOTS: usize = 4;
+const INSPIRATION_SLOT_STALE_MS: i64 = 30_000;
+static INSPIRATION_SLOT_CONTROLLER: [AtomicUsize; INSPIRATION_SLOTS] = [const { AtomicUsize::new(0) }; INSPIRATION_SLOTS];
+static INSPIRATION_SLOT_SEEN_MS: [AtomicI64; INSPIRATION_SLOTS] = [const { AtomicI64::new(-1) }; INSPIRATION_SLOTS];
+static INSPIRATION_SLOT_ASKED: [AtomicBool; INSPIRATION_SLOTS] = [const { AtomicBool::new(false) }; INSPIRATION_SLOTS];
+static INSPIRATION_SKIPS: AtomicUsize = AtomicUsize::new(0);
+static INSPIRATION_INSIDE_DOOR: AtomicBool = AtomicBool::new(false);
+
+/// The slot `controller` holds, claiming a free or stale one the first time it is seen. `None` when every slot holds
+/// a live timeline, which leaves that timeline to play at the game's own pace rather than evicting one mid ask.
+fn inspiration_slot(controller: usize, now_ms: i64) -> Option<usize> {
+    if let Some(index) = (0..INSPIRATION_SLOTS).find(|&index| INSPIRATION_SLOT_CONTROLLER[index].load(atomic::Ordering::Relaxed) == controller) {
+        return Some(index);
+    }
+
+    let free = (0..INSPIRATION_SLOTS).find(|&index| {
+        let seen = INSPIRATION_SLOT_SEEN_MS[index].load(atomic::Ordering::Relaxed);
+        seen < 0 || now_ms - seen > INSPIRATION_SLOT_STALE_MS
+    })?;
+
+    INSPIRATION_SLOT_CONTROLLER[free].store(controller, atomic::Ordering::Relaxed);
+    INSPIRATION_SLOT_SEEN_MS[free].store(now_ms, atomic::Ordering::Relaxed);
+    INSPIRATION_SLOT_ASKED[free].store(false, atomic::Ordering::Relaxed);
+    Some(free)
+}
+
+/// The lever, at the per frame door on the instance that door hands us, so no pointer is called through after the
+/// frame that handed it. The ask is the client's own `SkipRuntime(-1.0)`: the timeline runs to its end, its end action
+/// reaches `SingleModeSuccessionEventViewController::OnEndCutt`, and the inheritance request that method sends goes out
+/// as it always does, sooner.
+fn pump_inspiration_cut(this: *mut Il2CppObject) {
+    if !AnimationSpeed::skip_inspiration_cut() || this.is_null() {
+        return;
+    }
+
+    let view = SceneManager::requested_view_id();
+    if !AnimationSpeed::INSPIRATION_VIEWS.contains(&view) {
+        return;
+    }
+
+    let now = gate_clock_us() / 1000;
+    let Some(slot) = inspiration_slot(this as usize, now) else {
+        return;
+    };
+
+    let seen = INSPIRATION_SLOT_SEEN_MS[slot].load(atomic::Ordering::Relaxed);
+    let asked = INSPIRATION_SLOT_ASKED[slot].load(atomic::Ordering::Relaxed);
+    if !AnimationSpeed::inspiration_skip_due(view, seen, now, asked) {
+        return;
+    }
+
+    // The skip advances the timeline, and the timeline comes back through `UpdateSpeed`; that call is not a new ask.
+    if INSPIRATION_INSIDE_DOOR.swap(true, atomic::Ordering::AcqRel) {
+        return;
+    }
+
+    INSPIRATION_SLOT_ASKED[slot].store(true, atomic::Ordering::Relaxed);
+    let skips = INSPIRATION_SKIPS.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+    if skips <= PROBE_DETAIL_LIMIT {
+        info!(
+            "Inspiration skip {skips}: asked cut-in timeline {:#x} on view {view} for its end ({}), {} ms after it first ticked",
+            this as usize,
+            AnimationSpeed::INSPIRATION_SKIP_TIME_SEC,
+            now - seen,
+        );
+    }
+
+    skip_cutt_time(this, AnimationSpeed::INSPIRATION_SKIP_TIME_SEC);
+    INSPIRATION_INSIDE_DOOR.store(false, atomic::Ordering::Release);
 }
 
 type CuttSkipRuntimeFramesFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, keep: bool);

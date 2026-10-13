@@ -2069,6 +2069,7 @@ fn mirror_config(config: &Config) {
     // client reaches every frame of a cut, where a `config.load()` would be the hot path cost section 6
     // says not to pay.
     SKIP_TRAINING_CUT.store(config.skip_training_cut, Ordering::Release);
+    SKIP_INSPIRATION_CUT.store(config.skip_inspiration_cut, Ordering::Release);
     // Clamped here so neither story choice site divides by the delay itself: `CheckChoiceAutoTap`
     // runs while a choice is up and `GetTimeScaleByHighSpeedType` is a story path getter, so both
     // read this mirror instead of the config (C24).
@@ -2094,6 +2095,35 @@ static SKIP_TRAINING_CUT: AtomicBool = AtomicBool::new(false);
 /// Whether this build may ask the cut-in timeline to skip through the client's own door.
 pub(crate) fn skip_training_cut() -> bool {
     SKIP_TRAINING_CUT.load(Ordering::Acquire)
+}
+
+// `skip_inspiration_cut`, mirrored for the same per frame door. Neutral default: at `false` nothing is called.
+static SKIP_INSPIRATION_CUT: AtomicBool = AtomicBool::new(false);
+
+/// Whether this build may end the Inspiration cut-in through the timeline's own skip to the end.
+pub(crate) fn skip_inspiration_cut() -> bool {
+    SKIP_INSPIRATION_CUT.load(Ordering::Acquire)
+}
+
+/// What the Inspiration skip hands `CutInTimelineController::SkipRuntime(time)`: the client's own skip to the end.
+/// Run 60a recorded the client making this call itself on a story event cut-in, `CutInHelper::OnStart` at
+/// 21:49:35.912, `SkipRuntime(time) call 3: [-1.0]` 176 ms later, and `CutInHelper::OnEnd` with `CleanupPlaying` 3 ms
+/// after that, so this is a value the client already sends and a jump it already survives, not a guess at a length.
+pub(crate) const INSPIRATION_SKIP_TIME_SEC: f32 = -1.0;
+
+/// How long an Inspiration cut-in timeline must have been ticking before it is asked to end. The client waited 176 ms
+/// in run 60a, and asking in the frame a timeline resets is the shape that left a completion closure reading a null on
+/// the training cut (C64), so the ask waits a little longer than the client did.
+pub(crate) const INSPIRATION_SKIP_AFTER_MS: i64 = 200;
+
+/// The two views an Inspiration cut-in plays on: `SingleModeSuccessionEvent` (1501, the year start and career end
+/// event, where run 61 measured a 3.24 s cut-in at scale 1.000) and `SingleModeSuccessionCut` (1500, the career start).
+pub(crate) const INSPIRATION_VIEWS: [i32; 2] = [1500, 1501];
+
+/// Whether a cut-in timeline first seen ticking at `seen_ms`, and ticking again at `now_ms` on `view`, is due its one
+/// ask. `asked` is whether this build already asked that timeline; the switch itself is the caller's fast exit.
+pub(crate) fn inspiration_skip_due(view: i32, seen_ms: i64, now_ms: i64, asked: bool) -> bool {
+    !asked && seen_ms >= 0 && INSPIRATION_VIEWS.contains(&view) && now_ms - seen_ms >= INSPIRATION_SKIP_AFTER_MS
 }
 
 /// The value this client is measured handing its own cut-in skip door. `CutInTimelineController::SkipRuntime(time)`
@@ -3966,6 +3996,18 @@ pub fn apply() {
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    #[test]
+    fn the_inspiration_skip_asks_once_on_the_inspiration_views_and_only_after_the_cut_ran_a_while() {
+        assert_eq!(INSPIRATION_SKIP_TIME_SEC, -1.0, "the client's own skip to the end is -1.0 (run 60a)");
+        assert!(inspiration_skip_due(1501, 1_000, 1_000 + INSPIRATION_SKIP_AFTER_MS, false));
+        assert!(inspiration_skip_due(1500, 1_000, 1_000 + INSPIRATION_SKIP_AFTER_MS, false));
+        assert!(!inspiration_skip_due(1501, 1_000, 1_000 + INSPIRATION_SKIP_AFTER_MS - 1, false), "asked in the frames a timeline resets in (C64)");
+        assert!(!inspiration_skip_due(1501, 1_000, 5_000, true), "asked the same timeline twice");
+        assert!(!inspiration_skip_due(1101, 1_000, 5_000, false), "a training screen cut-in is not an Inspiration cut-in");
+        assert!(!inspiration_skip_due(1200, 1_000, 5_000, false), "a story event cut-in is the game's own to skip");
+        assert!(!inspiration_skip_due(1501, -1, 5_000, false), "a timeline never seen was asked");
+    }
 
     #[test]
     fn the_cut_skip_asks_the_clients_own_door_once_and_only_after_the_cut_is_open() {

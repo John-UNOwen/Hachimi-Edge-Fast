@@ -1352,6 +1352,13 @@ pub struct Config {
     // called through it and the lever does nothing at all.
     #[serde(default)]
     pub skip_training_cut: bool,
+    // Ends the Inspiration cut-in (`SingleModeSuccessionEvent`, view 1501, and `SingleModeSuccessionCut`, 1500)
+    // through the cut-in timeline's own skip to the end, `CutInTimelineController::SkipRuntime(-1.0)`, the call
+    // the client makes itself to close a story event cut-in (run 60a). The cut-in's end is where the game sends
+    // the inheritance request (`OnEndCutt`), so the request still goes out, only sooner. At `false` nothing is
+    // called (ledger item 111).
+    #[serde(default)]
+    pub skip_inspiration_cut: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
     // expose, using StoryManager's own max and save path.
     #[serde(default)]

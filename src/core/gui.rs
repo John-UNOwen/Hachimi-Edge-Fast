@@ -6085,6 +6085,12 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            if should_show_option(search, &t!("config_editor.skip_inspiration_cut")) {
+                ui.label(t!("config_editor.skip_inspiration_cut"));
+                ui.checkbox(&mut config.skip_inspiration_cut, "");
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.story_high_speed_mode")) {
                 ui.label(t!("config_editor.story_high_speed_mode"));
                 ui.checkbox(&mut config.story_high_speed_mode, "");
