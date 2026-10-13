@@ -1333,6 +1333,23 @@ fn gate_clock_us() -> i64 {
     GATE_BASE.get_or_init(Instant::now).elapsed().as_micros() as i64
 }
 
+// The cut skip lever's own cut run, on the gate's clock. The lever used to read the census's run marker
+// (`RUN_OPENED_MS`), which `open_cut_run` sets only while `CENSUS_ON` is true, so with debug_mode off the pump
+// never saw a cut open and the lever asked for nothing. The gate's open and close doors are armed in every
+// build, so they keep this mark instead: when the cut opened, in ms, or -1 while no training cut is open.
+static SKIP_CUT_OPENED_MS: AtomicI64 = AtomicI64::new(-1);
+
+/// The mark a cut opening on `bucket` leaves for the skip lever at `now_ms`. Only a training screen cut is
+/// one the lever may skip, the same rule the census bucket held the pump to.
+fn skip_cut_open_mark(bucket: ViewBucket, now_ms: i64) -> i64 {
+    if bucket == ViewBucket::Training { now_ms } else { -1 }
+}
+
+fn note_skip_cut_open() {
+    let bucket = bucket_for(current_view_id(), SceneManager::is_race_scene_family());
+    SKIP_CUT_OPENED_MS.store(skip_cut_open_mark(bucket, gate_clock_us() / 1000), atomic::Ordering::Relaxed);
+}
+
 #[derive(Debug)]
 struct CutGate {
     open: AtomicBool,
@@ -1708,6 +1725,18 @@ fn census_disabled_line(counts: &CensusCounts) -> String {
     let named: Vec<String> = counts.disabled.iter().map(|(label, key)| format!("{label} (key {key:?})")).collect();
 
     format!("Cutt probe: armed nothing on {} resolved door(s) this census arms: disabled_hooks names these arming sites: {}", counts.disabled.len(), named.join(", "))
+}
+
+/// The install line for the cut skip lever's doors, printed in both modes so a played build's log says whether
+/// the lever can reach a cut at all.
+fn cut_skip_doors_line(update_speed: bool, skip_runtime: bool) -> String {
+    let state = |armed: bool| if armed { "resolved" } else { "missing, the lever is inert" };
+
+    format!(
+        "Cut skip: CutInTimelineController::UpdateSpeed {}, SkipRuntime(time) {}, armed whatever debug_mode says",
+        state(update_speed),
+        state(skip_runtime),
+    )
 }
 
 // The install line for a gate that armed every door it could ask for. Printed in both modes now; it
@@ -2266,10 +2295,13 @@ fn stall_census(this: *mut Il2CppObject, now: i64) {
 type CuttUpdateSpeedFn = extern "C" fn(this: *mut Il2CppObject);
 def_detour! {
     CuttTimeline_UpdateSpeed(this: *mut Il2CppObject) {
+            // Armed in every build for the skip lever. The census half counts, logs and may take the hole
+            // window's lock, so a played build without debug_mode never reaches it.
+        if CENSUS_ON.load(atomic::Ordering::Relaxed) {
             CUTT_UPDATE_SPEED.count();
-        let now = elapsed_ms();
-        pump_training_cut_cutt(this, now);
-        stall_census(this, now);
+            stall_census(this, elapsed_ms());
+        }
+        pump_training_cut_cutt(this);
 
         get_orig_fn!(CuttTimeline_UpdateSpeed, CuttUpdateSpeedFn)(this);
     }
@@ -2307,20 +2339,23 @@ static CUTT_LEVER_SKIP_STEPS: CutProbe = CutProbe::counted("CutInTimelineControl
 
 /// The lever, taken at the door the client reaches every frame of a cut-in (`UpdateSpeed`, 62 to 1276
 /// calls across runs 43 to 48) on the instance that door is already handing us, so no pointer outlives
-/// the call that got it. It runs only when the switch is on, when the probe has a training-screen cut
-/// run open, and when this build has not already asked for that run. What it asks for is
+/// the call that got it. It runs only when the switch is on, when the gate's doors have a training-screen
+/// cut open (`SKIP_CUT_OPENED_MS`, kept in every build), and when this build has not already asked for that
+/// cut. What it asks for is
 /// `AnimationSpeed::TRAINING_CUT_SKIP_TIME_SEC`, the value the client is measured handing this door, and
 /// the ask is held until `MIN_CUTT_OPEN_MS_BEFORE_SKIP` after the run opened rather than landing in the
 /// frame the timeline resets.
-fn pump_training_cut_cutt(this: *mut Il2CppObject, now: i64) {
+fn pump_training_cut_cutt(this: *mut Il2CppObject) {
     if !AnimationSpeed::skip_training_cut() || this.is_null() {
         return;
     }
 
-    let open = RUN_OPENED_MS.load(atomic::Ordering::Relaxed);
-    if open < 0 || RUN_BUCKET.load(atomic::Ordering::Relaxed) != ViewBucket::Training as usize {
+    let open = SKIP_CUT_OPENED_MS.load(atomic::Ordering::Relaxed);
+    if open < 0 {
         return;
     }
+
+    let now = gate_clock_us() / 1000;
 
     let asked = SKIP_RUN_STAMP.load(atomic::Ordering::Relaxed);
     if AnimationSpeed::training_cut_skip_time(open, now, asked == open).is_some() {
@@ -3419,6 +3454,7 @@ def_detour! {
         // The gate belongs to the door, not to the census: this wrapper is armed whether or not the probe
         // was installed, and a cut the game cleaned is a cut that no longer holds the ui clock off.
         CUT_GATE.release();
+        SKIP_CUT_OPENED_MS.store(-1, atomic::Ordering::Relaxed);
 
         if CENSUS_ON.load(atomic::Ordering::Relaxed) {
             CUTT_CLEAN_UP_CUTT.count();
@@ -3465,6 +3501,7 @@ def_detour! {
         // finishes them out from under that wait.
         let hold = CUT_GATE.engage();
         log_cut_gate_hold(hold);
+        note_skip_cut_open();
 
         if CENSUS_ON.load(atomic::Ordering::Relaxed) {
             CUTT_PLAY_TRAINING_CUT.count();
@@ -3488,6 +3525,7 @@ def_detour! {
     TrainingCutt_PlayScenarioTrainingCut(this: *mut Il2CppObject, info: *mut Il2CppObject) -> *mut Il2CppObject {
         let hold = CUT_GATE.engage();
         log_cut_gate_hold(hold);
+        note_skip_cut_open();
 
         if CENSUS_ON.load(atomic::Ordering::Relaxed) {
             CUTT_PLAY_SCENARIO_TRAINING_CUT.count();
@@ -4247,6 +4285,26 @@ pub fn init(umamusume: *const Il2CppImage) {
         warn!("{}", cut_gate_missing_line(&arming, cutt_controller.is_some()));
     }
 
+    // The cut skip lever's two doors, armed above the debug gate for the reason the gate's are: the lever is a
+    // player's switch, and with them inside the census a build played without debug_mode never skipped a cut.
+    // `UpdateSpeed` is the per frame door the pump stands on and `SkipRuntime(time)` is the call it makes, the
+    // door the client is measured using (2.667 s in runs 43 to 48). The census below counts `UpdateSpeed` as one
+    // of its own doors rather than hooking it twice.
+    let timeline = class_for_label(umamusume, "Gallop.CutIn.Cutt.CutInTimelineController");
+    let update_speed_addr = match timeline {
+        Some(class) => unsafe { AnimationSpeed::resolve_method(class, "UpdateSpeed", NO_PARAMS, VOID) },
+        None => 0,
+    };
+    if update_speed_addr != 0 {
+        new_hook!(update_speed_addr, CuttTimeline_UpdateSpeed);
+    }
+    if let Some(controller) = timeline {
+        unsafe {
+            TRAINING_CUT_SKIP_ADDR = AnimationSpeed::resolve_method(controller, "SkipRuntime", ONE_FLOAT, VOID);
+        }
+    }
+    info!("{}", cut_skip_doors_line(update_speed_addr != 0, unsafe { TRAINING_CUT_SKIP_ADDR } != 0));
+
     if !debug_mode {
         return;
     }
@@ -4255,7 +4313,6 @@ pub fn init(umamusume: *const Il2CppImage) {
     let _ = START.set(Instant::now());
 
     let cut_in_helper = class_for_label(umamusume, "Gallop.SingleModeTrainingCutInHelper");
-    let timeline = class_for_label(umamusume, "Gallop.CutIn.Cutt.CutInTimelineController");
     let cut_status = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatus");
     let cut_status_frame = class_for_label(umamusume, "Gallop.SingleModeMainViewTrainingCutStatusFrame");
     let plate_ui = class_for_label(umamusume, "Gallop.TrainingParamChangeUI");
@@ -4420,22 +4477,22 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(timeline, CuttTimeline_GetCurrentTimeScale, "get_CurrentTimeScale", NO_PARAMS, R4, "CutInTimelineController::get_CurrentTimeScale");
     probe!(timeline, CuttTimeline_GetWaitingTime, "get_WaitingTime", NO_PARAMS, R4, "CutInTimelineController::get_WaitingTime");
     probe!(timeline, CuttTimeline_SetSpeed, "SetSpeed", ONE_FLOAT, VOID, "CutInTimelineController::SetSpeed");
-    probe!(timeline, CuttTimeline_UpdateSpeed, "UpdateSpeed", NO_PARAMS, VOID, "CutInTimelineController::UpdateSpeed");
+    // Armed above the debug gate for the skip lever; counted here as the census door it still is.
+    if update_speed_addr != 0 {
+        census.record_resolved("CutInTimelineController::UpdateSpeed", census_door_id!(CuttTimeline_UpdateSpeed), &config.disabled_hooks);
+    }
+    else {
+        missing.push("CutInTimelineController::UpdateSpeed");
+        census.record_miss();
+    }
     resolve_stall_getters(timeline);
     probe!(timeline, CuttTimeline_SkipRuntimeTime, "SkipRuntime", ONE_FLOAT, VOID, "CutInTimelineController::SkipRuntime(time)");
     probe!(timeline, CuttTimeline_SkipRuntimeFrames, "SkipRuntime", FRAMES_AND_FLAG, VOID, "CutInTimelineController::SkipRuntime(frames, keep)");
 
-    // The call side, held apart from the census arm above: the same door resolved once more so the
-    // lever has an address to call, and armed only once (A4). It is the door the client is measured
-    // using, `SkipRuntime(time)` at 2.667 s in runs 43 to 48, and not `SkipRuntime(frames, keep)` or
-    // `SkipTimeDirect(time)`, which carry no totals line in any of those runs. It stays 0, and the lever
-    // stays inert, on a client that has no such method.
-    if let Some(controller) = timeline {
-        unsafe {
-            TRAINING_CUT_SKIP_ADDR =
-                AnimationSpeed::resolve_method(controller, "SkipRuntime", ONE_FLOAT, VOID);
-        }
-    }
+    // The lever's call side, `TRAINING_CUT_SKIP_ADDR`, is resolved above the debug gate now. It is the door the
+    // client is measured using, `SkipRuntime(time)` at 2.667 s in runs 43 to 48, and not `SkipRuntime(frames,
+    // keep)` or `SkipTimeDirect(time)`, which carry no totals line in any of those runs. It stays 0, and the
+    // lever stays inert, on a client that has no such method.
     probe!(timeline, CuttTimeline_SkipTimeDirect, "SkipTimeDirect", ONE_FLOAT, VOID, "CutInTimelineController::SkipTimeDirect");
 
     // What the timeline says about its own length, and the two doors an auto skip option would have to
@@ -5069,6 +5126,25 @@ static LAST_TOTALS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The skip lever's mark is kept by the gate's doors in every build, and only a training screen cut leaves one.
+    #[test]
+    fn only_a_training_screen_cut_leaves_a_mark_for_the_skip_lever() {
+        assert_eq!(skip_cut_open_mark(ViewBucket::Training, 1_234), 1_234);
+        for bucket in [ViewBucket::Story, ViewBucket::StoryEvent, ViewBucket::Race, ViewBucket::Gacha, ViewBucket::Other] {
+            assert_eq!(skip_cut_open_mark(bucket, 1_234), -1, "a {bucket:?} cut left a mark the skip lever would act on");
+        }
+    }
+
+    #[test]
+    fn the_cut_skip_install_line_says_when_the_lever_is_inert() {
+        let armed = cut_skip_doors_line(true, true);
+        assert!(armed.contains("UpdateSpeed resolved") && armed.contains("SkipRuntime(time) resolved"), "{armed}");
+        assert!(armed.contains("whatever debug_mode says"), "{armed}");
+
+        let missing = cut_skip_doors_line(false, true);
+        assert!(missing.contains("UpdateSpeed missing, the lever is inert"), "{missing}");
+    }
 
     // The window line is what a comparison is read off, so its numbers are checked as text: an arm that
     // cannot be told apart from the arm next to it in the log is the same as not measuring it at all.
