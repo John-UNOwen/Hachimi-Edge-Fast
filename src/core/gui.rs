@@ -6137,6 +6137,18 @@ impl ConfigEditor {
 
         // Gameplay tab
         if show_all || tab == ConfigEditorTab::Gameplay {
+            if should_show_option(search, &t!("config_editor.hide_race_status_plates")) {
+                ui.label(t!("config_editor.hide_race_status_plates"));
+                ui.checkbox(&mut config.hide_race_status_plates, "");
+                ui.end_row();
+            }
+
+            if should_show_option(search, &t!("config_editor.hide_skill_cut_ins")) {
+                ui.label(t!("config_editor.hide_skill_cut_ins"));
+                ui.checkbox(&mut config.hide_skill_cut_ins, "");
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.force_allow_dynamic_camera")) {
                 ui.label(t!("config_editor.force_allow_dynamic_camera"));
                 ui.checkbox(&mut config.force_allow_dynamic_camera, "");

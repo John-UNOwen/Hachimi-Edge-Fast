@@ -1359,6 +1359,16 @@ pub struct Config {
     // called (ledger item 111).
     #[serde(default)]
     pub skip_inspiration_cut: bool,
+    // Hides the race's right side status plates, the stack a skill activation is drawn in, by calling the race UI's
+    // own `SetVisibleRaceUIStatusPlate(false)` after each plate is shown (`umamusume::RaceUI`, ledger item 112). The
+    // plates' completion callbacks still run. At `false` nothing is called.
+    #[serde(default)]
+    pub hide_race_status_plates: bool,
+    // Hides every skill cut-in banner in a race, your own and the opponents', by returning `false` from the race's own
+    // `RaceEventPlayer.IsPlayableCutIn` after the original has run (`umamusume::SkillPopupProbe`, ledger item 112). The
+    // original still runs, so its own state is unchanged. At `false` the original's answer is passed through.
+    #[serde(default)]
+    pub hide_skill_cut_ins: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
     // expose, using StoryManager's own max and save path.
     #[serde(default)]

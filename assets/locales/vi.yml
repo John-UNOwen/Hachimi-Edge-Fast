@@ -153,6 +153,8 @@ config_editor:
   auto_skip_result_screens: "Tự động bỏ qua hoạt ảnh màn hình kết quả"
   skip_training_cut: "Skip the training cut-in through the game's own skip door"
   skip_inspiration_cut: "Skip the Inspiration cut-in through the game's own skip to the end"
+  hide_race_status_plates: "Hide race skill activation plates on the right side (your own and opponents')"
+  hide_skill_cut_ins: "Hide every skill cut-in banner in a race (your own and opponents')"
   high_speed_settings: "Nâng cài đặt Tốc độ cao của cốt truyện và luyện tập lên mức tối đa của game"
   gui_landscape_ratio: "Tỷ lệ thu phóng lớp phủ ngang"
   graphics_quality: "Chất lượng đồ họa"
