@@ -10,7 +10,7 @@ Game enhancement and translation mod for UM:PD, forked to make the game **take l
 
 This fork tracks upstream Hachimi Edge (currently merged up to v0.32.0) and keeps every upstream feature. It adds a set of opt in speed options, faster startup, and a measurement first approach: every change is checked against logged game runs, not against feel.
 
-<img width="100%" src="assets/screenshot-performance.png" alt="The Hachimi Edge menu and Config Editor open on the Performance tab over a paused game screen">
+<img width="100%" src="assets/screenshot-performance.webp" alt="The Hachimi Edge side menu with the Speed preset picker, and the Config Editor open on the Performance tab">
 
 > [!NOTE]
 > The Chinese READMEs are upstream's and do not describe the fork additions yet.
@@ -28,22 +28,39 @@ Do what you must, but we would respectfully request that you try to label the ga
 # What this fork adds
 
 ### Performance tab
-The Config Editor has a new **Performance** tab that groups every speed and frame option in one place. Every option this fork adds is **off by default** (`1.0` or unchecked) and does nothing until you turn it on.
+The Config Editor's **Performance** tab groups every speed and frame option. Every option this fork adds is **off by default** (`1.0` or unchecked) and does nothing until you turn it on.
 
 | Option | What it does | Range |
 |---|---|---|
-| Transition animation speed | Shortens screen to screen fades, wipes and loading overlays by scaling the game's own fade durations. | 1x to 20x |
-| Result screen animation speed | Shortens training plates, count ups and result screen reward cascades. | 1x to 20x |
+| Game time scale | Scales `Time.timeScale`. Affects the whole game, so prefer the duration options below. | 1x to 5x |
+| Transition animation speed | Shortens screen fades, wipes and loading overlays through the game's own fade durations. | 1x to 20x |
+| Result screen animation speed | Shortens count ups and result screen reward cascades. | 1x to 20x |
 | Story cutscene speed | Speeds up the story timeline through the game's own time scale helpers. | 1x to 10x |
-| Auto-skip result screen animations | Presses the game's own skip on result screens as soon as it becomes available. | on / off |
-| Raise High Speed settings to the game maximum | Raises the story and training High Speed settings through the game's own save path, once per value. | on / off |
-| Put story playback into high speed mode | Turns on the game's built in story high speed mode. | on / off |
-| Game time scale | Scales `Time.timeScale`. This affects the whole game, so the duration options above are the preferred tool. | 1x to 5x |
+| Training stat plate animation speed | Shortens the stat plate cascade after a training turn. | 1x to 20x |
+| Training cut-in animation speed | Raises the training cut-in's own playback speed. | 1x to 10x |
+| Training tag cut-in effect speed | Raises the speed of the tag cut-in effect. Never lowers a speed the game set itself. | 1x to 5x |
+| Auto-skip result screen animations | Presses the game's own skip on result screens as soon as it is available. | on / off |
+| Skip the training cut-in | Ends the training cut-in through the game's own skip. | on / off |
+| Skip the Inspiration cut-in | Ends the Inspiration cut-in through the cut-in timeline's own skip to the end. | on / off |
+| Story high speed mode | Turns on the game's built in story high speed mode. | on / off |
 
-The tab also gathers the existing upstream options that affect speed and frame cost: UI animation scale (now capped at 20x), target FPS, target FPS when unfocused, story text speed, story choice auto select delay, physics update mode and CySpring frame scale uncapping.
+The tab also gathers the upstream options that affect speed and frame cost: target FPS, target FPS when unfocused, UI animation scale (capped at 20x), story text speed, story choice auto select delay, physics update mode and CySpring frame scale uncapping.
+
+### Speed presets
+The side menu has a **Speed preset** picker. Three presets are built in:
+- **Neutral:** every timing option off.
+- **All levers:** every timing option at the ceiling the code allows.
+- **Hachimi fast:** upstream's own speed options at their fastest, with this fork's options off.
+
+You can also save the current settings under a name and switch back later. A saved preset is the whole config, so it restores graphics and translation settings too. The log records which preset each run used.
+
+### Race options
+On the **Gameplay** tab, both off by default:
+- **Hide race status plates:** hides the skill activation plates on the right side of a race.
+- **Hide skill cut-ins:** hides every skill cut-in banner in a race, yours and your opponents'.
 
 ### Built to be safe at speed
-- **Hard limits in code.** Speed factors are capped at 20x and time scale at 5x, whatever `config.json` says, so a typo can't break a screen.
+- **Hard limits in code.** Speed factors are capped at 20x and time scale at 5x, and stacked options are bounded together, whatever `config.json` says, so a typo can't break a screen.
 - **No compounding.** Every value is computed from the game's original, never from the current value, so applying a setting twice or moving a slider back and forth never stacks.
 - **Presentation only.** Speed options act on animation timings and the game's own settings. They never skip server calls, change race simulation, or touch purchases or saves.
 - **Signature checked hooks.** Speed hooks only attach when a method's parameter and return types match exactly. A method that changed in a game update is skipped and logged instead of crashing.
@@ -93,7 +110,7 @@ Releases are currently **pre-releases**. This fork is developed and measured on 
 ```bash
 cargo build --release
 ```
-The Windows DLL is written to `target/release/hachimi.dll`. Rename it to `cri_mana_vpx.dll` to deploy it. Before sending changes, run `cargo test --lib` and clippy with `-D warnings` for both `x86_64-pc-windows-msvc` and `aarch64-linux-android`. See [AGENTS.md](AGENTS.md) for the contributor guide, including the Android toolchain setup on a Windows host.
+The Windows DLL is written to `target/release/hachimi.dll`. Rename it to `cri_mana_vpx.dll` to deploy it. Before sending changes, run `cargo test --lib` and clippy with `-D warnings` for `x86_64-pc-windows-msvc`. See [AGENTS.md](AGENTS.md) for the contributor guide, including the Android toolchain setup on a Windows host.
 
 # Special thanks
 These projects have been the basis for Hachimi's development; without them, Hachimi would never have existed in its current form:
