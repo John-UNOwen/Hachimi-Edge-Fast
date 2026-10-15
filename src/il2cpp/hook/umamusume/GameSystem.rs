@@ -17,6 +17,7 @@ use crate::core::live_utils;
 #[cfg(target_os = "windows")]
 use super::Director;
 use super::GraphicSettings::{self, MsaaQuality};
+use super::{HorseRaceInfo, RaceManagerReplayBase};
 
 // C16: the initialization is reached from two independent paths and nothing recorded that it had
 // already happened. The first is the eager pass at the end of hook arming
@@ -74,6 +75,11 @@ def_detour! {
         // not the gap this probe spent working inside one.
         super::GameFrameProbe::observe_frame();
         crate::core::gui::race_slider_drain();
+        // Upstream #256: the race slider and its play/pause button used to ask the game, per GUI frame,
+        // whether the race had started and finished. These two refresh the atomics those reads now take,
+        // once per game tick, on this thread.
+        HorseRaceInfo::refresh_race_state_cache();
+        RaceManagerReplayBase::refresh_playback_gated_cache();
 
         // C2 barrier item 2: a coroutine door that tripped took itself out of the hook registry from
         // inside its own frame (`guard::coroutine_trip`), and left the backend half of that - putting this
