@@ -6,7 +6,9 @@ use crate::{
 type GetSingCharaIdListFn = extern "C" fn(songId: i32, songPartNumber: i32, allCharaIdArray: *mut Il2CppArray, vocalCharaIdArray: *mut Il2CppArray, shuffledCharaDataList: *mut Il2CppObject) -> *mut Il2CppObject;
 def_detour! {
     GetSingCharaIdList(songId: i32, songPartNumber: i32, allCharaIdArray: *mut Il2CppArray, vocalCharaIdArray: *mut Il2CppArray, shuffledCharaDataList: *mut Il2CppObject) -> *mut Il2CppObject {
-            let chara_vo_ids = &Hachimi::instance().config.load().live_vocals_swap;
+        // Upstream #258: a vocal swap can now be set per song, and the song's own preset wins when it has one.
+        let config = Hachimi::instance().config.load();
+        let chara_vo_ids = config.live_vocals_swap_presets.get(&songId).unwrap_or(&config.live_vocals_swap);
 
         if songId > 0 {
             unsafe {

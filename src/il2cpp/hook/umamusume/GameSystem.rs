@@ -181,6 +181,7 @@ pub fn on_game_initialized() {
     }
 
     Hachimi::instance().init_character_data();
+    Hachimi::instance().init_live_data();
     let hachimi = Hachimi::instance();
     hachimi.init_skill_info();
     hachimi.init_skill_data_desc();

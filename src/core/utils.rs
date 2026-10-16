@@ -779,6 +779,19 @@ pub fn url_without_query(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
+// Upstream #258: the skill info dialog's copy buttons put text on the clipboard through the
+// platform's own path, so the choice of which one belongs to the platform layer.
+pub fn set_clipboard_text(text: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::utils::set_clipboard_text(text)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows::utils::set_clipboard_text(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_web_url, url_without_query};
