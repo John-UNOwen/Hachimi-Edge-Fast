@@ -25,8 +25,8 @@ Usage:
     python tools/check_proxy_export_stubs.py [dll ...] [--call]
 
 With no path it checks `target/release/hachimi.dll`, falling back to `target/debug/hachimi.dll`.
-Exit 0 only when every advertised export is published, guarded, reading its own cell, and - under
-`--call` - answered its call.
+Exit 0 only when the shape rule reads the shapes this script says it tells apart, every advertised
+export is published, guarded, reading its own cell, and - under `--call` - answered its call.
 """
 from __future__ import annotations
 
@@ -47,9 +47,58 @@ JUMP_THROUGH_MEMORY = b"\xff\x25"
 # The refusal arm `proxy_proc!` writes: `sub rsp, 40` / `lea rcx, [rip + cell]` / `call refusal` /
 # `add rsp, 40` / `xor eax, eax` / `ret`. Group 1 is the shadow-space size, group 2 the cell the
 # refusal is handed.
-REFUSAL_ARM = re.compile(rb"\x48\x83\xec(.)\x48\x8d\x0d(....)\xe8(....)\x48\x83\xc4\1\x31\xc0\xc3")
+#
+# `re.DOTALL` is load-bearing here. The `call` is a rel32 - arbitrary bytes - and a bare `.` in a pattern does not match
+# `0x0a`, so an arm whose displacement happens to carry that byte reads as no arm at all. On the build at HEAD that is
+# `WinHttpCreateUrl`, whose arm is `e8 0a 43 b8 00`: the stub was guarded and the rule could not see it, so a clean file
+# exited 1. `SELFTEST_STUBS` below is the check on the rule itself.
+REFUSAL_ARM = re.compile(rb"\x48\x83\xec(.)\x48\x8d\x0d(....)\xe8(....)\x48\x83\xc4\1\x31\xc0\xc3", re.DOTALL)
 
 GUARDED = "reads, tests, branches, then jumps the target"
+
+# One arm read from `target/release/hachimi.dll` at HEAD - guarded, with the `0a` that the rule used to trip over - and
+# three stubs written out to name the shapes the rule must tell apart: the C1 shape that jumps through an empty cell, a
+# guarded jump with no arm at all, and an arm that keeps no shadow space. The rule's own reading of these is printed on
+# every run, so a rule that has stopped matching what it looks for says so instead of quietly faulting a good file.
+SELFTEST_STUBS: list[tuple[str, bytes, int, str]] = [
+    (
+        "guarded arm carrying 0a in its call displacement",
+        bytes.fromhex("488b05d9a8ce014885c07402ffe04883ec28488d0dc7a8ce01e80a43b8004883c42831c0c3"),
+        0x1128,
+        GUARDED,
+    ),
+    (
+        "the C1 shape: jump through the cell",
+        bytes.fromhex("ff25d9a8ce019090909090909090909090909090"),
+        0x1128,
+        "JUMPS THROUGH ITS CELL",
+    ),
+    (
+        "guarded jump with no refusal arm",
+        bytes.fromhex("488b05d9a8ce014885c07402ffe090909090909090909090909090909090"),
+        0x1128,
+        "jumps the target but names no refusal arm",
+    ),
+    (
+        "refusal arm with no shadow space",
+        bytes.fromhex("488b05d9a8ce014885c07402ffe04883ec20488d0dc7a8ce01e80a43b8004883c42031c0c3"),
+        0x1128,
+        "refusal arm leaves no shadow space",
+    ),
+]
+
+
+def selftest() -> tuple[int, list[str]]:
+    """Read the rule against the shapes it claims to tell apart. Returns (ok, complaints)."""
+    bad = []
+    for label, head, func_rva, want in SELFTEST_STUBS:
+        shape, _cell = classify_stub(head, func_rva)
+        if shape != want:
+            bad.append(f"{label}: rule reads it as {shape!r}, wanted {want!r}")
+    guarded, cell = classify_stub(SELFTEST_STUBS[0][1], 0x1128)
+    if guarded == GUARDED and cell != 0x1128 + 7 + 0x1CEA8D9:
+        bad.append(f"the guarded stub reads cell {cell:#x}, not {0x1128 + 7 + 0x1CEA8D9:#x}")
+    return (0 if not bad else 1), bad
 
 
 def advertised_names() -> list[str]:
@@ -197,7 +246,11 @@ def check_one(path: pathlib.Path, names: list[str], call: bool) -> int:
             cells.setdefault(cell_rva, []).append(name)
         else:
             odd += 1
+            # The bytes the rule judged: without them a red number names a stub no one can read,
+            # and the difference between a hole in the shipped file and a shape this script has
+            # never seen is invisible.
             print(f"  {name} at rva {func_rva:#x}: {shape}")
+            print(f"    {head[:48].hex(' ')}")
 
         if name in ("UnityMain", "WinHttpOpen", "WinHttpCloseHandle", "WinHttpWebSocketShutdown"):
             samples.append((name, func_rva, shape, cell_rva, head[:38]))
@@ -255,6 +308,16 @@ def check_one(path: pathlib.Path, names: list[str], call: bool) -> int:
 
 
 def main() -> int:
+    # The rule is checked before it is pointed at a file: a rule that has stopped matching what it looks for faults every
+    # build it runs on, and that reads as a defect in the shipped file.
+    rc, complaints = selftest()
+    if complaints:
+        for line in complaints:
+            print(f"  rule self test: {line}")
+        return rc
+
+    print("  rule self test: 4 stubs read as written, the guarded one including a 0a in its call displacement")
+
     argv = [a for a in sys.argv[1:] if a != "--call"]
     call = "--call" in sys.argv[1:]
 
