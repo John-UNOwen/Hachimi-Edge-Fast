@@ -3,7 +3,7 @@ These are the tools which can be used when developing this project.
 
 Unless stated otherwise, they're meant to be run in the project's root directory. See each platform's README for more info.
 
-## Audits that back a claim in `knowledge/defects/`
+## Audits that back a claim in the knowledge base (`%USERPROFILE%\knowledge\projects\hachimi-edge\defects\`)
 
 | Tool | What it prints |
 |---|---|
@@ -21,4 +21,13 @@ travel with the hooks they check and the barrier audit checks that for them.
 
 | Tool | What it does |
 |---|---|
-| `bash tools/knowledge-snapshot.sh ["what changed"]` | Records `knowledge/` and `LEDGER.md` in the local history outside this repository. `--log`, `--show [rev]` and `--restore [rev]` read it back. AGENTS.md section 1 has the rules. |
+| `bash tools/knowledge-snapshot.sh ["what changed"]` | Records `LEDGER.md` in the local history outside this repository. `--log`, `--show [rev]` and `--restore [rev]` read it back. AGENTS.md section 1 has the rules. |
+| `bash tools/test_knowledge_snapshot.sh` | The cycle test for that script: it runs it against a throwaway history in `target/scratch/ks-test`, checks that a snapshot records `LEDGER.md` and only `LEDGER.md`, that `--log` and `--show` read the record back, that a deletion is recorded rather than silently skipped, and that `--restore` puts `LEDGER.md` back as it was. Seven checks, and it removes the scratch folder when they pass. |
+| `python tools/find_method_owner.py <inventory.txt> <pattern>` | Prints the `### image :: Class` header that owns every method and field line of the static map's `inventory.txt` matching a regular expression. `doors.py` prints a method line without the class it sits under, so four classes carrying `SetMarkerVisible` read as one door; this names the owner, which is what decides whether a door is a body a trampoline can patch (ledger item 118). |
+
+The OKF bundle is not in this repository and not this script's job. It lives at
+`%USERPROFILE%\knowledge\projects\hachimi-edge\` as a folder of a git-tracked knowledge base with its own
+history, indexes and log, and that git versions it. Snapshots taken before the 2026-10-13 move also hold a
+`knowledge/` tree; they keep it, and the script says so and leaves it alone. See
+`knowledge-history-handoff.md` at the project root (gitignored, and deliberately outside `tools/`, because the
+barrier audit reads what a `git add -u` commit would drop out of what lies here).

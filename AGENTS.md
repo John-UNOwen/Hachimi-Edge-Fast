@@ -2,18 +2,23 @@
 
 Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code,
 then read [LEDGER.md](LEDGER.md), which is the fork's working memory: measured baselines, open
-items with IDs (A1 to A30, C1 to C51, E1 to E3; the C ids now live in `knowledge/defects/`), the
+items with IDs (A1 to A30, C1 to C80, E1 to E3; a C id is a concept in the knowledge base, see below), the
 fix order, the run notes, and section F for releases.
 
-LEDGER.md and `knowledge/` are local records that this repository does not track. Both are in
-`.gitignore`, both are absent from a fresh clone, and `git clean -xdf` deletes them. Never `git add`
-them in this repository, and never audit them with its `git diff`, which sees neither. Their history
-is a separate local git repository, `$HOME/.hachimi-knowledge-history.git` (or
-`$KNOWLEDGE_HISTORY`). It has no remote, must never get one, and exists only on this machine. `bash
-tools/knowledge-snapshot.sh "what changed"` records both paths there. `--log` and `--show` read that
-history, and `--restore [rev]` puts both paths back as they were at `rev`, after snapshotting the
-current state. After a `git clean -xdf`, run `--restore`. Take a snapshot after each change to
-either file. Only that script stages these paths, and only into that history.
+LEDGER.md is a local record that this repository does not track. It is in `.gitignore`, absent from a
+fresh clone, and `git clean -xdf` deletes it. Never `git add` it in this repository, and never audit it
+with its `git diff`, which does not see it. Its history is a separate local git repository,
+`$HOME/.hachimi-knowledge-history.git` (or `$KNOWLEDGE_HISTORY`). It has no remote, must never get one,
+and exists only on this machine. `bash tools/knowledge-snapshot.sh "what changed"` records LEDGER.md
+there. `--log` and `--show` read that history, and `--restore [rev]` puts LEDGER.md back as it was at
+`rev`, after snapshotting the current state. After a `git clean -xdf`, run `--restore`. Take a snapshot
+after each change to it. Only that script stages it, and only into that history. A snapshot taken before
+2026-10-13 also holds a `knowledge/` tree: the script names it and leaves that half alone.
+
+The OKF bundle left this repository on 2026-10-13. It is `%USERPROFILE%\knowledge\projects\hachimi-edge\`,
+one folder of a git-tracked knowledge base holding every project of the user's, with its own `index.md`,
+`log.md` and history, and no remote. That git versions it, not this repository's git and not the snapshot
+script. Inside the bundle a link or a `resource:` written as `Hachimi-Edge/...` points into this checkout.
 
 ## 1. What this fork is for
 
@@ -36,12 +41,13 @@ root, see C4). Android support is still in the tree and unchanged, but it is **n
 fork**: the `aarch64-linux-android` clippy leg is out of CI and out of the per-change check list,
 because `src/lib.rs` gates `mod android` behind `cfg(target_os = "android")` so the Windows build
 never compiles it and this fork is played on the PC Global client. Lint it by hand if you ever touch
-`src/android/` or the slot tables. Decision: `knowledge/decisions/android-is-not-a-gate-on-this-fork.md`.
+`src/android/` or the slot tables. Decision: `%USERPROFILE%\knowledge\projects\hachimi-edge\decisions\android-is-not-a-gate-on-this-fork.md`.
 
-The durable half of that memory is an OKF bundle at `knowledge/`: one concept per file, for a
-rule, a decision, a baseline or a measurement procedure. Write one when an item closes with a run
-or a decision is taken, not as a scratch pad. The split and the evidence rule are in
-`knowledge/conventions/ledger-bridge.md`.
+The durable half of that memory is the OKF bundle in the knowledge base, at
+`%USERPROFILE%\knowledge\projects\hachimi-edge\`: one concept per file, for a rule, a decision, a
+baseline or a measurement procedure. Write one when an item closes with a run or a decision is taken, not
+as a scratch pad, and read `projects/hachimi-edge/index.md` before a task. The split and the evidence rule
+are in `%USERPROFILE%\knowledge\projects\hachimi-edge\conventions\ledger-bridge.md`.
 
 ## 2. Rules that override everything else
 
@@ -101,7 +107,7 @@ or a decision is taken, not as a scratch pad. The split and the evidence rule ar
 | `src/android/` | Dobby backend, Zygisk, GL overlay |
 | `assets/locales/*.yml` | 10 locales (en, es, fil, id, ko, pt-br, ru, vi, zh-cn, zh-tw) |
 | `tools/gen_il2cpp_slot_table.py` | generates `src/il2cpp/slot_table_generated.rs` (Android) |
-| `tools/knowledge-snapshot.sh` | snapshots `knowledge/` and `LEDGER.md` into the local history outside this repository (section 1) |
+| `tools/knowledge-snapshot.sh` | snapshots `LEDGER.md` into the local history outside this repository (section 1); the bundle is versioned by the knowledge base's own git |
 
 ## 4. Build and check
 
@@ -259,7 +265,8 @@ Hot paths run every frame or every tween tick. In them:
       different fixes, and a refusal is never in `c`.
    - `Frame probe totals at N s:` for the story stepping search (item D13).
 4. Record the run in LEDGER.md in the existing format: build hash, duration, numbers, what
-   moved, what didn't. Then take a snapshot (section 1).
+   moved, what didn't. Then snapshot LEDGER.md (section 1) and write the durable half of what the run
+   settled as a concept in the knowledge base.
 
 ## 8. Where the remaining time is
 
@@ -297,17 +304,19 @@ A new speed or performance option touches, in one change:
 ## 10. Conventions
 
 - Commits: `area: lower case imperative summary`, areas `il2cpp`, `core`, `gui`, `l10n`,
-  `docs`, `windows`, `android`. One concern per commit. The ledger and the bundle are not part of a
-  commit: they are local records, gitignored, and never staged in this repository. Their snapshots go to the history in section 1.
+  `docs`, `windows`, `android`. One concern per commit. LEDGER.md is not part of a commit: it is a local
+  record, gitignored, never staged in this repository, and snapshotted into the history in section 1. The
+  bundle is not part of a commit either: it lives in the knowledge base and is committed there.
 - Code style follows the surrounding file: hook files use the game's PascalCase names
   (`src/lib.rs` allows `non_snake_case` crate wide), comments explain *why* a value is safe, not what the line does.
 - LEDGER.md status marks: `[x]` fixed and verified, `[~]` partial, `[ ]` open, `[latent]` inert
   on this client. They apply to the items of section D, the fix order, and to the A and E items;
-  a C item's state lives in its concept at `knowledge/defects/`, as `state`, `fixed_in` and the
+  a C item's state lives in its concept in the knowledge base (`%USERPROFILE%\knowledge\projects\hachimi-edge\defects\`),
+  as `state`, `fixed_in` and the
   proof line. Cite the commit hash when closing a code item, and never mark `[x]` without a run. An
   item whose own text says the run is missing is `[~]`, not `[x]`. A ledger self check counts marks
   in the files, never in a diff, because this repository's git tracks neither: count
-  `Select-String '^- \[x\]|^[0-9]+\. \[x\]' LEDGER.md` and `Select-String '^state: fixed' knowledge\defects\*.md`
+  `Select-String '^- \[x\]|^[0-9]+\. \[x\]' LEDGER.md` and `Select-String '^state: fixed' "$env:USERPROFILE\knowledge\projects\hachimi-edge\defects\*.md"`
   before and after the change set, and quote both counts with the moment each was taken. A check
   that cannot match what it looks for returns a clean number on any tree.
 - Audit tooling is part of the change set it audits. A script whose number a concept quotes lives in
@@ -319,10 +328,12 @@ A new speed or performance option touches, in one change:
   asserted in the present tense.
 - Upstream merges: keep our `introspect`/speed modules, take upstream's everything else, rebuild
   with zero warnings, and record the merge in section E.
-- `knowledge/` concepts follow OKF v0.2: frontmatter with a `type`, the ledger id inside the
+- Knowledge base concepts follow OKF v0.2: frontmatter with a `type`, the ledger id inside the
   filename (`defects/c48-<slug>.md`, ids are never reused), the proof line quoted in the body, and
   no `verified` entry without that line. The ledger keeps the queue, the bundle keeps the
-  conclusion, and both stay out of this repository's git, with their history in section 1. The view over them is
-  `python knowledge/references/computations/defect_rollup.py`.
+  conclusion, and neither is in this repository's git: LEDGER.md has its history in section 1 and the
+  bundle has the knowledge base's own. The view over the defects is
+  `python "%USERPROFILE%\knowledge\projects\hachimi-edge\references\computations\defect_rollup.py"`, and the
+  gate over the whole folder is `okf_selfcheck.py` beside it.
 - Upstream's PR template forbids untested AI generated code. Anything heading upstream must be
   built, run in game and understood by the human submitting it.

@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# Snapshots knowledge/ and LEDGER.md into a local git history that lives outside this repository.
+# Snapshots LEDGER.md into a local git history that lives outside this repository.
 #
-#   bash tools/knowledge-snapshot.sh ["what changed"]   record both paths (default message: the UTC time)
+#   bash tools/knowledge-snapshot.sh ["what changed"]   record LEDGER.md (default message: the UTC time)
 #   bash tools/knowledge-snapshot.sh --log              list every snapshot with the files it changed
 #   bash tools/knowledge-snapshot.sh --show [rev]       what one snapshot changed (default HEAD)
-#   bash tools/knowledge-snapshot.sh --restore [rev]    put both paths back as they were at rev (default HEAD)
+#   bash tools/knowledge-snapshot.sh --restore [rev]    put LEDGER.md back as it were at rev (default HEAD)
+#
+# The OKF bundle is not this script's job any more. It left the project on 2026-10-13 and is now
+# $HOME/knowledge/projects/hachimi-edge, a folder of a git-tracked knowledge base with its own history,
+# its own index.md and log.md, and no remote. A snapshot taken before that move also holds a knowledge/
+# tree: it stays in the history untouched, and this script drops it from the set it stages.
 #
 # The history has no remote and must never get one. Its git directory is $HOME/.hachimi-knowledge-history.git,
 # or $KNOWLEDGE_HISTORY when set. It sits outside this repository, so `git clean -xdff` here cannot reach it.
-# This repository's git never stages these paths; only this script does, and only into that history.
+# This repository's git never stages LEDGER.md; only this script does, and only into that history.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,8 +35,14 @@ mkdir -p "$HIST/info"
 printf '* -text diff\n' > "$HIST/info/attributes"
 
 snapshot() {
-  test -d knowledge && test -f LEDGER.md || die "knowledge/ or LEDGER.md is missing, so their deletion is not recorded"
-  g add -f -A -- knowledge LEDGER.md
+  test -f LEDGER.md || die "LEDGER.md is missing, so its deletion is not recorded"
+  if g rev-parse -q --verify HEAD >/dev/null && g cat-file -e HEAD:knowledge 2>/dev/null; then
+    # The pre-move snapshots keep their bundle half; this script stops staging it from here on.
+    g rm -r -q --cached knowledge
+    echo "note: the history still holds the knowledge/ tree of its older snapshots; that half is left in"
+    echo "      place, and the knowledge base at \$HOME/knowledge versions the bundle itself"
+  fi
+  g add -f -A -- LEDGER.md
   if g diff --cached --quiet; then
     echo "no change since the last snapshot"
     return 0
@@ -54,16 +65,17 @@ case "${1:-}" in
   --restore)
     name="${2:-HEAD}"
     rev="$(g rev-parse -q --verify "$name^{commit}")" || die "no snapshot named $name"
-    { g cat-file -e "$rev:knowledge" && g cat-file -e "$rev:LEDGER.md"; } 2>/dev/null \
-      || die "$name does not hold both knowledge/ and LEDGER.md"
-    if test -d knowledge || test -f LEDGER.md; then
-      test -d knowledge && test -f LEDGER.md \
-        || die "only one of knowledge/ and LEDGER.md exists; move it aside, then run --restore again"
+    g cat-file -e "$rev:LEDGER.md" 2>/dev/null || die "$name does not hold LEDGER.md"
+    if g cat-file -e "$rev:knowledge" 2>/dev/null; then
+      echo "note: $name also holds the knowledge/ tree the pre-move snapshots recorded; LEDGER.md is all"
+      echo "      this restore touches, and the bundle itself is at \$HOME/knowledge/projects/hachimi-edge"
+    fi
+    if test -f LEDGER.md; then
       snapshot "before restoring $name"   # the current state stays reachable in the history
     fi
-    rm -rf knowledge LEDGER.md
-    g checkout -q "$rev" -- knowledge LEDGER.md
-    echo "restored knowledge/ and LEDGER.md from $name" ;;
+    rm -f LEDGER.md
+    g checkout -q "$rev" -- LEDGER.md
+    echo "restored LEDGER.md from $name" ;;
   "")
     snapshot "snapshot $(date -u +%Y-%m-%dT%H:%MZ)" ;;
   *)
