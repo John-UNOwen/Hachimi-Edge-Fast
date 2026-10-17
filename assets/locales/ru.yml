@@ -219,6 +219,7 @@ config_editor:
   skip_inspiration_cut: "Skip the Inspiration cut-in through the game's own skip to the end"
   hide_race_status_plates: "Hide race skill activation plates on the right side (your own and opponents')"
   hide_skill_cut_ins: "Hide every skill cut-in banner in a race (your own and opponents')"
+  hide_race_markers: "Hide the diamond markers the game floats above your Uma and the support Uma in a race"
   high_speed_settings: "Поднимать настройки быстрого режима сюжета и тренировок до игрового максимума"
   story_high_speed_mode: "Перевести проигрывание сюжета в собственный быстрый режим игры"
   graphics_quality: "Качество графики"
