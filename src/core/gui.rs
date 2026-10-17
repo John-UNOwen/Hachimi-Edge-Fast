@@ -6149,6 +6149,12 @@ impl ConfigEditor {
                 ui.end_row();
             }
 
+            if should_show_option(search, &t!("config_editor.hide_race_markers")) {
+                ui.label(t!("config_editor.hide_race_markers"));
+                ui.checkbox(&mut config.hide_race_markers, "");
+                ui.end_row();
+            }
+
             if should_show_option(search, &t!("config_editor.force_allow_dynamic_camera")) {
                 ui.label(t!("config_editor.force_allow_dynamic_camera"));
                 ui.checkbox(&mut config.force_allow_dynamic_camera, "");
