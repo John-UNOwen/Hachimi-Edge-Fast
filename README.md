@@ -112,6 +112,10 @@ cargo build --release
 ```
 The Windows DLL is written to `target/release/hachimi.dll`. Rename it to `cri_mana_vpx.dll` to deploy it. Before sending changes, run `cargo test --lib` and clippy with `-D warnings` for `x86_64-pc-windows-msvc`. See [AGENTS.md](AGENTS.md) for the contributor guide, including the Android toolchain setup on a Windows host.
 
+# Updates
+
+The in-game update check reads this fork's [releases](https://github.com/John-UNOwen/Hachimi-Edge-Fast/releases), not upstream's. A release here carries `cri_mana_vpx.dll`, and when the check finds a build newer than the one running it opens that release page instead of downloading or running anything: updating means closing the game and replacing the DLL, which is what `tools/deploy-game.ps1` does on a build machine. A build is told apart from a release of the same version (`v0.32.0-fork.1` through `.3` are all 0.32.0) by asking the repository whether the release holds commits the build was stamped from.
+
 # Special thanks
 These projects have been the basis for Hachimi's development; without them, Hachimi would never have existed in its current form:
 
