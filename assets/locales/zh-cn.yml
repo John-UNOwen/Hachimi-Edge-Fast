@@ -168,8 +168,6 @@ config_editor:
     您将无法再访问配置编辑器。
     如非本意，请关闭此窗口并禁用此选项。
   meta_index_url: "翻译 Meta URL"
-  custom_font_file: "自定义字体"
-  custom_font_none_found: "未找到.hachifont字体包"
   custom_font_file_warning: >-
     自定义字体可能无法与翻译仓库良好兼容。
     翻译是按特定字体设计的，因此自定义字体可能会导致

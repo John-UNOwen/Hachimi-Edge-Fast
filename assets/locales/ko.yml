@@ -279,8 +279,6 @@ config_editor:
   soft_shadow_quality: "품질"
   shadow_depth_bias: "그림자 길이 Bias"
   shadow_normal_bias: 그림자 Normal Bias"
-  shadow_depth_bias: "Shadow Depth Bias"
-  shadow_normal_bias: "Shadow Normal Bias"
   force_chara_shadows: "강제로 그림자 만들기"
   story_shadow_type: "그림자 형태"
   hide_now_loading: "로딩 화면 미표시"
