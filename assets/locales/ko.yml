@@ -1037,6 +1037,12 @@ update_prompt_dialog:
     UmaPatcher Edge에서 다시 패치하세요.
 
     Note: apk파일은 이미 있는것을 사용하시면 됩니다!
+  release_content: |
+    A newer build of this Hachimi Edge fork is available (%{version}).
+    Do you want to open its release page?
+
+    Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
+    game folder, with the game closed.
 
 updating_dialog:
   title: "업데이트중"

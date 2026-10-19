@@ -227,6 +227,12 @@ update_prompt_dialog:
 
     點擊「是」將跳轉至 UmaPatcher Edge，在其中重新為當前遊戲補丁以更新 Hachimi。
     (無需重新下載完整遊戲文件或 APK，重新為當前遊戲版本的 APK 補丁並安裝即可，UmaPatcher Edge 將自動下載最新版本的 Hachimi Edge。)
+  release_content: |
+    A newer build of this Hachimi Edge fork is available (%{version}).
+    Do you want to open its release page?
+
+    Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
+    game folder, with the game closed.
 
 updating_dialog:
   title: "更新中"

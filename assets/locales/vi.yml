@@ -220,6 +220,12 @@ update_prompt_dialog:
 
     Nhấn "Có" để mở UmaPatcher Edge và patch lại game hiện tại của bạn.
     (Không cần tải lại toàn bộ game hay APK, bạn chỉ cần patch lại như bình thường vì UmaPatcher Edge luôn tự tải về phiên bản Hachimi Edge mới nhất.)
+  release_content: |
+    A newer build of this Hachimi Edge fork is available (%{version}).
+    Do you want to open its release page?
+
+    Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
+    game folder, with the game closed.
 
 updating_dialog:
   title: "Đang cập nhật"

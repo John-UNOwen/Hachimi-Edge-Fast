@@ -318,6 +318,12 @@ update_prompt_dialog:
 
     Ketuk "Ya" untuk membuka UmaPatcher Edge dan patch ulang game kamu.
     (Tidak perlu mengunduh ulang data game atau APK, kamu hanya perlu patch lagi seperti biasanya karena UmaPatcher Edge selalu mengunduh versi Hachimi Edge terbaru.)
+  release_content: |
+    A newer build of this Hachimi Edge fork is available (%{version}).
+    Do you want to open its release page?
+
+    Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
+    game folder, with the game closed.
 
 updating_dialog:
   title: "Memperbarui"

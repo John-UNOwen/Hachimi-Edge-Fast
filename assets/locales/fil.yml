@@ -416,6 +416,12 @@ update_prompt_dialog:
     May bagong update na available para sa Hachimi Edge (%{version}).
 
     Gusto mo bang buksan ang UmaPatcher Edge para simulan ang updater?
+  release_content: |
+    A newer build of this Hachimi Edge fork is available (%{version}).
+    Do you want to open its release page?
+
+    Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
+    game folder, with the game closed.
 
 updating_dialog:
   title: "Ina-update..."
