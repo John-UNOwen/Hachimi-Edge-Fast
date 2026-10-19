@@ -15,10 +15,17 @@ there. `--log` and `--show` read that history, and `--restore [rev]` puts LEDGER
 after each change to it. Only that script stages it, and only into that history. A snapshot taken before
 2026-10-13 also holds a `knowledge/` tree: the script names it and leaves that half alone.
 
+`python tools/ledger_index.py` reads LEDGER.md and writes `LEDGER-INDEX.md` (gitignored, generated, not
+snapshotted): one line per numbered item with its mark, the line it starts on, its section and its title. Read
+the index, then open the item by line number. `--check` exits 1 when the index no longer matches the file or
+when a line runs past 1200 characters, which is also the shape rule for LEDGER.md: a line longer than that
+cannot be read by line number and defeats a line based grep, so wrap it at spaces.
+
 The OKF bundle left this repository on 2026-10-13. It is `%USERPROFILE%\knowledge\projects\hachimi-edge\`,
 one folder of a git-tracked knowledge base holding every project of the user's, with its own `index.md`,
-`log.md` and history, and no remote. That git versions it, not this repository's git and not the snapshot
-script. Inside the bundle a link or a `resource:` written as `Hachimi-Edge/...` points into this checkout.
+`log.md` and history. That git versions it, not this repository's git and not the snapshot script. The
+knowledge base has a remote (`origin`, added outside this repository's history) and is pushed only when the
+player asks. Inside the bundle a link or a `resource:` written as `Hachimi-Edge/...` points into this checkout.
 
 ## 1. What this fork is for
 

@@ -6,8 +6,9 @@ dump.cs
 .envrc
 cargo_check_out.txt
 
-# local working memory and the knowledge bundle
+# local working memory and its generated index
 /LEDGER.md
+/LEDGER-INDEX.md
 /knowledge/
 
 # captured run logs: the evidence the run notes in LEDGER.md are written from
