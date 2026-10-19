@@ -3,7 +3,8 @@
 Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code,
 then read [LEDGER.md](LEDGER.md), which is the fork's working memory: measured baselines, open
 items with IDs (A1 to A30, C1 to C80, E1 to E3; a C id is a concept in the knowledge base, see below), the
-fix order, the run notes, and section F for releases.
+fix order, the run notes, and sections E and F, which since 2026-10-18 name where the merge and release records
+were archived.
 
 LEDGER.md is a local record that this repository does not track. It is in `.gitignore`, absent from a
 fresh clone, and `git clean -xdf` deletes it. Never `git add` it in this repository, and never audit it
@@ -23,12 +24,14 @@ when a line runs past 1200 characters, which is also the shape rule for LEDGER.m
 cannot be read by line number and defeats a line based grep, so wrap it at spaces.
 
 LEDGER-ARCHIVE.md is the other half of the record: gitignored, snapshotted with LEDGER.md, and holding only dated
-receipts. On 2026-10-18 the receipts of items 81 and 102, two receipts from items 106 and 108 and the section C
-gate check moved there, 399,714 bytes over 3,898 lines, which took LEDGER.md from 729,678 bytes over 5,817 lines
-to 336,179 over 1,967. The rule is that an item never moves. Its heading, its live state and what it owes stay in
-LEDGER.md with one line naming the block it moved to, and only the receipts go. Nothing in an archive block is
-edited or summarised: it is the original lines, with the lines and the snapshot they came from named in the block
-heading. Read the live item first, and open the archive only when you need the receipts behind a number it quotes.
+receipts. On 2026-10-18 it took in the receipts of items 81 and 102, one of item 106, two of item 108, the section C
+gate check, and the old section E merge notes and section F release records: 8 blocks, 399,714 bytes over 3,890
+lines, which took LEDGER.md from 729,678 bytes over 5,817 lines to 336,179 over 1,966. The rule is that an item
+never moves. Its heading, its live state and what it owes stay in LEDGER.md with one line naming the block it moved
+to, and only the receipts go. Nothing in an archive block is edited or summarised: it is the original lines, with the
+lines and the snapshot they came from named in the block heading. Read the live item first, and open the archive only
+when you need the receipts behind a number it quotes. Sections E and F of LEDGER.md are now routing notes naming
+where those records moved, and a new numbered item is appended before them.
 
 The OKF bundle left this repository on 2026-10-13. It is `%USERPROFILE%\knowledge\projects\hachimi-edge\`,
 one folder of a git-tracked knowledge base holding every project of the user's, with its own `index.md`,
