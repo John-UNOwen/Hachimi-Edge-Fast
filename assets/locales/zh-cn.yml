@@ -451,7 +451,6 @@ free_camera:
   key_reset: "重置"
   key_cycle_mode: "切换模式"
   key_reverse: "反向"
-  settings_title: "自由视角设置"
   cheatsheet_title: "自由视角快捷指南"
   cheatsheet_contents: |
     # 自由视角快捷指南
