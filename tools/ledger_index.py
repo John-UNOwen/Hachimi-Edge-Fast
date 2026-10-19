@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Read LEDGER.md and write LEDGER-INDEX.md, one line per numbered item.
 
-LEDGER.md is the fork's working memory and it is large: over 700 KB over 5,800 lines, with items that carry
-their run receipts inside them. This tool exists so a reader, human or agent, can find an item by number and
-open only the lines it needs instead of reading the whole file. It also guards the shape of the file: a
-single logical line over MAX_LINE_CHARS is reported, because a line that long cannot be read by line number
-and it defeats every grep that reports whole lines.
+LEDGER.md is the fork's working memory: 336 KB over 1,970 lines, 112 numbered items. A finished item keeps its
+heading and its live state here and moves its dated receipts into LEDGER-ARCHIVE.md, naming the block it moved
+to. This tool exists so a reader, human or agent, can find an item by number and open only the lines it needs
+instead of reading the whole file. It also guards the shape of both files: a single logical line over
+MAX_LINE_CHARS is reported, because a line that long cannot be read by line number and it defeats every grep
+that reports whole lines. The archive has no items of its own, so it is listed by block rather than indexed.
 
 Usage:
   python tools/ledger_index.py            read LEDGER.md, write LEDGER-INDEX.md, print the counts
@@ -118,7 +119,29 @@ def scan(lines: list[str]) -> tuple[list[dict], list[tuple[int, int]], dict]:
     return items, long_lines, counts
 
 
-def build_index(items: list[dict], long_lines: list[tuple[int, int]], counts: dict) -> str:
+def scan_archive(lines: list[str]) -> tuple[list[dict], list[tuple[int, int]]]:
+    """The blocks of LEDGER-ARCHIVE.md and any of its lines that run past the limit.
+
+    The archive is not indexed item by item: it has no items, only blocks an item points at. The block list is
+    there so a reader knows what is in it without opening 400 KB, and its lines are checked against the same
+    limit so a moved receipt cannot smuggle an unreadable line out of sight.
+    """
+    heads = [i for i, line in enumerate(lines) if line.startswith("## ")]
+    blocks = []
+    for n, i in enumerate(heads):
+        j = heads[n + 1] if n + 1 < len(heads) else len(lines)
+        blocks.append({
+            "heading": lines[i][3:],
+            "line": i + 1,
+            "lines": j - i,
+            "bytes": sum(len(l) + 2 for l in lines[i:j]),
+        })
+    long_lines = [(i + 1, len(l)) for i, l in enumerate(lines) if len(l) > MAX_LINE_CHARS]
+    return blocks, long_lines
+
+
+def build_index(items: list[dict], long_lines: list[tuple[int, int]], counts: dict,
+                archive_blocks: list[dict], archive_long: list[tuple[int, int]]) -> str:
     out = [
         "# LEDGER.md index",
         "",
@@ -142,7 +165,16 @@ def build_index(items: list[dict], long_lines: list[tuple[int, int]], counts: di
             f"| {item['number']} | {mark} | {item['line']} | {item['section']} "
             f"| {item['date']} | {item['title']} |"
         )
-    if long_lines:
+    if archive_blocks:
+        out.append("")
+        out.append("## Archive blocks")
+        out.append("")
+        out.append("`LEDGER-ARCHIVE.md` holds dated receipts that were moved out of live items. An item stays here and")
+        out.append("names the block it moved to. The archive is snapshotted with `LEDGER.md` and holds no item of its own.")
+        out.append("")
+        for block in archive_blocks:
+            out.append(f"- `## {block['heading']}` at line {block['line']}, {block['lines']} lines, {block['bytes']:,} bytes")
+    if long_lines or archive_long:
         out.append("")
         out.append(f"## Lines over {MAX_LINE_CHARS} characters")
         out.append("")
@@ -151,6 +183,8 @@ def build_index(items: list[dict], long_lines: list[tuple[int, int]], counts: di
         out.append("")
         for line_no, length in long_lines:
             out.append(f"- `LEDGER.md:{line_no}`, {length} characters")
+        for line_no, length in archive_long:
+            out.append(f"- `LEDGER-ARCHIVE.md:{line_no}`, {length} characters")
     out.append("")
     return "\r\n".join(out)
 
@@ -163,11 +197,16 @@ def main() -> int:
 
     root = pathlib.Path(__file__).resolve().parent.parent
     ledger = root / "LEDGER.md"
+    archive_path = root / "LEDGER-ARCHIVE.md"
     index_path = root / "LEDGER-INDEX.md"
 
     lines = read_lines(ledger)
     items, long_lines, counts = scan(lines)
-    index = build_index(items, long_lines, counts)
+    archive_blocks: list[dict] = []
+    archive_long: list[tuple[int, int]] = []
+    if archive_path.exists():
+        archive_blocks, archive_long = scan_archive(read_lines(archive_path))
+    index = build_index(items, long_lines, counts, archive_blocks, archive_long)
 
     if args.stdout:
         sys.stdout.write(index)
@@ -177,16 +216,23 @@ def main() -> int:
     if not args.check:
         index_path.write_bytes(index.encode("utf-8"))
 
-    print(f"items {len(items)}; marks fixed {counts['fixed']} partial {counts['partial']} open {counts['open']}")
-    print(f"lines over {MAX_LINE_CHARS}: {len(long_lines)}")
-    for line_no, length in long_lines:
-        print(f"  LEDGER.md:{line_no} {length} characters")
+    over = long_lines + archive_long
+    archive_note = ""
+    if archive_blocks:
+        archive_note = (f"; archive {len(archive_blocks)} blocks over "
+                        f"{sum(b['bytes'] for b in archive_blocks):,} bytes")
+    print(f"items {len(items)}; marks fixed {counts['fixed']} partial {counts['partial']} "
+          f"open {counts['open']}{archive_note}")
+    print(f"lines over {MAX_LINE_CHARS}: {len(over)}")
+    for name, rows in (("LEDGER.md", long_lines), ("LEDGER-ARCHIVE.md", archive_long)):
+        for line_no, length in rows:
+            print(f"  {name}:{line_no} {length} characters")
     print(f"index: {len(index.split(chr(13) + chr(10)))} lines, {len(index.encode()):,} bytes"
           + (" (stale, not written with --check)" if args.check and stale else ""))
-    if args.check and (stale or long_lines):
+    if args.check and (stale or over):
         print("FAILED: " + ("index is stale; regenerate it" if stale else "")
-              + (" and " if stale and long_lines else "")
-              + ("lines are over the limit" if long_lines else ""))
+              + (" and " if stale and over else "")
+              + ("lines are over the limit" if over else ""))
         return 1
     return 0
 

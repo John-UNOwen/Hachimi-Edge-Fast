@@ -9,17 +9,26 @@ LEDGER.md is a local record that this repository does not track. It is in `.giti
 fresh clone, and `git clean -xdf` deletes it. Never `git add` it in this repository, and never audit it
 with its `git diff`, which does not see it. Its history is a separate local git repository,
 `$HOME/.hachimi-knowledge-history.git` (or `$KNOWLEDGE_HISTORY`). It has no remote, must never get one,
-and exists only on this machine. `bash tools/knowledge-snapshot.sh "what changed"` records LEDGER.md
-there. `--log` and `--show` read that history, and `--restore [rev]` puts LEDGER.md back as it was at
-`rev`, after snapshotting the current state. After a `git clean -xdf`, run `--restore`. Take a snapshot
-after each change to it. Only that script stages it, and only into that history. A snapshot taken before
-2026-10-13 also holds a `knowledge/` tree: the script names it and leaves that half alone.
+and exists only on this machine. `bash tools/knowledge-snapshot.sh "what changed"` records LEDGER.md and
+LEDGER-ARCHIVE.md there. `--log` and `--show` read that history, and `--restore [rev]` puts both files back as
+they were at `rev`, after snapshotting the current state. After a `git clean -xdf`, run `--restore`. Take a
+snapshot after each change to either file. Only that script stages them, and only into that history. A snapshot
+taken before 2026-10-13 also holds a `knowledge/` tree: the script names it and leaves that half alone, and one
+taken before 2026-10-18 simply has no archive file.
 
 `python tools/ledger_index.py` reads LEDGER.md and writes `LEDGER-INDEX.md` (gitignored, generated, not
 snapshotted): one line per numbered item with its mark, the line it starts on, its section and its title. Read
 the index, then open the item by line number. `--check` exits 1 when the index no longer matches the file or
 when a line runs past 1200 characters, which is also the shape rule for LEDGER.md: a line longer than that
 cannot be read by line number and defeats a line based grep, so wrap it at spaces.
+
+LEDGER-ARCHIVE.md is the other half of the record: gitignored, snapshotted with LEDGER.md, and holding only dated
+receipts. On 2026-10-18 the receipts of items 81 and 102, two receipts from items 106 and 108 and the section C
+gate check moved there, 399,714 bytes over 3,898 lines, which took LEDGER.md from 729,678 bytes over 5,817 lines
+to 336,179 over 1,967. The rule is that an item never moves. Its heading, its live state and what it owes stay in
+LEDGER.md with one line naming the block it moved to, and only the receipts go. Nothing in an archive block is
+edited or summarised: it is the original lines, with the lines and the snapshot they came from named in the block
+heading. Read the live item first, and open the archive only when you need the receipts behind a number it quotes.
 
 The OKF bundle left this repository on 2026-10-13. It is `%USERPROFILE%\knowledge\projects\hachimi-edge\`,
 one folder of a git-tracked knowledge base holding every project of the user's, with its own `index.md`,
@@ -114,7 +123,8 @@ are in `%USERPROFILE%\knowledge\projects\hachimi-edge\conventions\ledger-bridge.
 | `src/android/` | Dobby backend, Zygisk, GL overlay |
 | `assets/locales/*.yml` | 10 locales (en, es, fil, id, ko, pt-br, ru, vi, zh-cn, zh-tw) |
 | `tools/gen_il2cpp_slot_table.py` | generates `src/il2cpp/slot_table_generated.rs` (Android) |
-| `tools/knowledge-snapshot.sh` | snapshots `LEDGER.md` into the local history outside this repository (section 1); the bundle is versioned by the knowledge base's own git |
+| `tools/knowledge-snapshot.sh` | snapshots `LEDGER.md` and `LEDGER-ARCHIVE.md` into the local history outside this repository (section 1); the bundle is versioned by the knowledge base's own git |
+| `tools/ledger_index.py` | writes `LEDGER-INDEX.md` over `LEDGER.md`, lists the blocks of `LEDGER-ARCHIVE.md`, and checks both files against the 1200 character line limit (section 1) |
 
 ## 4. Build and check
 
@@ -272,8 +282,9 @@ Hot paths run every frame or every tween tick. In them:
       different fixes, and a refusal is never in `c`.
    - `Frame probe totals at N s:` for the story stepping search (item D13).
 4. Record the run in LEDGER.md in the existing format: build hash, duration, numbers, what
-   moved, what didn't. Then snapshot LEDGER.md (section 1) and write the durable half of what the run
-   settled as a concept in the knowledge base.
+   moved, what didn't. Then snapshot LEDGER.md and LEDGER-ARCHIVE.md (section 1) and write the durable half of
+   what the run settled as a concept in the knowledge base. When an item closes, its receipts can move to the
+   archive and the item stays where it is, naming the block it moved to.
 
 ## 8. Where the remaining time is
 
@@ -325,7 +336,10 @@ A new speed or performance option touches, in one change:
   in the files, never in a diff, because this repository's git tracks neither: count
   `Select-String '^- \[x\]|^[0-9]+\. \[x\]' LEDGER.md` and `Select-String '^state: fixed' "$env:USERPROFILE\knowledge\projects\hachimi-edge\defects\*.md"`
   before and after the change set, and quote both counts with the moment each was taken. A check
-  that cannot match what it looks for returns a clean number on any tree.
+  that cannot match what it looks for returns a clean number on any tree. That count is taken over LEDGER.md.
+  Marks sitting inside a receipt that moved to LEDGER-ARCHIVE.md are counted there and quoted apart: taken
+  2026-10-18 after the move, LEDGER.md reads fixed 41, partial 41, open 66, and the archive holds 1 partial and
+  2 open marks inside moved receipts. An item's own mark stays with the item.
 - Audit tooling is part of the change set it audits. A script whose number a concept quotes lives in
   `tools/` and goes into git's index the moment it is written: `git add -u` and `git commit -am` skip an
   untracked file without saying so, and `/target` is gitignored, so a script under `target/scratch/` is

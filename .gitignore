@@ -6,8 +6,9 @@ dump.cs
 .envrc
 cargo_check_out.txt
 
-# local working memory and its generated index
+# local working memory, its closed receipts, and its generated index
 /LEDGER.md
+/LEDGER-ARCHIVE.md
 /LEDGER-INDEX.md
 /knowledge/
 
