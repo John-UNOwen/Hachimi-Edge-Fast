@@ -6,7 +6,7 @@ English | [简体中文](README-zh_cn.md) | [繁體中文](README-zh_tw.md)
 
 [![Discord server](https://dcbadge.limes.pink/api/server/https://discord.gg/YjBgmuqqYr)](https://discord.gg/YjBgmuqqYr)
 
-Game enhancement and translation mod for UM:PD, forked to make the game **take less time and cost less to run**.
+Game enhancement and translation mod for UM:PD, forked to let you **glue your GL runs in half the time***.
 
 This fork tracks upstream Hachimi Edge (currently merged up to v0.32.0) and keeps every upstream feature. It adds a set of opt in speed options, faster startup, and a measurement first approach: every change is checked against logged game runs, not against feel.
 
