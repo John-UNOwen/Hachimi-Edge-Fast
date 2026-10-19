@@ -54,12 +54,6 @@ The side menu has a **Speed preset** picker. Three presets are built in:
 
 You can also save the current settings under a name and switch back later. A saved preset is the whole config, so it restores graphics and translation settings too. The log records which preset each run used.
 
-### Race options
-On the **Gameplay** tab, all off by default:
-- **Hide race status plates:** hides the skill activation plates on the right side of a race.
-- **Hide skill cut-ins:** hides every skill cut-in banner in a race, yours and your opponents'.
-- **Hide race markers:** hides the diamond markers the game floats above your Uma and the support Uma.
-
 ### Built to be safe at speed
 - **Hard limits in code.** Speed factors are capped at 20x and time scale at 5x, and stacked options are bounded together, whatever `config.json` says, so a typo can't break a screen.
 - **No compounding.** Every value is computed from the game's original, never from the current value, so applying a setting twice or moving a slider back and forth never stacks.
