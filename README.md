@@ -8,7 +8,7 @@ English | [简体中文](README-zh_cn.md) | [繁體中文](README-zh_tw.md)
 
 Game enhancement and translation mod for UM:PD, forked to let you **glue your GL runs in half the time***.
 
-This fork tracks upstream Hachimi Edge (currently merged up to v0.32.0) and keeps every upstream feature. It adds a set of opt in speed options, faster startup, and a measurement first approach: every change is checked against logged game runs, not against feel.
+This fork tracks upstream Hachimi Edge (currently merged up to v0.33.0) and keeps every upstream feature. It adds opt in speed options and faster startup, and every change is checked against logged game runs.
 
 <img width="100%" src="assets/screenshot-performance.webp" alt="The Hachimi Edge side menu with the Speed preset picker, and the Config Editor open on the Performance tab">
 
@@ -28,7 +28,7 @@ Do what you must, but we would respectfully request that you try to label the ga
 # What this fork adds
 
 ### Performance tab
-The Config Editor's **Performance** tab groups every speed and frame option. Every option this fork adds is **off by default** (`1.0` or unchecked) and does nothing until you turn it on.
+The Config Editor's **Performance** tab groups every speed and frame option. Every option this fork adds is off by default (`1.0` or unchecked) and does nothing until you turn it on.
 
 | Option | What it does | Range |
 |---|---|---|
@@ -41,7 +41,7 @@ The Config Editor's **Performance** tab groups every speed and frame option. Eve
 | Training tag cut-in effect speed | Raises the speed of the tag cut-in effect. Never lowers a speed the game set itself. | 1x to 5x |
 | Auto-skip result screen animations | Presses the game's own skip on result screens as soon as it is available. | on / off |
 | Skip the training cut-in | Ends the training cut-in through the game's own skip. | on / off |
-| Skip the Inspiration cut-in | Ends the Inspiration cut-in through the cut-in timeline's own skip to the end. | on / off |
+| Skip the Inspiration cut-in | Asks the cut-in timeline for its own skip to the end. In testing the cut-in still played its full 3.24 s, so expect no gain yet. | on / off |
 | Story high speed mode | Turns on the game's built in story high speed mode. | on / off |
 
 The tab also gathers the upstream options that affect speed and frame cost: target FPS, target FPS when unfocused, UI animation scale (capped at 20x), story text speed, story choice auto select delay, physics update mode and CySpring frame scale uncapping.
@@ -55,9 +55,10 @@ The side menu has a **Speed preset** picker. Three presets are built in:
 You can also save the current settings under a name and switch back later. A saved preset is the whole config, so it restores graphics and translation settings too. The log records which preset each run used.
 
 ### Race options
-On the **Gameplay** tab, both off by default:
+On the **Gameplay** tab, all off by default:
 - **Hide race status plates:** hides the skill activation plates on the right side of a race.
 - **Hide skill cut-ins:** hides every skill cut-in banner in a race, yours and your opponents'.
+- **Hide race markers:** hides the diamond markers the game floats above your Uma and the support Uma.
 
 ### Built to be safe at speed
 - **Hard limits in code.** Speed factors are capped at 20x and time scale at 5x, and stacked options are bounded together, whatever `config.json` says, so a typo can't break a screen.
@@ -67,12 +68,11 @@ On the **Gameplay** tab, both off by default:
 - **Unresolved targets stay inert.** Calls through a method the mod could not find are refused instead of crashing the game.
 
 ### Faster startup
-Hooks are now created first and armed in a single pass. Arming used to take about **4.7 s** of every launch (24 ms per hook). Across later runs it took **0.05 to 0.08 s** for about 190 hooks.
+Hooks are now created first and armed in a single pass. Arming used to take about 4.7 s of every launch (24 ms per hook). Recent runs armed 392 hooks in about 0.1 s.
 
 ### Diagnostics
-- With `enable_file_logging` on, every run writes a **config snapshot** line with the timing settings it used, plus a log line the first time each speed hook is actually reached.
+- With `enable_file_logging` on, every run writes a config snapshot line with the timing settings it had at launch, plus a log line the first time each speed hook is reached.
 - `debug_mode` writes the game's own class, method and field names to `introspect.log`. It also turns on observe only probes for the story playback paths.
-- The [defect ledger](LEDGER.md) records every measured run, known issue and fix in order.
 
 # Features (from upstream)
 - **High quality translations:** Hachimi comes with advanced translation features that help translations feel more natural (plural forms, ordinal numbers, etc.) and prevent introducing jank to the UI. It also supports translating most in-game components; no manual assets patching needed!
@@ -100,11 +100,11 @@ For upstream Hachimi Edge, see the [Getting started](https://hachimi.noccu.art/d
 
 For this fork (Windows, Steam, Global client):
 
-1. Download `hachimi-edge-<version>-windows.zip` from this repository's **Releases** page.
-2. Close the game and copy `cri_mana_vpx.dll` from the zip into the game's root folder, next to the game executable.
+1. Download `cri_mana_vpx.dll` from the latest release on this repository's **Releases** page.
+2. Close the game and copy it into the game's root folder, next to the game executable.
 3. Start the game and open the Config Editor. The speed options are on the **Performance** tab.
 
-Releases are currently **pre-releases**. This fork is developed and measured on the Windows Steam Global client. Android builds compile, but have not been tested on a device.
+This fork is developed and measured on the Windows Steam Global client. Android builds compile, but have not been tested on a device.
 
 # Building
 ```bash
@@ -114,7 +114,9 @@ The Windows DLL is written to `target/release/hachimi.dll`. Rename it to `cri_ma
 
 # Updates
 
-The in-game update check reads this fork's [releases](https://github.com/John-UNOwen/Hachimi-Edge-Fast/releases), not upstream's. A release here carries `cri_mana_vpx.dll`, and when the check finds a build newer than the one running it opens that release page instead of downloading or running anything: updating means closing the game and replacing the DLL, which is what `tools/deploy-game.ps1` does on a build machine. A build is told apart from a release of the same version (`v0.32.0-fork.1` through `.3` are all 0.32.0) by asking the repository whether the release holds commits the build was stamped from.
+The in-game update check reads this fork's [releases](https://github.com/John-UNOwen/Hachimi-Edge-Fast/releases), not upstream's. When it finds a release newer than the running build, it opens that release page. It never downloads or runs anything. To update, close the game and replace `cri_mana_vpx.dll` with the one from the release (`tools/deploy-game.ps1` does this on a build machine).
+
+Several releases can share a version number (`v0.32.0-fork.1` through `.3` are all 0.32.0), so when the numbers tie, the check asks GitHub whether the release's tag is ahead of the commit the running build was stamped from.
 
 # Special thanks
 These projects have been the basis for Hachimi's development; without them, Hachimi would never have existed in its current form:
