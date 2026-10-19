@@ -61,6 +61,9 @@ menu:
   soft_restart: "\uf021 軟重啟"
   open_in_game_browser: "\uf0ac 開啟遊戲內瀏覽器"
   toggle_game_ui: "\uf06e 開啟/關閉遊戲 UI"
+  shortcuts_heading: " Shortcuts"
+  no_shortcuts_saved: "No shortcuts saved."
+  edit_shortcuts: " Edit Shortcuts"
 
 notification:
   saved_localize_dump: "保存至 localize_dump.json"
@@ -196,6 +199,8 @@ config_editor:
   skill_info_dialog: "自訂技能資訊視窗"
   homescreen_bgseason: "主介面背景季節"
   shadow_resolution: "陰影解析度"
+  live_vocals_swap_concert: "Concert"
+  live_vocals_swap_all_songs: "All songs"
 
 theme_editor:
   title: "界面主題編輯器"
@@ -225,3 +230,10 @@ update_prompt_dialog:
 updating_dialog:
   title: "更新中"
   content: "正在下載更新，遊戲將會在稍後重啟…"
+
+skill_dialog:
+  copy_name: "Copy name"
+  copy_desc: "Copy desc"
+
+shortcuts:
+  title: "Edit Shortcuts"

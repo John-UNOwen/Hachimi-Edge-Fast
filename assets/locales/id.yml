@@ -71,6 +71,9 @@ menu:
   discord_rpc: "RPC Discord"
   edit_excludes: "\uf040 Edit Pengecualian"
   change_translation_repo: "\uf0c1 Ubah Repo Translasi"
+  shortcuts_heading: " Shortcuts"
+  no_shortcuts_saved: "No shortcuts saved."
+  edit_shortcuts: " Edit Shortcuts"
 
 notification:
   saved_localize_dump: "Tersimpan sebagai localize_dump.json"
@@ -250,6 +253,8 @@ config_editor:
   ui_loading_show_orientation_guide: "Sembunyikan info orientasi layar"
   replace_to_builtin_font: "Gunakan font default game"
   custom_title_name: "Judul jendela kustom"
+  live_vocals_swap_concert: "Concert"
+  live_vocals_swap_all_songs: "All songs"
 
 theme_editor:
   title: "Editor Tema GUI"
@@ -379,3 +384,10 @@ key_names:
   numpad_divide: "Numpad /"
   numpad_decimal: "Numpad ."
   unknown: "Tombol %{code}"
+
+skill_dialog:
+  copy_name: "Copy name"
+  copy_desc: "Copy desc"
+
+shortcuts:
+  title: "Edit Shortcuts"
