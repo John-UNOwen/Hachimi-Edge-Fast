@@ -9,11 +9,14 @@ use crate::{core::{gui, plugin_api::Plugin, updater}, gui_impl, hachimi_impl, il
 
 use super::{game::{Game, Region}, ipc, plurals, settings_preset::SettingsPreset, template, template_filters, tl_repo, utils, Error, Interceptor};
 
-pub const REPO_PATH: &str = "kairusds/Hachimi-Edge";
+/// What this build answers to: the fork it was built from, not the repository it was forked from
+/// (`kairusds/Hachimi-Edge`, kept in README.md and in the About copyright line). The update check and
+/// the About tab's source links both read this constant, and an update check aimed at upstream would
+/// offer a build that replaces this one and drops every speed option it carries. This fork has no
+/// Codeberg copy, so upstream's Codeberg fallback is gone with it (see core::updater).
+pub const REPO_PATH: &str = "John-UNOwen/Hachimi-Edge-Fast";
 pub const GITHUB_API: &str = "https://api.github.com/repos";
-pub const CODEBERG_API: &str = "https://codeberg.org/api/v1/repos";
 pub const WEBSITE_URL: &str = "https://hachimi.noccu.art";
-pub const UMAPATCHER_UPDATER_DEEPLINK: &str = "umapatcher-edge://update-hachimi";
 pub const RACE_MECHANICS_URL: &str = "https://docs.google.com/document/d/15VzW9W2tXBBTibBRbZ8IVpW6HaMX8H0RP03kq6Az7Xg";
 
 /// How many times a shared lock was handed back despite its poison flag in this process. Bumped only
