@@ -162,7 +162,6 @@ def_detour! {
 
 def_detour! {
     SkillEffectPlayer_UpdateDelayPlay(this: *mut Il2CppObject, dt: f32) {
-            super::SkillPopupProbe::note_effect_queue(this);
             EFFECT_DELAY.sample(dt);
 
         get_orig_fn!(SkillEffectPlayer_UpdateDelayPlay, EffectTimeFn)(this, dt);

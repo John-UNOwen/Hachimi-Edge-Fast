@@ -146,7 +146,6 @@ pub mod RaceHorseManagerBase;
 pub mod RaceSoundReplay;
 pub mod RaceUI;
 pub mod RaceUIMiniMap;
-pub mod SkillPopupProbe;
 mod RaceMarkerHide;
 pub mod RaceViewReplay;
 pub mod RaceSimulateData;
@@ -330,7 +329,6 @@ pub fn init() {
     RaceSoundReplay::init(image);
     RaceUI::init(image);
     RaceUIMiniMap::init(image);
-    SkillPopupProbe::init(image);
     RaceMarkerHide::init(image);
     RaceViewReplay::init(image);
     RaceHorseManagerBase::init(image);
