@@ -1402,12 +1402,6 @@ pub struct Config {
     // called (ledger item 111).
     #[serde(default)]
     pub skip_inspiration_cut: bool,
-    // Hides the diamond the game floats above your Uma in a race, its own race marker, by handing `false` to the marker
-    // visibility switches the game's own marker button drives: `RaceViewReplay.VisibleMarkers`, `RaceViewBase.VisibleMarkers`,
-    // `RaceMainViewController.SetVisibleMarkers` and the HUD's `SetMarkerVisible` (`umamusume::RaceMarkerHide`, ledger item
-    // 118). No marker object is removed and no creation is refused. At `false` every door hands on the value it was given.
-    #[serde(default)]
-    pub hide_race_markers: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
     // expose, using StoryManager's own max and save path.
     #[serde(default)]
