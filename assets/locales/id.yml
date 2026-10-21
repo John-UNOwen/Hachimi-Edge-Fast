@@ -321,6 +321,10 @@ update_prompt_dialog:
 
     Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
     game folder, with the game closed.
+  show_changelog: "Tampilkan log"
+  changelog_title: "Log perubahan"
+  changelog_fetch_failed: "Gagal mengambil data changelog"
+  changelog_invalid: "Isi changelog bukan teks polos yang valid"
 
 updating_dialog:
   title: "Memperbarui"

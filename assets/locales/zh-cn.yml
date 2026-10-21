@@ -543,6 +543,10 @@ update_prompt_dialog:
 
     Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
     game folder, with the game closed.
+  show_changelog: "查看更新日志"
+  changelog_title: "更新日志"
+  changelog_fetch_failed: "获取更新日志失败"
+  changelog_invalid: "更新日志内容不是有效的纯文本格式"
 
 updating_dialog:
   title: "更新中"

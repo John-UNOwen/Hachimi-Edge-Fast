@@ -535,6 +535,7 @@ tl_update_dialog:
   content: "Uma nova atualização de tradução está disponível (%{size}). Deseja baixá-la?"
   content_zip_warning: "Uma nova atualização de tradução está disponível (%{changed_size}). Esta atualização precisará baixar (%{download_size}) de dados."
   show_changelog: "Mostrar registro de alterações"
+  changelog_unavailable: "Registro de alterações indisponível"
   changelog_title: "Registro de alterações"
   changelog_fetch_failed: "Falha ao obter registro de alterações"
   changelog_invalid: "O conteúdo do registro de alterações não é texto simples válido"
@@ -554,6 +555,10 @@ update_prompt_dialog:
 
     Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
     game folder, with the game closed.
+  show_changelog: "Mostrar registro de alterações"
+  changelog_title: "Registro de alterações"
+  changelog_unavailable: "Registro de alterações indisponível"
+  changelog_fetch_failed: "Falha ao obter registro de alterações"
 
 updating_dialog:
   title: "Atualizando"

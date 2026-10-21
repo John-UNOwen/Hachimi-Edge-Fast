@@ -525,6 +525,10 @@ update_prompt_dialog:
 
     Nothing is downloaded or run by this mod. Copy the file that page names over the one in the
     game folder, with the game closed.
+  show_changelog: "Ver cambios"
+  changelog_title: "Registro de cambios"
+  changelog_fetch_failed: "No se pudo obtener el registro de cambios."
+  changelog_invalid: "El contenido del registro de cambios no tiene formato de texto válido."
 
 updating_dialog:
   title: "Actualizando"
