@@ -3,7 +3,7 @@ use std::{sync::{Arc, Mutex}, time::Duration};
 use rust_i18n::t;
 use serde::Deserialize;
 
-use crate::core::{gui::{NotificationGuard, SimpleYesNoDialog}, hachimi::{GITHUB_API, REPO_PATH}, http, Error, Gui};
+use crate::core::{gui::{HachimiUpdateWindow, NotificationGuard}, hachimi::{GITHUB_API, REPO_PATH}, http, Error, Gui};
 
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -68,9 +68,10 @@ impl Updater {
         // opener or this fork's in-game webview, both guarded against a null target).
         let url = latest.release_url();
         if let Some(mutex) = Gui::instance() {
-            mutex.lock().unwrap().show_window(Box::new(SimpleYesNoDialog::new(
+            mutex.lock().unwrap().show_window(Box::new(HachimiUpdateWindow::new(
                 &t!("update_prompt_dialog.title"),
                 &t!("update_prompt_dialog.release_content", version = &latest.tag_name),
+                &latest.body,
                 move |ok| {
                     if !ok { return; }
                     use crate::il2cpp::{ext::StringExt, hook::UnityEngine_CoreModule::Application};
@@ -130,7 +131,11 @@ pub struct Release {
     tag_name: String,
     html_url: String,
     #[serde(default)]
-    draft: bool
+    draft: bool,
+    // The release page's own notes, which GitHub answers beside the tag in the same list this check
+    // already reads. A release made without notes leaves it empty and the dialog says so.
+    #[serde(default)]
+    body: String
 }
 
 /// The release to answer about: the highest version among what the fork has published, keeping GitHub's
@@ -140,7 +145,7 @@ pub struct Release {
 /// published, and an unauthenticated check cannot see them anyway.
 fn pick_release(mut releases: Vec<Release>) -> Option<Release> {
     releases.retain(|release| !release.draft);
-    releases.sort_by(|a, b| version_parts(&b.tag_name).cmp(&version_parts(&a.tag_name)));
+    releases.sort_by(|a, b| version_rank(&b.tag_name).cmp(&version_rank(&a.tag_name)));
     releases.into_iter().next()
 }
 
@@ -197,6 +202,20 @@ fn version_parts(text: &str) -> Option<Vec<u64>> {
         return None;
     }
     head.split('.').map(|part| part.parse::<u64>().ok()).collect()
+}
+
+/// How this fork's own releases rank against each other: the version number first, then the `-fork.N`
+/// suffix, so `v0.33.1-fork.2` outranks `v0.33.1-fork.1` and both outrank a plain `v0.33.1` carrying
+/// the same number. A tag with no suffix reads fork number 0, and an unreadable version ranks below
+/// every readable one. Only releases rank this way: the running build carries no fork number in its
+/// stamp, so a tie against a local build still goes to the compare endpoint in
+/// `release_offers_an_update`.
+fn version_rank(text: &str) -> (Vec<u64>, u64) {
+    let number = version_parts(text).unwrap_or_default();
+    let tail = text.trim().trim_start_matches('v').split(['-', '+']).nth(1).unwrap_or("");
+    let fork = tail.strip_prefix("fork").and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|digits| digits.parse::<u64>().ok()).unwrap_or(0);
+    (number, fork)
 }
 
 /// The commit this build was stamped from, read out of the string `build.rs` writes into
