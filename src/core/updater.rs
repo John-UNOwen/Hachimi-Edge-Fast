@@ -251,6 +251,10 @@ fn compare_status_is_newer(status: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn listed(tag: &str) -> Release {
+        Release { tag_name: tag.to_string(), html_url: String::new(), draft: false, body: String::new() }
+    }
+
     #[test]
     fn the_update_source_is_this_fork() {
         // A check aimed at upstream would offer a build that replaces this one and drops every speed
@@ -305,7 +309,7 @@ mod tests {
 
     #[test]
     fn the_fallback_page_names_the_tag() {
-        let release = Release { tag_name: "v0.33.0-fork.1".to_string(), html_url: String::new(), draft: false };
+        let release = listed("v0.33.0-fork.1");
         assert_eq!(
             release.release_url(),
             format!("https://github.com/{}/releases/tag/v0.33.0-fork.1", REPO_PATH)
@@ -314,7 +318,8 @@ mod tests {
         let with_page = Release {
             tag_name: "v0.33.0-fork.1".to_string(),
             html_url: "https://example.test/release".to_string(),
-            draft: false
+            draft: false,
+            body: String::new()
         };
         assert_eq!(with_page.release_url(), "https://example.test/release");
     }
@@ -324,8 +329,8 @@ mod tests {
         // v0.32.0-fork.1 and .2 were prereleases and were the builds this fork actually handed out,
         // so the check reads the release list instead of GitHub's prerelease-free "latest".
         let releases = vec![
-            Release { tag_name: "v0.32.0-fork.2".to_string(), html_url: String::new(), draft: false },
-            Release { tag_name: "v0.32.0-fork.1".to_string(), html_url: String::new(), draft: false },
+            listed("v0.32.0-fork.2"),
+            listed("v0.32.0-fork.1"),
         ];
         assert_eq!(pick_release(releases).map(|r| r.tag_name), Some("v0.32.0-fork.2".to_string()));
     }
@@ -333,16 +338,48 @@ mod tests {
     #[test]
     fn the_highest_version_wins_even_when_it_is_listed_last() {
         let releases = vec![
-            Release { tag_name: "v0.32.0-fork.3".to_string(), html_url: String::new(), draft: false },
-            Release { tag_name: "v0.33.0-fork.1".to_string(), html_url: String::new(), draft: false },
-            Release { tag_name: "nightly".to_string(), html_url: String::new(), draft: false },
+            listed("v0.32.0-fork.3"),
+            listed("v0.33.0-fork.1"),
+            listed("nightly"),
         ];
         assert_eq!(pick_release(releases).map(|r| r.tag_name), Some("v0.33.0-fork.1".to_string()));
     }
 
     #[test]
+    fn the_fork_number_ranks_releases_of_one_version() {
+        assert_eq!(version_rank("v0.33.1-fork.2"), (vec![0, 33, 1], 2));
+        assert_eq!(version_rank("v0.33.1-fork.11"), (vec![0, 33, 1], 11));
+        assert_eq!(version_rank("v0.33.1"), (vec![0, 33, 1], 0));
+        assert_eq!(version_rank("0.33.1"), (vec![0, 33, 1], 0));
+        assert_eq!(version_rank("v0.33.1+beta"), (vec![0, 33, 1], 0));
+        assert_eq!(version_rank("nightly"), (vec![], 0));
+
+        let releases = vec![listed("v0.33.1"), listed("v0.33.1-fork.1"), listed("v0.33.1-fork.11"), listed("v0.33.1-fork.2")];
+        assert_eq!(pick_release(releases).map(|r| r.tag_name), Some("v0.33.1-fork.11".to_string()));
+
+        // A plain upstream number still outranks a fork build of an older version.
+        let mixed = vec![listed("v0.34.0"), listed("v0.33.1-fork.9")];
+        assert_eq!(pick_release(mixed).map(|r| r.tag_name), Some("v0.34.0".to_string()));
+    }
+
+    #[test]
+    fn the_notes_come_from_the_same_list_the_check_reads() {
+        // GitHub answers /releases with each release's own body beside its tag, so the changelog pane
+        // needs no second request and no repository this fork does not have. The quotes carry three
+        // hashes because the sample body opens with a markdown heading, which ends a shorter raw string.
+        let json = r###"{"tag_name":"v0.33.1-fork.1","html_url":"https://github.com/x/y/releases/tag/v0.33.1-fork.1","draft":false,"body":"## v0.33.1-fork.1\n- 38 new hooks"}"###;
+        let release: Release = serde_json::from_str(json).unwrap();
+        assert_eq!(release.tag_name, "v0.33.1-fork.1");
+        assert!(release.body.starts_with("## v0.33.1-fork.1"));
+
+        // A release published without notes reads as empty, which is what makes the dialog say so.
+        let bare: Release = serde_json::from_str(r###"{"tag_name":"v0.33.1-fork.2","html_url":"","draft":false}"###).unwrap();
+        assert!(bare.body.is_empty());
+    }
+
+    #[test]
     fn a_draft_and_an_empty_list_answer_nothing() {
-        let drafts = vec![Release { tag_name: "v0.99.0".to_string(), html_url: String::new(), draft: true }];
+        let drafts = vec![Release { tag_name: "v0.99.0".to_string(), html_url: String::new(), draft: true, body: String::new() }];
         assert_eq!(pick_release(drafts).map(|r| r.tag_name), None);
         assert_eq!(pick_release(vec![]).map(|r| r.tag_name), None);
     }
