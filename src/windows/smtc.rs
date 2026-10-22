@@ -165,15 +165,22 @@ unsafe fn create_shortcut(name: &str) {
 
         if let Ok(persist_file) = shell_link.cast::<IPersistFile>() {
             if let Ok(pwstr) = SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_DEFAULT, None) {
-                let mut lnk_path = pwstr.to_string().unwrap();
+                let folder = pwstr.to_string();
                 windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as _));
+                let Ok(mut lnk_path) = folder else { return; };
                 lnk_path.push_str(&format!("\\{}.lnk", name));
                 if std::path::Path::new(&lnk_path).exists() {
                     let _ = std::fs::remove_file(&lnk_path);
                 }
                 let mut wide_path: Vec<u16> = lnk_path.encode_utf16().collect();
                 wide_path.push(0);
-                persist_file.Save(PCWSTR::from_raw(wide_path.as_ptr()), true).unwrap();
+                // This runs inside a frame that cannot unwind, so a failed save must not panic: after the
+                // unclean shutdown of 2026-10-21 the save of an existing shortcut answered "Access is denied"
+                // (0x80070005) on every launch and the `unwrap()` here ended the process with 0xc0000409.
+                // The shortcut only gives the media controls a name; the game runs the same without it.
+                if let Err(e) = persist_file.Save(PCWSTR::from_raw(wide_path.as_ptr()), true) {
+                    warn!("SMTC: could not save the Start menu shortcut {}: {}", lnk_path, e);
+                }
             }
         }
     }

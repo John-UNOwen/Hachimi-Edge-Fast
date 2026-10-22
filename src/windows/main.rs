@@ -57,11 +57,39 @@ pub fn load_libraries() -> Vec<Plugin> {
 
 pub static mut DLL_HMODULE: HMODULE = HMODULE(0 as _);
 
+// A panic that reaches a frame which cannot unwind ends the process with 0xc0000409 and its message goes to a
+// stderr the game does not have, so nothing of it reaches `hachimi.log` (which is also off until the config is
+// read). This appends the message and its source location to `hachimi/panic.log` beside the game, whatever the
+// config says, and then hands on to the default hook.
+fn install_panic_file_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let path = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("hachimi").join("panic.log")));
+        if let Some(path) = path {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let thread = std::thread::current();
+                let _ = writeln!(
+                    file,
+                    "{:?} thread {:?}: {}",
+                    std::time::SystemTime::now(),
+                    thread.name().unwrap_or("<unnamed>"),
+                    info
+                );
+            }
+        }
+        default_hook(info);
+    }));
+}
+
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "C" fn DllMain(hmodule: HMODULE, call_reason: c_ulong, _reserved: *mut c_void) -> bool {
     if call_reason == DLL_PROCESS_ATTACH {
         unsafe { DLL_HMODULE = hmodule; }
+        install_panic_file_hook();
         if !Hachimi::init() {
             return TRUE.into();
         }
