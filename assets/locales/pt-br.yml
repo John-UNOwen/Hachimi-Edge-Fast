@@ -323,8 +323,6 @@ config_editor:
   ingame_webview: "Abrir links do Umamusume (notícias, ajuda, gacha, ...) no navegador do jogo"
   trainer_live_landscape: "Modo paisagem no show da música Meni Shuki"
   force_orientation_mode: "Forçar modo de orientação"
-  live_vocals_swap_concert: "Concert"
-  live_vocals_swap_all_songs: "All songs"
 
 theme_editor:
   title: "Editor do tema da GUI"
@@ -646,10 +644,3 @@ key_names:
   numpad_divide: "Numpad /"
   numpad_decimal: "Numpad ."
   unknown: "Tecla %{code}"
-
-skill_dialog:
-  copy_name: "Copy name"
-  copy_desc: "Copy desc"
-
-shortcuts:
-  title: "Edit Shortcuts"

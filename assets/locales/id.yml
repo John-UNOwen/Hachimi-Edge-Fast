@@ -325,6 +325,7 @@ update_prompt_dialog:
   changelog_title: "Log perubahan"
   changelog_fetch_failed: "Gagal mengambil data changelog"
   changelog_invalid: "Isi changelog bukan teks polos yang valid"
+  changelog_unavailable: "Changelog unavailable"
 
 updating_dialog:
   title: "Memperbarui"

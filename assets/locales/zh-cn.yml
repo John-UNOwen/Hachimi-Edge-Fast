@@ -547,6 +547,7 @@ update_prompt_dialog:
   changelog_title: "更新日志"
   changelog_fetch_failed: "获取更新日志失败"
   changelog_invalid: "更新日志内容不是有效的纯文本格式"
+  changelog_unavailable: "Changelog unavailable"
 
 updating_dialog:
   title: "更新中"
