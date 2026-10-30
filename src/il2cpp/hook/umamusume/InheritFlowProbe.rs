@@ -19,9 +19,15 @@ use crate::{
 // The stall this was built for is the inheritance screen, view 1501, which ran for minutes with no progress in
 // earlier runs. The existing census watches the training cut-in and the story cut-in. Neither names this view's
 // own doors, so a stall on 1501 could not be said to be inside any one of its steps. This module splits the
-// inheritance visit into three legs, the prepare, the cut and the tail, and reports each one's runs, mean and worst
-// wall time, plus how long the leg that is open right now has been open. A stall then shows as one leg with an open
-// time that keeps growing, which is the number the stall census could not give.
+// inheritance visit into five legs, the prepare, the cut, the tail, the press and the after, and reports each one's
+// runs, mean and worst wall time, plus how long the leg that is open right now has been open. A stall then shows as
+// one leg with an open time that keeps growing, which is the number the stall census could not give.
+//
+// The last two legs were added for the player session of 2026-10-28 (`run log/hachimi (2).log`), where six of eleven
+// Inspiration visits crossed `OnEndCutt` and stayed on the screen 2 to 4 s and two crossed neither and ended in a
+// soft reset after 7 to 10 s. Everything this module armed stopped at `OnCompleteFadeOut`: the button the game offers
+// after the cut, the click that answers it, and the result plates behind the click had no door in any build, so a
+// visit that sat waiting for a click looked the same in the log as one that had nothing left to do.
 //
 // Names come from the live dump: `Gallop.SingleModeSuccessionEventViewController` (`PrepareCutIn/0`, `PlayCutIn/0`,
 // `OnPauseCutt/0`, `OnEndCutt/1` taking the timeline controller, `OnCompleteFadeOut/0`, `DestroyCutin/0`),
@@ -34,6 +40,9 @@ use crate::{
 const NO_PARAMS: &[Il2CppTypeEnum] = &[];
 const ONE_INFO: &[Il2CppTypeEnum] = &[Il2CppTypeEnum_IL2CPP_TYPE_CLASS];
 const VOID: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_VOID;
+// The return shape of a coroutine door: `CLASS` matches every reference type, which is what an `IEnumerator`
+// return is. `TrainingCuttProbe.rs:65` resolves its coroutine doors the same way.
+const CLASS: Il2CppTypeEnum = Il2CppTypeEnum_IL2CPP_TYPE_CLASS;
 
 static PREPARE_CUT_IN: CutProbe = CutProbe::counted("SingleModeSuccessionEventViewController::PrepareCutIn()");
 static PLAY_CUT_IN: CutProbe = CutProbe::counted("SingleModeSuccessionEventViewController::PlayCutIn()");
@@ -45,27 +54,49 @@ static HELPER_END_CUT_IN: CutProbe = CutProbe::counted("SingleModeSuccessionCutI
 static CHANGE_TO_SUCCESSION_CUT: CutProbe =
     CutProbe::counted("SingleModeChangeViewManager::ChangeViewSuccessionCutAndStory(entry)");
 
-pub(crate) static PROBES: [&CutProbe; 8] = [
+// The succession button doors. Their hooks belong to `SingleModeSuccessionEventViewController`, which arms them in
+// every build, and that module calls the two note functions below when it crosses them. They are counted here
+// because the legs of one visit are one bookkeeping and this module has the report. Both names are in the view's
+// own block in the dump, `run log/introspect-run62.log:24363` and `:24356`.
+static SETUP_BUTTON: CutProbe = CutProbe::counted("SingleModeSuccessionEventViewController::SetupSuccessionButton()");
+static ON_CLICK: CutProbe = CutProbe::counted("SingleModeSuccessionEventViewController::OnClickSuccessionButton()");
+// The two doors that play the result plates after the click, `CheckResult/0 -> void()` and
+// `PlayResultCoroutine/0 -> class<System.Collections.IEnumerator>()` at `run log/introspect-run62.log:24359` and
+// `:24360`. No hook here has ever reached either, so no run can say yet whether the click gate sits before them.
+static CHECK_RESULT: CutProbe = CutProbe::counted("SingleModeSuccessionEventViewController::CheckResult()");
+static PLAY_RESULT: CutProbe = CutProbe::counted("SingleModeSuccessionEventViewController::PlayResultCoroutine()");
+
+pub(crate) static PROBES: [&CutProbe; 12] = [
     &PREPARE_CUT_IN,
     &PLAY_CUT_IN,
     &PAUSE_CUTT,
     &END_CUTT,
     &FADE_OUT_DONE,
+    &SETUP_BUTTON,
+    &ON_CLICK,
+    &CHECK_RESULT,
+    &PLAY_RESULT,
     &DESTROY_CUT_IN,
     &HELPER_END_CUT_IN,
     &CHANGE_TO_SUCCESSION_CUT,
 ];
 
-// The three legs of one inheritance visit. Each opens on one door and closes on the next.
+// The legs of one inheritance visit. Each opens on one door and closes on the next.
 //   prepare: PrepareCutIn -> PlayCutIn
 //   cut:     PlayCutIn -> OnEndCutt
 //   tail:    OnEndCutt -> OnCompleteFadeOut
+//   press:   SetupSuccessionButton -> OnClickSuccessionButton, the time the offered button waits for a click
+//   after:   OnClickSuccessionButton -> DestroyCutin, the teardown the click starts
 static PREPARE_OPEN_US: AtomicI64 = AtomicI64::new(-1);
 static CUT_OPEN_US: AtomicI64 = AtomicI64::new(-1);
 static TAIL_OPEN_US: AtomicI64 = AtomicI64::new(-1);
+static PRESS_OPEN_US: AtomicI64 = AtomicI64::new(-1);
+static AFTER_OPEN_US: AtomicI64 = AtomicI64::new(-1);
 static PREPARE_LEG: Leg = Leg::new();
 static CUT_LEG: Leg = Leg::new();
 static TAIL_LEG: Leg = Leg::new();
+static PRESS_LEG: Leg = Leg::new();
+static AFTER_LEG: Leg = Leg::new();
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static LAST_REPORT_SEC: AtomicI64 = AtomicI64::new(-1);
@@ -123,7 +154,35 @@ fn close_leg(open: &AtomicI64, leg: &Leg, now: i64) {
     }
 }
 
+// The succession button doors are hooked by `SingleModeSuccessionEventViewController`, which arms them in every
+// build, and that module calls these two when it crosses them. The offer opens the press leg and the click closes
+// it and opens the after leg, which the `DestroyCutin` door below closes. The click count covers a click the player
+// made and the click this fork's auto click made alike; the lines the module that presses names which was which.
+// Nothing is recorded when this module's own doors were never armed, so a player without `debug_mode` spends one
+// load of one atomic on these two calls.
+pub(crate) fn note_succession_button_setup() {
+    if !ARMED.load(atomic::Ordering::Acquire) {
+        return;
+    }
+
+    SETUP_BUTTON.count();
+    open_leg(&PRESS_OPEN_US, ProbeSuite::now_us());
+}
+
+pub(crate) fn note_succession_button_click() {
+    if !ARMED.load(atomic::Ordering::Acquire) {
+        return;
+    }
+
+    ON_CLICK.count();
+
+    let now = ProbeSuite::now_us();
+    close_leg(&PRESS_OPEN_US, &PRESS_LEG, now);
+    open_leg(&AFTER_OPEN_US, now);
+}
+
 type InheritVoidFn = extern "C" fn(this: *mut Il2CppObject);
+type CoroutineReturnFn = extern "C" fn(this: *mut Il2CppObject) -> *mut Il2CppObject;
 def_detour! {
     SuccessionEvent_PrepareCutIn(this: *mut Il2CppObject) {
             PREPARE_CUT_IN.count();
@@ -191,11 +250,34 @@ def_detour! {
 def_detour! {
     SuccessionEvent_DestroyCutin(this: *mut Il2CppObject) {
             DESTROY_CUT_IN.count();
+        close_leg(&AFTER_OPEN_US, &AFTER_LEG, ProbeSuite::now_us());
 
         get_orig_fn!(SuccessionEvent_DestroyCutin, InheritVoidFn)(this);
     }
     bail {
                 get_orig_fn!(SuccessionEvent_DestroyCutin, InheritVoidFn)(this)
+    }
+}
+
+def_detour! {
+    SuccessionEvent_CheckResult(this: *mut Il2CppObject) {
+            CHECK_RESULT.count();
+
+        get_orig_fn!(SuccessionEvent_CheckResult, InheritVoidFn)(this);
+    }
+    bail {
+                get_orig_fn!(SuccessionEvent_CheckResult, InheritVoidFn)(this)
+    }
+}
+
+def_detour! {
+    SuccessionEvent_PlayResultCoroutine(this: *mut Il2CppObject) -> *mut Il2CppObject {
+            PLAY_RESULT.count();
+
+        get_orig_fn!(SuccessionEvent_PlayResultCoroutine, CoroutineReturnFn)(this)
+    }
+    bail {
+                get_orig_fn!(SuccessionEvent_PlayResultCoroutine, CoroutineReturnFn)(this)
     }
 }
 
@@ -259,6 +341,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     probe!(succession, SuccessionEvent_OnEndCutt, "OnEndCutt", ONE_INFO, VOID, "SingleModeSuccessionEventViewController::OnEndCutt(controller)");
     probe!(succession, SuccessionEvent_OnCompleteFadeOut, "OnCompleteFadeOut", NO_PARAMS, VOID, "SingleModeSuccessionEventViewController::OnCompleteFadeOut()");
     probe!(succession, SuccessionEvent_DestroyCutin, "DestroyCutin", NO_PARAMS, VOID, "SingleModeSuccessionEventViewController::DestroyCutin()");
+    probe!(succession, SuccessionEvent_CheckResult, "CheckResult", NO_PARAMS, VOID, "SingleModeSuccessionEventViewController::CheckResult()");
+    probe!(succession, SuccessionEvent_PlayResultCoroutine, "PlayResultCoroutine", NO_PARAMS, CLASS, "SingleModeSuccessionEventViewController::PlayResultCoroutine()");
     probe!(helper, SuccessionCutInHelper_OnEndCutIn, "OnEndCutIn", NO_PARAMS, VOID, "SingleModeSuccessionCutInHelper::OnEndCutIn()");
     probe!(
         change_view,
@@ -270,7 +354,9 @@ pub fn init(umamusume: *const Il2CppImage) {
     );
 
     ARMED.store(true, atomic::Ordering::Release);
-    info!("Inherit probe: {installed} of {} doors installed, the visit is split into prepare, cut and tail legs", PROBES.len());
+    info!(
+        "Inherit probe: {installed} of 10 doors installed, the two succession button doors counted by the auto click module, the visit split into prepare, cut, tail, press and after legs"
+    );
 
     if !missing.is_empty() {
         info!("Inherit probe: not installed, no class or no matching overload: {}", missing.join(", "));
@@ -309,13 +395,17 @@ pub fn report_if_due() {
     let open_ms = |open: &AtomicI64| leg_us(open.load(atomic::Ordering::Relaxed), now).unwrap_or(0) / 1_000;
 
     info!(
-        "Inherit probe totals at {now_sec} s:{line} | {} | {} | {} | open now: prepare {} ms, cut {} ms, tail {} ms",
+        "Inherit probe totals at {now_sec} s:{line} | {} | {} | {} | {} | {} | open now: prepare {} ms, cut {} ms, tail {} ms, press {} ms, after {} ms",
         PREPARE_LEG.line("prepare"),
         CUT_LEG.line("cut"),
         TAIL_LEG.line("tail"),
+        PRESS_LEG.line("press"),
+        AFTER_LEG.line("after"),
         open_ms(&PREPARE_OPEN_US),
         open_ms(&CUT_OPEN_US),
         open_ms(&TAIL_OPEN_US),
+        open_ms(&PRESS_OPEN_US),
+        open_ms(&AFTER_OPEN_US),
     );
 }
 
@@ -350,11 +440,37 @@ mod tests {
     fn every_inherit_door_is_named_by_the_view_or_helper_that_owns_it() {
         let labels: Vec<&str> = PROBES.iter().map(|probe| probe.label()).collect();
 
-        assert_eq!(labels.len(), 8);
+        assert_eq!(labels.len(), 12);
         assert!(labels.iter().all(|label| {
             label.starts_with("SingleModeSuccessionEventViewController::")
                 || label.starts_with("SingleModeSuccessionCutInHelper::")
                 || label.starts_with("SingleModeChangeViewManager::")
         }));
+
+        // The four doors the 2026-10-28 player log could not see. A run that reaches the button has to show them.
+        let wanted = [
+            "SingleModeSuccessionEventViewController::SetupSuccessionButton()",
+            "SingleModeSuccessionEventViewController::OnClickSuccessionButton()",
+            "SingleModeSuccessionEventViewController::CheckResult()",
+            "SingleModeSuccessionEventViewController::PlayResultCoroutine()",
+        ];
+
+        for label in wanted {
+            assert!(labels.contains(&label), "{label} is a door this probe counts");
+        }
+    }
+
+    #[test]
+    fn the_press_and_after_legs_hold_a_visit_from_the_offer_to_the_teardown() {
+        let now = 1_000_000;
+
+        open_leg(&PRESS_OPEN_US, now);
+        close_leg(&PRESS_OPEN_US, &PRESS_LEG, now + 300_000);
+        open_leg(&AFTER_OPEN_US, now + 300_000);
+        close_leg(&AFTER_OPEN_US, &AFTER_LEG, now + 800_000);
+
+        assert_eq!(PRESS_LEG.line("press"), "press 1 runs mean 300.0 ms worst 300 ms");
+        assert_eq!(AFTER_LEG.line("after"), "after 1 runs mean 500.0 ms worst 500 ms");
+        assert_eq!(leg_us(PRESS_OPEN_US.load(atomic::Ordering::Relaxed), now + 900_000), None, "a closed leg reports no open time");
     }
 }

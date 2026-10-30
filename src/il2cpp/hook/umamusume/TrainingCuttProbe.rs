@@ -13,7 +13,7 @@ use crate::{
         api::{il2cpp_string_chars, il2cpp_string_length},
         hook::{
             hook_id, hook_key_match,
-            umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager},
+            umamusume::{AnimationSpeed, SceneDefine::ViewId, SceneManager, SingleModeSuccessionEventViewController},
         },
         symbols::{get_class, get_field_from_name},
         types::*,
@@ -1329,7 +1329,7 @@ const CUT_GATE_HOLD_US: i64 = 30_000_000;
 // `debug_mode`, and the bound has to hold in a played build too. The first read sets the base.
 static GATE_BASE: OnceLock<Instant> = OnceLock::new();
 
-fn gate_clock_us() -> i64 {
+pub(crate) fn gate_clock_us() -> i64 {
     GATE_BASE.get_or_init(Instant::now).elapsed().as_micros() as i64
 }
 
@@ -2233,6 +2233,7 @@ def_method_wrapper_fn!(stall_get_time_scale, STALL_GET_TIME_SCALE_ADDR, f32, thi
 def_method_wrapper_fn!(stall_get_cutt_index, STALL_GET_CUTT_INDEX_ADDR, i32, this: *mut Il2CppObject);
 def_method_wrapper_fn!(stall_get_is_pause, STALL_GET_IS_PAUSE_ADDR, bool, this: *mut Il2CppObject);
 def_method_wrapper_fn!(stall_get_is_waiting_update, STALL_GET_IS_WAITING_UPDATE_ADDR, bool, this: *mut Il2CppObject);
+def_method_wrapper_fn!(stall_get_is_end, STALL_GET_IS_END_ADDR, bool, this: *mut Il2CppObject);
 
 // Milliseconds since a door last crossed on the suite clock, or -1 while it has not crossed since the suite armed.
 fn door_age_ms(door: &CutProbe, now_us: i64) -> i64 {
@@ -2251,6 +2252,11 @@ fn resolve_stall_getters(timeline: Option<*mut Il2CppClass>) {
         STALL_GET_CUTT_INDEX_ADDR = AnimationSpeed::resolve_method(class, "get_CuttIndex", &[], Il2CppTypeEnum_IL2CPP_TYPE_I4);
         STALL_GET_IS_PAUSE_ADDR = AnimationSpeed::resolve_method(class, "get_IsPause", &[], Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN);
         STALL_GET_IS_WAITING_UPDATE_ADDR = AnimationSpeed::resolve_method(class, "get_IsWaitingUpdate", &[], Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN);
+        // `IsEnd/0 -> bool()`, dumped on this class at `run log/introspect-run62.log:27368` onward. It is the door
+        // that says whether this timeline still has a cut left to play, which is what an ask should look at before
+        // it asks. A build that never resolves it reads `false` through the wrapper, which is the same decision
+        // this pump made before it checked anything.
+        STALL_GET_IS_END_ADDR = AnimationSpeed::resolve_method(class, "IsEnd", &[], Il2CppTypeEnum_IL2CPP_TYPE_BOOLEAN);
     }
 }
 
@@ -2382,8 +2388,16 @@ const INSPIRATION_SLOT_STALE_MS: i64 = 30_000;
 static INSPIRATION_SLOT_CONTROLLER: [AtomicUsize; INSPIRATION_SLOTS] = [const { AtomicUsize::new(0) }; INSPIRATION_SLOTS];
 static INSPIRATION_SLOT_SEEN_MS: [AtomicI64; INSPIRATION_SLOTS] = [const { AtomicI64::new(-1) }; INSPIRATION_SLOTS];
 static INSPIRATION_SLOT_ASKED: [AtomicBool; INSPIRATION_SLOTS] = [const { AtomicBool::new(false) }; INSPIRATION_SLOTS];
+// How many times this build has asked the timeline in the slot, and when the last ask went. The first ask and the
+// re-asks share these two so one ask cannot overlap the next.
+static INSPIRATION_SLOT_ASKS: [AtomicUsize; INSPIRATION_SLOTS] = [const { AtomicUsize::new(0) }; INSPIRATION_SLOTS];
+static INSPIRATION_SLOT_LAST_ASK_MS: [AtomicI64; INSPIRATION_SLOTS] = [const { AtomicI64::new(-1) }; INSPIRATION_SLOTS];
 static INSPIRATION_SKIPS: AtomicUsize = AtomicUsize::new(0);
 static INSPIRATION_INSIDE_DOOR: AtomicBool = AtomicBool::new(false);
+// A re-ask and a refused ask print on their own lines, so a run can tell the first ask from the follow ups and from
+// a timeline this build chose to leave alone.
+static INSPIRATION_REASKS: AtomicUsize = AtomicUsize::new(0);
+static INSPIRATION_ASKS_REFUSED: AtomicUsize = AtomicUsize::new(0);
 
 /// The slot `controller` holds, claiming a free or stale one the first time it is seen. `None` when every slot holds
 /// a live timeline, which leaves that timeline to play at the game's own pace rather than evicting one mid ask.
@@ -2400,6 +2414,8 @@ fn inspiration_slot(controller: usize, now_ms: i64) -> Option<usize> {
     INSPIRATION_SLOT_CONTROLLER[free].store(controller, atomic::Ordering::Relaxed);
     INSPIRATION_SLOT_SEEN_MS[free].store(now_ms, atomic::Ordering::Relaxed);
     INSPIRATION_SLOT_ASKED[free].store(false, atomic::Ordering::Relaxed);
+    INSPIRATION_SLOT_ASKS[free].store(0, atomic::Ordering::Relaxed);
+    INSPIRATION_SLOT_LAST_ASK_MS[free].store(-1, atomic::Ordering::Relaxed);
     Some(free)
 }
 
@@ -2422,9 +2438,22 @@ fn pump_inspiration_cut(this: *mut Il2CppObject) {
         return;
     };
 
+    // The window watch for the auto click. This door runs every frame of an Inspiration visit whether or not the
+    // succession view reaches its own `UpdateView`, so an armed click that never fires is said here.
+    SingleModeSuccessionEventViewController::note_press_window(now);
+
     let seen = INSPIRATION_SLOT_SEEN_MS[slot].load(atomic::Ordering::Relaxed);
     let asked = INSPIRATION_SLOT_ASKED[slot].load(atomic::Ordering::Relaxed);
-    if !AnimationSpeed::inspiration_skip_due(view, seen, now, asked) {
+    let reasks = INSPIRATION_SLOT_ASKS[slot].load(atomic::Ordering::Relaxed);
+    let last_ask_ms = INSPIRATION_SLOT_LAST_ASK_MS[slot].load(atomic::Ordering::Relaxed);
+    let button_armed_ms = SingleModeSuccessionEventViewController::button_armed_ms();
+
+    // The time gates first, both over numbers this door already keeps. The timeline's own doors are only read once a
+    // gate has passed, which is once an ask rather than once a frame.
+    let first_ask = AnimationSpeed::inspiration_skip_due(view, seen, now, asked);
+    let reask = !first_ask && AnimationSpeed::inspiration_reask_time(reasks, last_ask_ms, now, seen, button_armed_ms);
+
+    if !first_ask && !reask {
         return;
     }
 
@@ -2433,19 +2462,78 @@ fn pump_inspiration_cut(this: *mut Il2CppObject) {
         return;
     }
 
-    INSPIRATION_SLOT_ASKED[slot].store(true, atomic::Ordering::Relaxed);
-    let skips = INSPIRATION_SKIPS.fetch_add(1, atomic::Ordering::Relaxed) + 1;
-    if skips <= PROBE_DETAIL_LIMIT {
-        info!(
-            "Inspiration skip {skips}: asked cut-in timeline {:#x} on view {view} for its end ({}), {} ms after it first ticked",
-            this as usize,
-            AnimationSpeed::INSPIRATION_SKIP_TIME_SEC,
-            now - seen,
-        );
+    let ended = stall_get_is_end(this);
+    let paused = stall_get_is_pause(this);
+
+    if !AnimationSpeed::inspiration_state_allows_ask(ended, paused) {
+        // Settled either way. A timeline that reports itself over or paused is not going to be moved by this door,
+        // and reading it again every frame would only spend the asks on a timeline that cannot answer.
+        mark_inspiration_ask(slot, first_ask, now);
+        INSPIRATION_INSIDE_DOOR.store(false, atomic::Ordering::Release);
+
+        let refused = INSPIRATION_ASKS_REFUSED.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        if refused <= PROBE_DETAIL_LIMIT {
+            let state = match (ended, paused) {
+                (true, true) => "ended and paused",
+                (true, false) => "ended",
+                (false, true) => "paused",
+                (false, false) => "neither",
+            };
+
+            info!(
+                "Inspiration ask {refused} refused: cut-in timeline {:#x} on view {view} reports itself {state} {} ms after its first tick, so this build leaves it to the game",
+                this as usize,
+                now - seen,
+            );
+        }
+
+        return;
+    }
+
+    mark_inspiration_ask(slot, first_ask, now);
+
+    if first_ask {
+        let skips = INSPIRATION_SKIPS.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        if skips <= PROBE_DETAIL_LIMIT {
+            info!(
+                "Inspiration skip {skips}: asked cut-in timeline {:#x} on view {view} for its end ({}), {} ms after it first ticked",
+                this as usize,
+                AnimationSpeed::INSPIRATION_SKIP_TIME_SEC,
+                now - seen,
+            );
+        }
+    }
+    else {
+        let reasks_made = INSPIRATION_REASKS.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        if reasks_made <= PROBE_DETAIL_LIMIT {
+            info!(
+                "Inspiration re-ask {reasks_made}: cut-in timeline {:#x} on view {view} was still ticking {} ms after the previous ask; this is re-ask {} of {}",
+                this as usize,
+                now - last_ask_ms,
+                reasks + 1,
+                AnimationSpeed::INSPIRATION_REASK_MAX,
+            );
+        }
     }
 
     skip_cutt_time(this, AnimationSpeed::INSPIRATION_SKIP_TIME_SEC);
     INSPIRATION_INSIDE_DOOR.store(false, atomic::Ordering::Release);
+}
+
+/// Records that slot as asked at `now`. The first ask flips the asked flag; a re-ask moves the count and the clock
+/// the next re-ask is timed from.
+fn mark_inspiration_ask(slot: usize, first_ask: bool, now: i64) {
+    if first_ask {
+        INSPIRATION_SLOT_ASKED[slot].store(true, atomic::Ordering::Relaxed);
+    }
+    else {
+        INSPIRATION_SLOT_ASKS[slot].fetch_add(1, atomic::Ordering::Relaxed);
+    }
+
+    INSPIRATION_SLOT_LAST_ASK_MS[slot].store(now, atomic::Ordering::Relaxed);
 }
 
 type CuttSkipRuntimeFramesFn = extern "C" fn(this: *mut Il2CppObject, frames: i32, keep: bool);
@@ -4381,6 +4469,10 @@ pub fn init(umamusume: *const Il2CppImage) {
             TRAINING_CUT_SKIP_ADDR = AnimationSpeed::resolve_method(controller, "SkipRuntime", ONE_FLOAT, VOID);
         }
     }
+    // Resolved above the debug gate too: the Inspiration pump reads `IsEnd` and `get_IsPause` off the timeline it is
+    // already holding, and a lever a player can switch on has to be able to read them without `debug_mode`. The
+    // census is the other user of these, and it stays behind `CENSUS_ON`.
+    resolve_stall_getters(timeline);
     info!("{}", cut_skip_doors_line(update_speed_addr != 0, unsafe { TRAINING_CUT_SKIP_ADDR } != 0));
 
     if !debug_mode {
@@ -4563,7 +4655,7 @@ pub fn init(umamusume: *const Il2CppImage) {
         missing.push("CutInTimelineController::UpdateSpeed");
         census.record_miss();
     }
-    resolve_stall_getters(timeline);
+    // The stall getters were resolved above the debug gate, with the lever's own call side.
     probe!(timeline, CuttTimeline_SkipRuntimeTime, "SkipRuntime", ONE_FLOAT, VOID, "CutInTimelineController::SkipRuntime(time)");
     probe!(timeline, CuttTimeline_SkipRuntimeFrames, "SkipRuntime", FRAMES_AND_FLAG, VOID, "CutInTimelineController::SkipRuntime(frames, keep)");
 

@@ -86,6 +86,8 @@ pub mod PartsCharaMessageBase;
 pub mod SceneManager;
 pub mod AnimationSpeed;
 pub mod SingleModeResultContentBase;
+// The Inspiration event screen's own continue button, pressed by the lever that already ends its cut-in.
+mod SingleModeSuccessionEventViewController;
 mod StoryFrameProbe;
 mod TrainingCuttProbe;
 // The wait doors in `UnityEngine_CoreModule::WaitProbe` are outside this assembly's module tree, and one
@@ -379,6 +381,8 @@ pub fn init() {
     // metadata, and every module above may still be filling in class lookups.
     AnimationSpeed::init(image);
     SingleModeResultContentBase::init(image);
+    // The same lever one step further on the same screen: the click the Inspiration event owes its own button.
+    SingleModeSuccessionEventViewController::init(image);
 
     // Diagnostic only, and only when debug_mode is on: records which frame stepping paths this
     // client really calls. It has to run after the scaling modules so it observes the same class
