@@ -220,7 +220,7 @@ config_editor:
   training_tag_cut_speed: "Скорость эффекта cut-in меток тренировки"
   auto_skip_result_screens: "Автоматически пропускать анимации экранов результатов"
   skip_training_cut: "Skip the training cut-in through the game's own skip door"
-  skip_inspiration_cut: "Skip the Inspiration cut-in through the game's own skip to the end"
+  skip_inspiration_cut: "Skip the Inspiration cut-in and click its own continue button"
   high_speed_settings: "Поднимать настройки быстрого режима сюжета и тренировок до игрового максимума"
   story_high_speed_mode: "Перевести проигрывание сюжета в собственный быстрый режим игры"
   graphics_quality: "Качество графики"
