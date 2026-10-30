@@ -1398,8 +1398,14 @@ pub struct Config {
     // Ends the Inspiration cut-in (`SingleModeSuccessionEvent`, view 1501, and `SingleModeSuccessionCut`, 1500)
     // through the cut-in timeline's own skip to the end, `CutInTimelineController::SkipRuntime(-1.0)`, the call
     // the client makes itself to close a story event cut-in (run 60a). The cut-in's end is where the game sends
-    // the inheritance request (`OnEndCutt`), so the request still goes out, only sooner. At `false` nothing is
-    // called (ledger item 111).
+    // the inheritance request (`OnEndCutt`), so the request still goes out, only sooner. The same switch also makes
+    // the click this screen owes its own button: the game wires `SuccessionButton` up in `SetupSuccessionButton`,
+    // this build waits 250 ms and three of the view's frames, then calls `OnClickSuccessionButton` on that instance
+    // through the game's handler, and it re-asks a cut-in timeline that is still ticking once a second, four times
+    // at most, only while that timeline's `IsEnd` and `IsPause` doors say a cut is left to play
+    // (`SingleModeSuccessionEventViewController.rs`, and the Inspiration pump in `TrainingCuttProbe.rs`). A player
+    // who clicks first cancels the pending press. At `false` nothing is called and the screen keeps its own click
+    // (ledger item 111).
     #[serde(default)]
     pub skip_inspiration_cut: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
