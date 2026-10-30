@@ -18,18 +18,24 @@ was never put in git's index is dropped by `git add -u` and by `git commit -am` 
 saying so. A count quoted from a tool that a commit can lose is not reproducible evidence, so these
 scripts travel with the code they check and the barrier audit checks that for them.
 
-## Knowledge history
+## The record, retired here
+
+`LEDGER.md` and `LEDGER-ARCHIVE.md` were frozen on 2026-10-30 and are read only. The three tools that
+served them are gone: `knowledge-snapshot.sh`, which copied both files into a local history outside this
+repository, `test_knowledge_snapshot.sh`, its 13-check cycle test, and `ledger_index.py`, which wrote
+`LEDGER-INDEX.md` over the live item list. What replaces them lives in the knowledge base: the verbatim
+copies and the id map at `%USERPROFILE%\knowledge\projects\hachimi-edge\history\`, the generated queue at
+`references\open-work.md`, and the gates listed in `references\index.md`, one of which re-hashes the
+bytes under each record file's routing line against the freeze. The history repository at
+`$HOME/.hachimi-knowledge-history.git` stays in place unreferenced, and its last snapshot is `718d006`.
 
 | Tool | What it does |
 |---|---|
-| `bash tools/knowledge-snapshot.sh ["what changed"]` | Records `LEDGER.md` and `LEDGER-ARCHIVE.md` in the local history outside this repository. `--log`, `--show [rev]` and `--restore [rev]` read it back; `--restore` puts both files back. AGENTS.md section 1 has the rules. |
-| `python tools/ledger_index.py [--check] [--stdout]` | Reads `LEDGER.md` and writes `LEDGER-INDEX.md`: one row per numbered item with its mark, the line it starts on, its section, its date and its title, so a working record is navigated by line number instead of read whole. It also lists the blocks of `LEDGER-ARCHIVE.md`, so a moved receipt is findable by the lines it came from. The shape guard covers both files: it reports any line over 1200 characters, and `--check` exits 1 when the index is stale or such a line exists. The index is gitignored and generated, so it is not snapshotted. |
-| `bash tools/test_knowledge_snapshot.sh` | The cycle test for that script: it runs it against a throwaway history in `target/scratch/ks-test`, checks that a snapshot records `LEDGER.md` and `LEDGER-ARCHIVE.md`, that a receipt-only edit lands in the history, that `--log` and `--show` read the record back, that a deletion is recorded rather than silently skipped, that a snapshot refuses while the history tracks the archive and the disk lacks it, and that `--restore` puts both files back as they were. 13 checks, and it removes the scratch folder when they pass. |
 | `python tools/find_method_owner.py <inventory.txt> <pattern>` | Prints the `### image :: Class` header that owns every method and field line of the static map's `inventory.txt` matching a regular expression. `doors.py` prints a method line without the class it sits under, so four classes carrying `SetMarkerVisible` read as one door; this names the owner, which is what decides whether a door is a body a trampoline can patch (ledger item 118). |
 
-The OKF bundle is not in this repository and not this script's job. It lives at
+The knowledge base is not in this repository and not this folder's job. It lives at
 `%USERPROFILE%\knowledge\projects\hachimi-edge\` as a folder of a git-tracked knowledge base with its own
-history, indexes and log, and that git versions it. Snapshots taken before the 2026-10-13 move also hold a
-`knowledge/` tree; they keep it, and the script says so and leaves it alone. See
-`knowledge-history-handoff.md` at the project root (gitignored, and deliberately outside `tools/`, because the
-barrier audit reads what a `git add -u` commit would drop out of what lies here).
+history, indexes, log and tool, and that git versions it and commits it. Snapshots taken before the
+2026-10-13 move also hold a `knowledge/` tree, and they keep it. See `knowledge-history-handoff.md` at
+the project root (gitignored, and deliberately outside `tools/`, because the barrier audit reads what a
+`git add -u` commit would drop out of what lies here).

@@ -1,43 +1,37 @@
 # AGENTS.md
 
-Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code,
-then read [LEDGER.md](LEDGER.md), which is the fork's working memory: measured baselines, open
-items with IDs (A1 to A30, C1 to C80, E1 to E3; a C id is a concept in the knowledge base, see below), the
-fix order, the run notes, and sections E and F, which since 2026-10-18 name where the merge and release records
-were archived.
+Guide for coding agents working on this fork of Hachimi Edge. Read this before changing code, then
+read the project index of the knowledge base at
+`%USERPROFILE%\knowledge\projects\hachimi-edge\index.md`: it is the fork's memory, holding the rules,
+the decisions, the measured baselines, the run notes, the open queue, and every id the fork has used.
 
-LEDGER.md is a local record that this repository does not track. It is in `.gitignore`, absent from a
-fresh clone, and `git clean -xdf` deletes it. Never `git add` it in this repository, and never audit it
-with its `git diff`, which does not see it. Its history is a separate local git repository,
-`$HOME/.hachimi-knowledge-history.git` (or `$KNOWLEDGE_HISTORY`). It has no remote, must never get one,
-and exists only on this machine. `bash tools/knowledge-snapshot.sh "what changed"` records LEDGER.md and
-LEDGER-ARCHIVE.md there. `--log` and `--show` read that history, and `--restore [rev]` puts both files back as
-they were at `rev`, after snapshotting the current state. After a `git clean -xdf`, run `--restore`. Take a
-snapshot after each change to either file. Only that script stages them, and only into that history. A snapshot
-taken before 2026-10-13 also holds a `knowledge/` tree: the script names it and leaves that half alone, and one
-taken before 2026-10-18 simply has no archive file.
+[LEDGER.md](LEDGER.md) and [LEDGER-ARCHIVE.md](LEDGER-ARCHIVE.md) are still in this checkout and still
+hold what they held when they were frozen on 2026-10-30, 403,672 bytes over 2,104 lines and 400,500
+bytes over 3,899 lines. Both are gitignored, absent from a fresh clone, and deleted by
+`git clean -xdf`, and neither is ever staged here or audited with `git diff`, which does not see them.
+They are read only: line 1 of each is a routing line, the bytes under it hash to the freeze, and a
+verbatim copy of those bytes sits at `%USERPROFILE%\knowledge\projects\hachimi-edge\history\`, where
+nothing inside is edited, summarised or moved. Nothing is added to either file and nothing is worked
+out of them. Open the copy when you need the original lines behind a number a concept quotes. Their
+history is the local repository at `$HOME/.hachimi-knowledge-history.git` (or `$KNOWLEDGE_HISTORY`),
+which has no remote and stays unreferenced; the knowledge base's own git versions the record now.
 
-`python tools/ledger_index.py` reads LEDGER.md and writes `LEDGER-INDEX.md` (gitignored, generated, not
-snapshotted): one line per numbered item with its mark, the line it starts on, its section and its title. Read
-the index, then open the item by line number. `--check` exits 1 when the index no longer matches the file or
-when a line runs past 1200 characters, which is also the shape rule for LEDGER.md: a line longer than that
-cannot be read by line number and defeats a line based grep, so wrap it at spaces.
+The queue is not in this checkout any more.
+`%USERPROFILE%\knowledge\projects\hachimi-edge\references\open-work.md` is generated from the concepts'
+state and lists what is open, partial or latent, and
+`%USERPROFILE%\knowledge\projects\hachimi-edge\history\ledger-ids.md` maps every id the frozen record
+holds, the findings A1 to A30 and E1 to E3, the concepts C1 to C80, the fix order's items 1 to 126 and
+the runs, to the concept that owns it. An id never changes and is never reused. A line number written
+`L:n` is line n of `LEDGER.md` at the freeze and `A:n` is line n of `LEDGER-ARCHIVE.md` at the freeze;
+inside the frozen copies those are file lines n plus 33 and n plus 34.
 
-LEDGER-ARCHIVE.md is the other half of the record: gitignored, snapshotted with LEDGER.md, and holding only dated
-receipts. On 2026-10-18 it took in the receipts of items 81 and 102, one of item 106, two of item 108, the section C
-gate check, and the old section E merge notes and section F release records: 8 blocks, 399,714 bytes over 3,890
-lines, which took LEDGER.md from 729,678 bytes over 5,817 lines to 336,179 over 1,966. The rule is that an item
-never moves. Its heading, its live state and what it owes stay in LEDGER.md with one line naming the block it moved
-to, and only the receipts go. Nothing in an archive block is edited or summarised: it is the original lines, with the
-lines and the snapshot they came from named in the block heading. Read the live item first, and open the archive only
-when you need the receipts behind a number it quotes. Sections E and F of LEDGER.md are now routing notes naming
-where those records moved, and a new numbered item is appended before them.
-
-The OKF bundle left this repository on 2026-10-13. It is `%USERPROFILE%\knowledge\projects\hachimi-edge\`,
-one folder of a git-tracked knowledge base holding every project of the user's, with its own `index.md`,
-`log.md` and history. That git versions it, not this repository's git and not the snapshot script. The
-knowledge base has a remote (`origin`, added outside this repository's history) and is pushed only when the
-player asks. Inside the bundle a link or a `resource:` written as `Hachimi-Edge/...` points into this checkout.
+The knowledge base is a single git-tracked repository at `%USERPROFILE%\knowledge\` holding every
+project of the user's, with its own `index.md`, `log.md` and history, and it versions this fork's
+memory. It has a remote and is pushed only when the player asks. Its own tool writes and commits it:
+`python "%USERPROFILE%\knowledge\.kb\kb.py"`, as the `okf` skill describes it. Inside it, a link or a
+`resource:` written as `Hachimi-Edge/...` points into this checkout. Where a note goes, what a state
+mark means, and the evidence rule the frozen record hands over are one concept:
+`%USERPROFILE%\knowledge\projects\hachimi-edge\conventions\the-knowledge-base-is-the-only-store.md`.
 
 ## 1. What this fork is for
 
@@ -62,17 +56,19 @@ because `src/lib.rs` gates `mod android` behind `cfg(target_os = "android")` so 
 never compiles it and this fork is played on the PC Global client. Lint it by hand if you ever touch
 `src/android/` or the slot tables. Decision: `%USERPROFILE%\knowledge\projects\hachimi-edge\decisions\android-is-not-a-gate-on-this-fork.md`.
 
-The durable half of that memory is the OKF bundle in the knowledge base, at
-`%USERPROFILE%\knowledge\projects\hachimi-edge\`: one concept per file, for a rule, a decision, a
-baseline or a measurement procedure. Write one when an item closes with a run or a decision is taken, not
-as a scratch pad, and read `projects/hachimi-edge/index.md` before a task. The split and the evidence rule
-are in `%USERPROFILE%\knowledge\projects\hachimi-edge\conventions\ledger-bridge.md`.
+That memory is the knowledge base at `%USERPROFILE%\knowledge\projects\hachimi-edge\`: one concept per
+file for a rule, a decision, a baseline, a measurement procedure or a run. Read
+`projects/hachimi-edge/index.md` before a task and `references/open-work.md` for what is owed. Write a
+concept when something is settled, never as a scratch pad, and hold the evidence rule the frozen record
+handed over: no `verified` in frontmatter unless the body quotes the line that proves it.
 
 ## 2. Rules that override everything else
 
-- **Measure, don't feel.** Every speed claim is checked against the baselines in LEDGER.md
-  (section A: transition gaps median ~1.0 s, screens 91–95% of a session, hook arming 4.68 s
-  before batching). A change that cannot be shown in `hachimi.log` is not done.
+- **Measure, don't feel.** Every speed claim is checked against the baselines the knowledge base holds:
+  `metrics/transition-gap.md` (transition gaps median ~1.0 s, screens 91–95% of a session) and
+  `metrics/cut-run-clocks.md`, with hook arming 4.68 s before batching as the startup reference. Both
+  name the runs they were counted from and the script that recomputes them. A change that cannot be
+  shown in `hachimi.log` is not done.
 - **Neutral defaults.** Every speed option defaults to `1.0` / `false` and must do *nothing at
   all* at its default. Users opt in.
 - **Clamp in code, not just in the GUI.** Sliders allow 0.1..=1000.0. Hard ceilings live in code
@@ -81,18 +77,18 @@ are in `%USERPROFILE%\knowledge\projects\hachimi-edge\conventions\ledger-bridge.
   together - the group factors, `ui_animation_scale`, and the whole `Time.timeScale` this fork's write layer left
   in the game, because the clock the ui lever multiplies is `Time.deltaTime`, which is that scale times real
   elapsed time. `ui_animation_scale` is capped at the product over that scale and never trimmed below the neutral
-  1.0, so the bound trims what this fork puts on the channel and never slows the game (C58, ledger item 62).
+  1.0, so the bound trims what this fork puts on the channel and never slows the game (C58, frozen item 62).
   `training_plate_speed` is the one duration lever outside that bound, on `TrainingParamChangeUI.InitializePlateList`
   alone: runs 31 to 33 closed a plate cascade at the interval the door was handed rather than that interval over the
   multiplied clock, so no pair composes on that completion. It mirrors to its own atomic, `normalize` holds it at
   `MAX_FACTOR`, `MIN_PLATE_INTERVAL_SEC` is where the ceiling lands, and it is not on `Group::Training`, which stays
-  factor-less so the HP gauge blend time keeps its bound (C58, ledger item 74).
+  factor-less so the HP gauge blend time keeps its bound (C58, frozen item 74).
   `training_cut_speed` is the lever on the training cut-in's own speed channel, on `SingleModeUtils.GetTrainingCutTimeScale`
   alone, and it sits outside that bound for a different reason: the door hands the cut-in engine a *scale*, not a duration, so
   there is no completion for the pair to price. The lever takes the time-scale clamp (`MIN_TIME_SCALE` to `MAX_TIME_SCALE`), a
   scale never goes down, and the value the door may hand stops at `MAX_TRAINING_CUT_TIME_SCALE` - above the lever's own reach,
   because every recorded run read the game putting 6.080 to 11.280 on this door by itself and a cap at `MAX_TIME_SCALE` would
-  hand those numbers back at every setting (A17 asks for that ceiling decision to be stated, ledger item 77). Runs 36 and
+  hand those numbers back at every setting (A17 asks for that ceiling decision to be stated, frozen item 77). Runs 36 and
   37 paired that lever against the same build with it off and found the ceiling doing the multiplying rather than the lever
   (5.680 offered 28.4, the door handed 12.0), so `MAX_TRAINING_CUT_TIME_SCALE` stands at 30.0: past what the measured cuts
   ask for, and still a bound a re-pricing loop cannot pass.
@@ -102,7 +98,8 @@ are in `%USERPROFILE%\knowledge\projects\hachimi-edge\conventions\ledger-bridge.
   animation lever: prefer duration, tween and setting hooks.
 - **Never call through address 0.** Unresolved targets must stay inert.
 - **Don't change behaviour you weren't asked to.** Upstream features (translation, GUI, Live,
-  race HUD, free camera) are kept working; this fork merges upstream regularly (section E).
+  race HUD, free camera) are kept working; this fork merges upstream regularly, and a merge is recorded
+  as a concept in the knowledge base.
 
 ## 3. Repository map
 
@@ -126,8 +123,7 @@ are in `%USERPROFILE%\knowledge\projects\hachimi-edge\conventions\ledger-bridge.
 | `src/android/` | Dobby backend, Zygisk, GL overlay |
 | `assets/locales/*.yml` | 10 locales (en, es, fil, id, ko, pt-br, ru, vi, zh-cn, zh-tw) |
 | `tools/gen_il2cpp_slot_table.py` | generates `src/il2cpp/slot_table_generated.rs` (Android) |
-| `tools/knowledge-snapshot.sh` | snapshots `LEDGER.md` and `LEDGER-ARCHIVE.md` into the local history outside this repository (section 1); the bundle is versioned by the knowledge base's own git |
-| `tools/ledger_index.py` | writes `LEDGER-INDEX.md` over `LEDGER.md`, lists the blocks of `LEDGER-ARCHIVE.md`, and checks both files against the 1200 character line limit (section 1) |
+| `LEDGER.md`, `LEDGER-ARCHIVE.md` | the frozen record, gitignored and read only, copied verbatim into the knowledge base's `history/` (intro) |
 
 ## 4. Build and check
 
@@ -194,7 +190,7 @@ pub fn init(image: *const Il2CppImage) {
 }
 ```
 
-Rules learned the hard way (each has a ledger entry):
+Rules learned the hard way (each has an id in the frozen record):
 
 - **Resolve by signature, not by name plus arity.** Use `AnimationSpeed::resolve_method`
   (parameter enums *and* return type), `resolve_ref_method` for `ref`/`out` parameters,
@@ -284,10 +280,11 @@ Hot paths run every frame or every tween tick. In them:
       string the game did not take; the two are counted apart because they have different causes and
       different fixes, and a refusal is never in `c`.
    - `Frame probe totals at N s:` for the story stepping search (item D13).
-4. Record the run in LEDGER.md in the existing format: build hash, duration, numbers, what
-   moved, what didn't. Then snapshot LEDGER.md and LEDGER-ARCHIVE.md (section 1) and write the durable half of
-   what the run settled as a concept in the knowledge base. When an item closes, its receipts can move to the
-   archive and the item stays where it is, naming the block it moved to.
+4. Write the run down the same day as a `Run` concept in the knowledge base, created with
+   `kb.py new`: the build stamp and its SHA256, the config preset the run used, the numbers above with
+   the log lines they came from and those lines' numbers, what moved, and what the run failed to show.
+   A run that settled something also updates the concept that holds the rule, the baseline or the defect
+   state. LEDGER.md is not written again, and nothing is snapshotted.
 
 ## 8. Where the remaining time is
 
@@ -319,30 +316,29 @@ A new speed or performance option touches, in one change:
 3. The Performance tab in `src/core/gui.rs`, with an in code clamp, not only a slider range.
 4. Keys in **all ten** `assets/locales/*.yml` (English text is an acceptable placeholder; never
    leave a key out or define it twice, E1/E2).
-5. A LEDGER.md note if it is unverified on the Global client. Options that do nothing on this
-   client must not be offered as if they work (C14). JP only options are region gated.
+5. A note in the knowledge base if it is unverified on the Global client: the option's defect concept,
+   or the run concept that first saw it. Options that do nothing on this client must not be offered as if
+   they work (C14). JP only options are region gated.
 
 ## 10. Conventions
 
 - Commits: `area: lower case imperative summary`, areas `il2cpp`, `core`, `gui`, `l10n`,
-  `docs`, `windows`, `android`. One concern per commit. LEDGER.md is not part of a commit: it is a local
-  record, gitignored, never staged in this repository, and snapshotted into the history in section 1. The
-  bundle is not part of a commit either: it lives in the knowledge base and is committed there.
+  `docs`, `windows`, `android`. One concern per commit. The two record files named in the intro are not
+  part of a commit: they are gitignored, never staged here, and frozen. Neither is the fork's memory: it
+  lives in the knowledge base, whose own git versions it and whose own tool commits it.
 - Code style follows the surrounding file: hook files use the game's PascalCase names
   (`src/lib.rs` allows `non_snake_case` crate wide), comments explain *why* a value is safe, not what the line does.
-- LEDGER.md status marks: `[x]` fixed and verified, `[~]` partial, `[ ]` open, `[latent]` inert
-  on this client. They apply to the items of section D, the fix order, and to the A and E items;
-  a C item's state lives in its concept in the knowledge base (`%USERPROFILE%\knowledge\projects\hachimi-edge\defects\`),
-  as `state`, `fixed_in` and the
-  proof line. Cite the commit hash when closing a code item, and never mark `[x]` without a run. An
-  item whose own text says the run is missing is `[~]`, not `[x]`. A ledger self check counts marks
-  in the files, never in a diff, because this repository's git tracks neither: count
-  `Select-String '^- \[x\]|^[0-9]+\. \[x\]' LEDGER.md` and `Select-String '^state: fixed' "$env:USERPROFILE\knowledge\projects\hachimi-edge\defects\*.md"`
-  before and after the change set, and quote both counts with the moment each was taken. A check
-  that cannot match what it looks for returns a clean number on any tree. That count is taken over LEDGER.md.
-  Marks sitting inside a receipt that moved to LEDGER-ARCHIVE.md are counted there and quoted apart: taken
-  2026-10-18 after the move, LEDGER.md reads fixed 41, partial 41, open 66, and the archive holds 1 partial and
-  2 open marks inside moved receipts. An item's own mark stays with the item.
+- State marks live in frontmatter: `state: open`, `partial`, `latent` or `fixed`. `partial` means part
+  of it landed, and then `fixed_in` names the commit that landed the part and the body names what is
+  still owed. `latent` means inert on this client. Cite the commit hash when closing a code item, and
+  never call an item closed without a run: an item whose own text says the run is missing stays
+  `partial`, and `fixed_in` on a state that is not `fixed` is not a closure.
+  `python "%USERPROFILE%\knowledge\projects\hachimi-edge\references\computations\defect_rollup.py"` counts
+  the states out of the concepts and prints them; `--open-work` rewrites the queue view, and running the
+  same command twice on an unchanged tree rewrites it to the same bytes. Quote a count with the moment it
+  was taken and re-print it rather than asserting it in the present tense. The marks frozen into
+  `%USERPROFILE%\knowledge\projects\hachimi-edge\history\` are the record's own history: nobody recounts
+  them and nothing reads them as current, and a concept quoting an old count quotes it as dated.
 - Audit tooling is part of the change set it audits. A script whose number a concept quotes lives in
   `tools/` and goes into git's index the moment it is written: `git add -u` and `git commit -am` skip an
   untracked file without saying so, and `/target` is gitignored, so a script under `target/scratch/` is
@@ -351,13 +347,15 @@ A new speed or performance option touches, in one change:
   build or an audit needs. A tree-state count written into a concept is dated and re-printed, never
   asserted in the present tense.
 - Upstream merges: keep our `introspect`/speed modules, take upstream's everything else, rebuild
-  with zero warnings, and record the merge in section E.
-- Knowledge base concepts follow OKF v0.2: frontmatter with a `type`, the ledger id inside the
-  filename (`defects/c48-<slug>.md`, ids are never reused), the proof line quoted in the body, and
-  no `verified` entry without that line. The ledger keeps the queue, the bundle keeps the
-  conclusion, and neither is in this repository's git: LEDGER.md has its history in section 1 and the
-  bundle has the knowledge base's own. The view over the defects is
-  `python "%USERPROFILE%\knowledge\projects\hachimi-edge\references\computations\defect_rollup.py"`, and the
-  gate over the whole folder is `okf_selfcheck.py` beside it.
+  with zero warnings, and record the merge as a concept in the knowledge base.
+- Knowledge base concepts follow OKF v0.2: frontmatter with a `type`, the id inside the filename
+  (`defects/c48-<slug>.md`, `defects/item125-<slug>.md`, ids never reused), the proof line quoted in the
+  body, and no `verified` entry without that line. The knowledge base is the one store: the queue is the
+  generated view, the conclusions are the concepts, and `history/` holds the frozen record. Its own tool
+  writes and commits it: `python "%USERPROFILE%\knowledge\.kb\kb.py"`, and it refuses a concept that
+  changed with no log line, a body left as a placeholder, and a concept that grew past 20 KB. Beside the
+  rollup, `ledger_id_check.py` refuses an open id with no owner or a `ledger_id` with no row in the map,
+  `ledger_import_check.py` refuses an edit to a frozen copy or a record file whose bytes moved under its
+  routing line, and `okf_selfcheck.py` is the gate over the whole folder.
 - Upstream's PR template forbids untested AI generated code. Anything heading upstream must be
   built, run in game and understood by the human submitting it.
