@@ -16,8 +16,10 @@
 //!   by calling `get_Character` on the live state, never from a remembered address.
 //! - Numbers about the character are read fresh, by calling the class's own getter methods through
 //!   addresses resolved by signature at init (A2/A5: plain `int()` and enum-returning getters travel
-//!   in registers; a `struct` wider than 4 bytes is never pushed through a wrapper, so the
-//!   `ObscuredInt` properties are read at their backing-field offsets like the SP already is).
+//!   in registers; a `struct` wider than 4 bytes is never pushed through a wrapper). The
+//!   `ObscuredInt` properties answer through their own class's decoder method, invoked at the
+//!   backing field: this client keeps decoys in the struct's plaintext ints — measured, a raw
+//!   shape read said 479 while the game's decoder said 2948, the number on screen.
 //! - The skill screen's rows and the master names are copied into owned data by
 //!   `SingleModeSkillProbe` at the moment its doors fire; this module serializes those copies.
 
@@ -273,7 +275,57 @@ unsafe fn call_object(addr: usize, this: *mut Il2CppObject) -> *mut Il2CppObject
 /// run proved that walk-then-gate path answer `<held>` for a field the same second's live door
 /// read in plain text (`fakeValue=451`). Shapes other than `ObscuredInt` answer `None`: an
 /// unknown shape is never a guessed number.
+/// The ObscuredInt decode: ask the live field itself. Reading the struct's plaintext ints is a
+/// decoy on this client — a measured run had the raw shape read answer 479 while the game's own
+/// decoder answered 2948, the number on screen. So the file carries only what the field's own
+/// class answers: resolve the decoder method against the real metadata, invoke it on the inline
+/// data, and read the boxed int back. Any miss answers `None` — never a guessed number.
 unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> Option<i64> {
+    if struct_class.is_null() {
+        return None;
+    }
+
+    // Only ObscuredInt decoders are int-shaped; any other Obscured type asked here would answer
+    // in its own width, and there is no measurement proving that width.
+    if skill_capture::as_string(il2cpp_class_get_name(struct_class)).as_deref() != Some("ObscuredInt") {
+        return None;
+    }
+
+    let mut method = std::ptr::null();
+
+    for candidate in ["GetDecryptedValue", "get_Value"] {
+        let Ok(c_name) = std::ffi::CString::new(candidate) else { continue };
+        method = il2cpp_class_get_method_from_name(struct_class, c_name.as_ptr(), 0);
+
+        if !method.is_null() {
+            break;
+        }
+    }
+
+    if method.is_null() {
+        return None;
+    }
+
+    let mut exc: *mut Il2CppException = std::ptr::null_mut();
+    let result = il2cpp_runtime_invoke(method, base as *mut ::std::os::raw::c_void, std::ptr::null_mut(), &mut exc);
+
+    if !exc.is_null() || result.is_null() {
+        return None;
+    }
+
+    let held = il2cpp_object_unbox(result);
+
+    if held.is_null() {
+        return None;
+    }
+
+    Some(unsafe { *(held as *const i32) } as i64)
+}
+
+/// The same decode kept only as the counter-witness: the log line prints the raw shape answer
+/// beside the game's, so a future drift between the two is visible in one line instead of two
+/// files. Nothing in the JSON reads this.
+unsafe fn obscured_value_at_shape(base: *const u8, struct_class: *mut Il2CppClass) -> Option<i64> {
     if struct_class.is_null() {
         return None;
     }
@@ -299,7 +351,7 @@ unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> 
 }
 
 /// The same through a property name: `<Name>k__BackingField` on the object's class.
-unsafe fn obscured_property(obj: *mut Il2CppObject, property: &str) -> Option<i64> {
+unsafe fn obscured_property_with(obj: *mut Il2CppObject, property: &str, decode: unsafe fn(*const u8, *mut Il2CppClass) -> Option<i64>) -> Option<i64> {
     let klass = il2cpp_object_get_class(obj);
     let backing = format!("<{property}>k__BackingField");
     let c_backing = std::ffi::CString::new(backing).ok()?;
@@ -312,7 +364,11 @@ unsafe fn obscured_property(obj: *mut Il2CppObject, property: &str) -> Option<i6
     let struct_class = il2cpp_type_get_class_or_element_class(il2cpp_field_get_type(field));
     let base = (obj as *const u8).add(il2cpp_field_get_offset(field));
 
-    obscured_value_at(base, struct_class)
+    decode(base, struct_class)
+}
+
+unsafe fn obscured_property(obj: *mut Il2CppObject, property: &str) -> Option<i64> {
+    obscured_property_with(obj, property, obscured_value_at)
 }
 
 /// Ask the game itself to decode the `ObscuredInt` behind `<Name>k__BackingField`: the field's own
@@ -826,10 +882,11 @@ fn run_dump() -> Result<String, DumpError> {
         root.insert(section, value);
     }
 
-    let raw_sp = unsafe { obscured_property(chara, "SkillPoint") };
+    let sp = unsafe { obscured_property(chara, "SkillPoint") };
+    let shape_sp = unsafe { obscured_property_with(chara, "SkillPoint", obscured_value_at_shape) };
     let decoded_sp = unsafe { game_decoded_property(chara, "SkillPoint") };
-    info!("Career dump: SkillPoint raw={:?} game-decoded=\"{}\"", raw_sp, decoded_sp);
-    root.insert("skillPoint".to_owned(), match raw_sp {
+    info!("Career dump: SkillPoint game={:?} shape={:?} text=\"{}\"", sp, shape_sp, decoded_sp);
+    root.insert("skillPoint".to_owned(), match sp {
         Some(value) => json!(value),
         None => Value::String("<unreadable>".to_owned()),
     });
