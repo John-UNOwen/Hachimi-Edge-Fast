@@ -315,6 +315,73 @@ unsafe fn obscured_property(obj: *mut Il2CppObject, property: &str) -> Option<i6
     obscured_value_at(base, struct_class)
 }
 
+/// Ask the game itself to decode the `ObscuredInt` behind `<Name>k__BackingField`: the field's own
+/// type, method-resolved at runtime and called through the il2cpp invoke on the live object. The
+/// split this measures: the string that comes back is what the game's decoder answers. If that
+/// equals the number on screen and not the raw shape read, my decode is the wrong one; if it
+/// equals what I read, the field really is that and the screen's number lives elsewhere.
+///
+/// This client's `ObscuredInt` never made the truncated introspect dump (A8), so which decoder
+/// the class carries is measured, not assumed: the known-name candidates are resolved against the
+/// real metadata in order, and the log names the one that answered. A `null` method is skipped;
+/// a raised exception is reported as text, never propagated.
+unsafe fn game_decoded_property(obj: *mut Il2CppObject, property: &str) -> String {
+    let klass = il2cpp_object_get_class(obj);
+    let backing = format!("<{property}>k__BackingField");
+    let Ok(c_backing) = std::ffi::CString::new(backing) else { return "<no field name>".to_owned() };
+    let field = il2cpp_class_get_field_from_name(klass, c_backing.as_ptr());
+
+    if field.is_null() {
+        return "<no field>".to_owned();
+    }
+
+    let struct_class = il2cpp_type_get_class_or_element_class(il2cpp_field_get_type(field));
+
+    if struct_class.is_null() {
+        return "<no struct class>".to_owned();
+    }
+
+    // A struct method's `this` is a pointer to its inline data (TextRubyData.rs's invoke
+    // convention: pass the instance pointer, never a boxed stand-in for a data-bound this).
+    let data = (obj as *mut u8).add(il2cpp_field_get_offset(field));
+
+    for candidate in ["GetDecryptedValue", "get_Value", "ToString"] {
+        let Ok(c_name) = std::ffi::CString::new(candidate) else { continue };
+        let method = il2cpp_class_get_method_from_name(struct_class, c_name.as_ptr(), 0);
+
+        if method.is_null() {
+            continue;
+        }
+
+        let mut exc: *mut Il2CppException = std::ptr::null_mut();
+        let result = il2cpp_runtime_invoke(method, data as *mut ::std::os::raw::c_void, std::ptr::null_mut(), &mut exc);
+
+        if !exc.is_null() {
+            return format!("<{candidate} threw>");
+        }
+
+        if result.is_null() {
+            return format!("<{candidate} null>");
+        }
+
+        // The two int candidates hand back a boxed int; `ToString` hands back a string. Which
+        // shape to read follows the candidate by name — the invoke machinery boxes primitives.
+        return match candidate {
+            "ToString" => match (result as *mut Il2CppString).as_ref() {
+                Some(text) => text.as_utf16str().to_string(),
+                None => "<ToString returned null>".to_owned(),
+            },
+            _ => match il2cpp_object_unbox(result) {
+                p if p.is_null() => format!("<{candidate} unbox null>"),
+                p => format!("{}", unsafe { *(p as *const i32) }),
+            },
+        };
+    }
+
+    "<no decoder method>".to_owned()
+}
+
+
 // ---- the JSON walk ----------------------------------------------------------------------------
 
 /// Every instance field of a live object as JSON, within the walk's caps and budget. Element and
@@ -759,10 +826,14 @@ fn run_dump() -> Result<String, DumpError> {
         root.insert(section, value);
     }
 
-    root.insert("skillPoint".to_owned(), match unsafe { obscured_property(chara, "SkillPoint") } {
+    let raw_sp = unsafe { obscured_property(chara, "SkillPoint") };
+    let decoded_sp = unsafe { game_decoded_property(chara, "SkillPoint") };
+    info!("Career dump: SkillPoint raw={:?} game-decoded=\"{}\"", raw_sp, decoded_sp);
+    root.insert("skillPoint".to_owned(), match raw_sp {
         Some(value) => json!(value),
         None => Value::String("<unreadable>".to_owned()),
     });
+    root.insert("skillPointGameDecoded".to_owned(), json!(decoded_sp));
     info!("Career dump: getters done in {} ms", elapsed());
 
     let lists: Vec<(&'static str, usize)> = lock_or_recover(&BOUND_LIST).iter().map(|(section, _, addr)| (*section, *addr)).collect();
