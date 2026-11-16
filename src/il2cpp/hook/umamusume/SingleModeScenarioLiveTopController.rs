@@ -16,8 +16,10 @@
 // view 1621 (`player-run70.log:2414`, `:2532`), while the control's own `Play/0` (`:23229`) crossed 0 times and
 // `Stop/0` with `Cleanup/0` crossed 10 (`:2628`). So the window is the helper's own pair, `OnPlayCutIn` opening it and
 // `OnEndCutIn` closing it, and the press is `SkipRuntime/0` (`:27255`) on the helper read out of `field _helper` on the
-// frame the click lands on. `Play`, `Stop`, `Cleanup` and `Skip` on the control stay armed as counted doors, because a
-// run has to tell a cut that ran from one that did not, and a `Stop` or a `Cleanup` closes the window as a guard only
+// frame the click lands on. `Play`, `Stop` and `Cleanup` on the control stay armed as counted doors, because a
+// run has to tell a cut that ran from one that did not; the control's own `Skip` joins them counted, and since
+// the park line it is also the escalation click - see the park paragraph below. A `Stop` or a `Cleanup` closes
+// the window as a guard only
 // where this module holds the helper's own pair: run 71's live had its cut-in open on screen while `StoryEventProbe`
 // held that pair, and the guard closed the gate on all 54,648 frames (`player-run71.log:3542`).
 //
@@ -57,7 +59,9 @@
 // armed as a counted door for one reason: `field _phaseDict` (`:23306`) is the `Dictionary<PhaseType, AbstractPhase>` a
 // phase change resolves through, so a live that asked for its next phase and did not move and a live that never asked are
 // different failures with different fixes, and only these two readings side by side tell them apart. The park line
-// measures; it changes nothing about what this lever presses.
+// measures; the first line of a parked phase also makes the one click this lever had never made - the cut
+// control's own `Skip()`, the game's own live skip button, which no measured run had ever crossed and which is
+// what an ending that never arrives would otherwise wait for forever.
 //
 // Two of this lever's rules are the player's, not this file's. It never writes the game's own saved skip setting: the
 // client keeps one (`ApplicationSettingSaveLoader::get_IsEnableScenarioLiveSkipGrandLive`,
@@ -164,12 +168,24 @@ const PARK_REPEAT_MS: i64 = 10_000;
 /// detail limit would spend the whole budget on the first one.
 const PARK_REPORT_LIMIT: usize = PROBE_DETAIL_LIMIT * 3;
 
+/// How many parked phases one session escalates: each stuck wait is clicked once, on its first park line, and
+/// run 74 lost two visits in 41 min (`run log/hachimi.log:14541`, `:16524`) - the detail limit's number of
+/// stuck waits is a budget no played session has come close to spending.
+const ESCALATE_LIMIT: usize = PROBE_DETAIL_LIMIT;
+
 // The press door: `SkipRuntime/0` on `Gallop.SingleModeTrainingCutInHelper` (`introspect-run69.log:27255`), the helper
 // the live's cut control holds in `field _helper` (`introspect-run66.log:23240`) and the door the player's own click on
 // the live's skip icon reached in run 70 (`player-run70.log:2531`). `def_method_wrapper_fn!` keeps the press inert when
 // the door never resolved, which is the case the arming line reports as a door that did not install (A4). The address is
 // resolved whether or not this module arms a hook on it, because pressing is what it is there for.
 def_method_wrapper_fn!(press_live_cut_skip, LIVE_CUT_SKIP_ADDR, (), this: *mut Il2CppObject);
+
+// The escalation door: `Skip/0` on the live's own cut control (`introspect-run66.log:23229`, the block naming
+// `Play/Stop/Cleanup/Skip`), the live's own skip button, and the door no measured run has ever seen crossed -
+// 0 in run 70's visit (`player-run70.log:2628`), 0 across the other PC's 61 min, 0 in run 74's census. A live
+// whose cut runtime steps and never terminates waits for an ending nothing clicks, and this is the ending the
+// game's own button would click. Inert while the address is 0 (A4), and the arming line says when it did not resolve.
+def_method_wrapper_fn!(press_control_skip, LIVE_CONTROL_SKIP_ADDR, (), this: *mut Il2CppObject);
 
 /// Whether the cut door may be clicked this frame. The live's own cut-in has to be open, and the live's cut control has
 /// to be holding the helper the press is aimed at. An open window with no helper is a press with nothing to click, and a
@@ -273,6 +289,10 @@ static PRESS_DROPPED: AtomicUsize = AtomicUsize::new(0);
 static CUT_PLAYS: AtomicUsize = AtomicUsize::new(0);
 static CUT_STOPS: AtomicUsize = AtomicUsize::new(0);
 static CUT_GAME_SKIPS: AtomicUsize = AtomicUsize::new(0);
+// The clicks this build made on the cut control's own `Skip()` after a first park line. Kept apart from the
+// door's crossings so the census can say how many stuck waits this lever escalated and how many crossings
+// the game or a player made on their own.
+static CONTROL_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
 static CUT_OUR_SKIPS: AtomicUsize = AtomicUsize::new(0);
 static CUT_OUR_SKIP_CROSSINGS: AtomicUsize = AtomicUsize::new(0);
 // The helper's own pair, counted apart from the control's `Play()`: run 70 put 0 openings on `Play()` and one on the
@@ -383,6 +403,14 @@ pub(crate) fn live_press_due(armed_ms: i64, frames: i64, now_ms: i64, presses: u
 /// that stands past `PARK_AFTER_MS` is the live not moving rather than a live still playing.
 pub(crate) fn park_due(phase_changes: usize, phase_stood_ms: i64, now_ms: i64, last_park_ms: i64) -> bool {
     phase_changes > 0 && phase_stood_ms >= PARK_AFTER_MS && (last_park_ms < 0 || now_ms - last_park_ms >= PARK_REPEAT_MS)
+}
+
+/// Whether a park line is followed by this build's one click on the cut control's own `Skip()`: the click rides
+/// the phase's first park line (`first_line`, before any repeat has printed), needs the control this frame's
+/// controller handed, and stays inside the session's escalation budget. The repeat lines then read whether the
+/// wait moved after the click or stood through it.
+pub(crate) fn escalate_due(first_line: bool, control_held: bool, escalations: usize, limit: usize) -> bool {
+    first_line && control_held && escalations < limit
 }
 
 /// Whether a visit whose door opened has gone too long without a click to leave unreported.
@@ -637,6 +665,8 @@ unsafe fn report_park_if_due(this: *mut Il2CppObject, phase: *mut Il2CppObject, 
         return;
     }
 
+    let first_line = PARK_LAST_MS.load(Ordering::Relaxed) < 0;
+
     PARK_LAST_MS.store(now, Ordering::Relaxed);
 
     let class = il2cpp_object_get_class(phase);
@@ -670,11 +700,41 @@ unsafe fn report_park_if_due(this: *mut Il2CppObject, phase: *mut Il2CppObject, 
         "the helper's cut doors are not counted in a build without `debug_mode`".to_string()
     };
     let top_note = flag_text(read_flag(this, FIELD_IS_GRAND_LIVE_TOP));
-    let bgm_note = flag_text(read_flag(read_object(this, FIELD_CUT_CONTROL), FIELD_CUT_BGM_PLAYING));
+    let control = read_object(this, FIELD_CUT_CONTROL);
+    let bgm_note = flag_text(read_flag(control, FIELD_CUT_BGM_PLAYING));
 
     warn!(
         "Grand Live skip park {reported}: the live top has stood in {phase_label} on {phase:p} for {stood} ms on frame {frames} of its `UpdateView`, {closed_note}; inside this phase `SetNextPhase` crossed {sets} times, {asked_note}; the skip door crossed {other_skips} times by the game or the player and {our_skips} by this build; the cut control crossed `Play()` {plays} and `Stop()` or `Cleanup()` {stops}; {cut_doors} since this phase began; `_isGrandLiveTop` reads {top_note} and the cut control's `_isPlayingBGM` reads {bgm_note}",
     );
+
+    // The escalation the park line was built to make possible: a live whose cut runtime steps and never
+    // terminates waits for an ending nothing clicks, so this build clicks the ending the game's own button
+    // would - the cut control's `Skip()`, the door no measured run has ever seen crossed. Once per parked
+    // phase, on its first park line, through the game's own door on the object this frame's controller
+    // handed; the repeat park lines then say whether `SetNextPhase` crossed after the click or not.
+    if escalate_due(first_line, !control.is_null(), CONTROL_ESCALATIONS.load(Ordering::Relaxed), ESCALATE_LIMIT) {
+        if PRESS_INSIDE.swap(true, Ordering::AcqRel) {
+            let dropped = PRESS_DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+
+            if dropped <= PROBE_DETAIL_LIMIT {
+                warn!("Grand Live skip escalation {reported} dropped: a press is already inside a live skip door for {control:p}");
+            }
+        }
+        else {
+            press_control_skip(control);
+
+            PRESS_INSIDE.store(false, Ordering::Release);
+
+            let escalated = CONTROL_ESCALATIONS.fetch_add(1, Ordering::Relaxed) + 1;
+
+            warn!(
+                "Grand Live skip escalate {escalated}: clicked the live cut control's own `Skip()` on {control:p} {stood} ms into the parked {phase_label} on {phase:p}, the door no measured run had ever seen crossed; the repeat park lines of this phase will say whether `SetNextPhase` crossed after the click",
+            );
+        }
+    }
+    else if first_line && control.is_null() {
+        warn!("Grand Live skip escalate {reported} not made: this frame's live top handed no `field _cutControl` to click");
+    }
 }
 
 fn open_visit(view: i32) {
@@ -1121,9 +1181,11 @@ def_detour! {
     }
 }
 
-// The control's own `Skip()`, counted and never pressed. No measured run has seen the game cross it: 0 in run 70's
-// visit (`player-run70.log:2628`) and 0 across 61 min on the other PC. Armed only where `ScenarioLiveProbe` is not
-// already holding that address.
+// The control's own `Skip()`, counted, and - since the park line named an ending that never arrives - clicked
+// once per parked phase on that phase's first park line. No measured run had seen the game cross it: 0 in run
+// 70's visit (`player-run70.log:2628`) and 0 across 61 min on the other PC. Armed only where `ScenarioLiveProbe`
+// is not already holding that address; pressed through the address in both shapes, guarded by `PRESS_INSIDE` so
+// this build's own click is not counted as the game's.
 def_detour! {
     ScenarioLiveCutControl_Skip(this: *mut Il2CppObject) {
         if !PRESS_INSIDE.load(Ordering::Acquire) {
@@ -1152,7 +1214,7 @@ pub fn report_if_due() {
 
     let now_us = gate_clock_us();
     let now_sec = now_us / 1_000_000;
-    let totals = HOST_TICKS.load(Ordering::Relaxed) + CUT_OUR_SKIPS.load(Ordering::Relaxed) + CUT_INS_OPENED.load(Ordering::Relaxed) + GAME_CLICKS.load(Ordering::Relaxed) + CUT_GAME_SKIPS.load(Ordering::Relaxed);
+    let totals = HOST_TICKS.load(Ordering::Relaxed) + CUT_OUR_SKIPS.load(Ordering::Relaxed) + CUT_INS_OPENED.load(Ordering::Relaxed) + GAME_CLICKS.load(Ordering::Relaxed) + CUT_GAME_SKIPS.load(Ordering::Relaxed) + CONTROL_ESCALATIONS.load(Ordering::Relaxed);
     let last_sec = LAST_REPORT_SEC.load(Ordering::Relaxed);
     let last_totals = LAST_TOTALS.load(Ordering::Relaxed);
 
@@ -1166,7 +1228,7 @@ pub fn report_if_due() {
     let skips_watched = skip_door_crossings();
 
     info!(
-        "Grand Live skip census at {now_sec} s: live top frames {host} over {visits} visits and {phases} live phases described, {cut_ins} live cut-in windows opened and {cut_ins_closed} closed as this lever saw them on the helper, {cut_presses} clicks this build made on `SingleModeTrainingCutInHelper::SkipRuntime()` across {our_crossings} crossings of it this module watched, {skip_watched} crossings of that door by the game or the player this session, the training cut-ins sharing it, {control_skips} crossings of the control's own `Skip()`, {plays} control `Play()` ({bgm_true} with the controls own `_isPlayingBGM` true, {bgm_false} false, {bgm_none} unreadable) and {stops} `Stop()` or `Cleanup()`, {button_clicks} clicks on the live's own button, {dropped} presses dropped, {grand_top} frames a true Grand Live top | press gate closed: {no_cut} frames with no live cut-in open on this screen, {cut_stopped} frames held by the control's own `Stop()` or `Cleanup()` waiting for the next cut-in, {no_helper} frames with no `field _helper` on the cut control | live motion: {moves} phase changes read off `field _currentPhase`, {phase_sets} crossings of `SetNextPhase()` with the last phase asked for numbered {phase_asked}, {parks} park lines printed",
+        "Grand Live skip census at {now_sec} s: live top frames {host} over {visits} visits and {phases} live phases described, {cut_ins} live cut-in windows opened and {cut_ins_closed} closed as this lever saw them on the helper, {cut_presses} clicks this build made on `SingleModeTrainingCutInHelper::SkipRuntime()` across {our_crossings} crossings of it this module watched, {skip_watched} crossings of that door by the game or the player this session, the training cut-ins sharing it, {control_skips} crossings of the control's own `Skip()` ({escalated} clicked by this build on a park line), {plays} control `Play()` ({bgm_true} with the controls own `_isPlayingBGM` true, {bgm_false} false, {bgm_none} unreadable) and {stops} `Stop()` or `Cleanup()`, {button_clicks} clicks on the live's own button, {dropped} presses dropped, {grand_top} frames a true Grand Live top | press gate closed: {no_cut} frames with no live cut-in open on this screen, {cut_stopped} frames held by the control's own `Stop()` or `Cleanup()` waiting for the next cut-in, {no_helper} frames with no `field _helper` on the cut control | live motion: {moves} phase changes read off `field _currentPhase`, {phase_sets} crossings of `SetNextPhase()` with the last phase asked for numbered {phase_asked}, {parks} park lines printed",
         host = HOST_TICKS.load(Ordering::Relaxed),
         visits = VISITS_SEEN.load(Ordering::Relaxed),
         phases = PHASES_SEEN.load(Ordering::Relaxed),
@@ -1176,6 +1238,7 @@ pub fn report_if_due() {
         our_crossings = CUT_OUR_SKIP_CROSSINGS.load(Ordering::Relaxed),
         skip_watched = skips_watched,
         control_skips = CUT_GAME_SKIPS.load(Ordering::Relaxed),
+        escalated = CONTROL_ESCALATIONS.load(Ordering::Relaxed),
         plays = CUT_PLAYS.load(Ordering::Relaxed),
         bgm_true = CUT_PLAYS_BGM_TRUE.load(Ordering::Relaxed),
         bgm_false = CUT_PLAYS_BGM_FALSE.load(Ordering::Relaxed),
@@ -1246,6 +1309,7 @@ pub fn init(umamusume: *const Il2CppImage) {
 
     unsafe {
         LIVE_CUT_SKIP_ADDR = cut_skip_addr;
+        LIVE_CONTROL_SKIP_ADDR = skip_addr;
         FIELD_IS_GRAND_LIVE_TOP = get_field_from_name(top_controller, c"_isGrandLiveTop");
         FIELD_CURRENT_PHASE = get_field_from_name(top_controller, c"_currentPhase");
         FIELD_GRAND_LIVE_3D = get_field_from_name(top_controller, c"_grandLive3DController");
@@ -1366,7 +1430,7 @@ pub fn init(umamusume: *const Il2CppImage) {
     }
 
     info!(
-        "Grand Live skip: {installed} of {doors} doors armed on SingleModeScenarioLiveTopController, its Grand Live 3D controller, its SingleModeScenarioLiveCutControl and the SingleModeTrainingCutInHelper that control holds in `field _helper` in every build; the lever clicks `SingleModeTrainingCutInHelper::SkipRuntime()` on that helper while the live's own cut-in is open on the live screen, after {PRESS_SETTLE_MS} ms and {PRESS_SETTLE_FRAMES} frames and up to {PRESS_LIMIT} clicks a visit {PRESS_REASK_MS} ms apart; the cut control's `Play`, `Stop`, `Cleanup` and its own `Skip`, the live's own `OnLiveButtonClicked`, and the controller's own `SetNextPhase(phase, argument)` are armed as counted doors and are never clicked; a phase that stands {PARK_AFTER_MS} ms after this visit last moved to a new phase object prints a park line naming what crossed inside the wait, repeated on {PARK_REPEAT_MS} ms while that phase keeps standing; the cut control's own `field <IsPlayingBGM>k__BackingField` is read only on the frames this module prints a line on and is never written; `_isGrandLiveTop` is read for the log only, because run 67 showed the intermediate Grand Live scenario lives answer false; the game's own saved skip setting is never written",
+        "Grand Live skip: {installed} of {doors} doors armed on SingleModeScenarioLiveTopController, its Grand Live 3D controller, its SingleModeScenarioLiveCutControl and the SingleModeTrainingCutInHelper that control holds in `field _helper` in every build; the lever clicks `SingleModeTrainingCutInHelper::SkipRuntime()` on that helper while the live's own cut-in is open on the live screen, after {PRESS_SETTLE_MS} ms and {PRESS_SETTLE_FRAMES} frames and up to {PRESS_LIMIT} clicks a visit {PRESS_REASK_MS} ms apart; the cut control's `Play`, `Stop` and `Cleanup`, the live's own `OnLiveButtonClicked`, and the controller's own `SetNextPhase(phase, argument)` are armed as counted doors and are never clicked, and the control's own `Skip` is armed counted and is clicked only where a park line says a phase has stopped: once, on the phase's first park line, up to {ESCALATE_LIMIT} times a session; a phase that stands {PARK_AFTER_MS} ms after this visit last moved to a new phase object prints a park line naming what crossed inside the wait, repeated on {PARK_REPEAT_MS} ms while that phase keeps standing; the cut control's own `field <IsPlayingBGM>k__BackingField` is read only on the frames this module prints a line on and is never written; `_isGrandLiveTop` is read for the log only, because run 67 showed the intermediate Grand Live scenario lives answer false; the game's own saved skip setting is never written",
     );
 
     if !cut_watch_here {
@@ -1544,6 +1608,14 @@ mod tests {
         // before it.
         assert!(!park_due(2, 14_000, 110_000, 100_001), "a park does not print again the moment it prints");
         assert!(park_due(2, 14_000, 110_000, 100_000), "and it does print again on the repeat interval");
+    }
+
+    #[test]
+    fn a_parked_phase_is_escalated_once_by_the_control_its_frame_handed() {
+        assert!(escalate_due(true, true, 0, ESCALATE_LIMIT), "the first park line of a stuck phase clicks the live's own button once");
+        assert!(!escalate_due(false, true, 0, ESCALATE_LIMIT), "a repeat park line reads whether that click moved the wait rather than clicking again");
+        assert!(!escalate_due(true, false, 0, ESCALATE_LIMIT), "a frame that hands no cut control has nothing to click");
+        assert!(!escalate_due(true, true, ESCALATE_LIMIT, ESCALATE_LIMIT), "the session budget is the bound");
     }
 
     #[test]
