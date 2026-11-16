@@ -1,5 +1,13 @@
-//! Scrolling screenshot: scroll a screen with real mouse-wheel input, capture the backbuffer at
+//! Scrolling screenshot: scroll a screen with a real mouse drag, capture the backbuffer at
 //! every settled step, and stitch the frames into one tall PNG that also lands on the clipboard.
+//!
+//! The drag, never the wheel, is deliberate. This client is a touch-first port: its lists follow a
+//! dragged pointer and most screens carry no wheel handler at all, and even where Unity would route
+//! a wheel it reaches only the widget the EventSystem believes the pointer is over - a position fed
+//! by real input messages, which `SetCursorPos` does not produce. A first build that sent the wheel
+//! and teleported the cursor measured no motion and saved one static viewport. Every pointer
+//! position here therefore travels through `SendInput` as a real message, and every scroll is the
+//! press-move-release the game answers with on its own.
 //!
 //! The stitching method is the receipt-factor one the Mirako toolchain documents: find where the
 //! foot of the previous frame landed in the next one, demand that the *whole* shared stretch agrees
@@ -32,20 +40,29 @@ use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenC
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_DIB;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, MOUSEEVENTF_WHEEL, MOUSEINPUT, INPUT_0, INPUT_MOUSE,
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSE_EVENT_FLAGS, MOUSEINPUT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetCursorPos, SetCursorPos};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, GetCursorPos, GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+};
 
 use crate::core::gui::{request_notification, NotificationRequest};
 use crate::core::hachimi::recover_lock;
 use crate::windows::utils::get_game_dir;
 use crate::windows::wnd_hook;
 
-// One mouse-wheel notch (WHEEL_DELTA). Notches per step are a guess at "a visible move"; the
-// stitch measures the actual displacement, so a wrong guess costs a step, never a row.
-const WHEEL_DELTA: i32 = 120;
-const WHEEL_NOTCHES: i32 = 3;
+// The drag. The press rests a beat before moving so the game reads a grab and not a flick, and the
+// move lands in ten steps a frame apart because a ScrollRect drag is built from the pointer's
+// per-frame positions - one jump would be read as a drag of a few pixels.
+const DRAG_STEPS: usize = 10;
+const DRAG_STEP_WAIT: Duration = Duration::from_millis(22);
+const DRAG_PRESS_WAIT: Duration = Duration::from_millis(90);
+const DRAG_MIN_STEP: usize = 40;
+// A step the stitch cannot place is a duplicated viewport, and `travel` places one only while a
+// full probe band survives the shift, so a step stays this many rows short of the region height.
+const DRAG_STEP_MARGIN: usize = PROBE_ROWS_MAX + 20;
 
 // Timing. MENU_FADE_WAIT lets the menu finish its closing animation before the first frame,
 // SETTLE_POLL is the gap between two frames compared for "the scroll came to rest".
@@ -69,7 +86,7 @@ const NARROW_WINDOW: usize = 48;
 const STILL_PX: usize = 3;
 
 // End conditions. A stopped scroll is only believed after STILL_STEPS_AT_END in a row, because one
-// dropped wheel event must not end the capture early. MAX_STEPS and MAX_CANVAS_BYTES are the cost
+// dropped drag must not end the capture early. MAX_STEPS and MAX_CANVAS_BYTES are the cost
 // guards: 60 viewports of anything, and the stitched image is capped at 64 MB of raw pixels.
 const STILL_STEPS_AT_END: usize = 3;
 const MAX_STEPS: usize = 60;
@@ -301,7 +318,7 @@ fn client_center(hwnd: HWND) -> Option<(i32, i32)> {
     }
 }
 
-/// Screen position of the middle of the scrolling region, so the wheel reaches the widget the
+/// Screen position of the middle of the scrolling region, so the drag lands on the widget the
 /// capture is actually stitching even when the dialog is off-centre.
 fn region_center(hwnd: HWND, region: &Region) -> Option<(i32, i32)> {
     let mut rect = RECT::default();
@@ -315,25 +332,77 @@ fn region_center(hwnd: HWND, region: &Region) -> Option<(i32, i32)> {
     Some((x, y))
 }
 
-fn send_wheel(notches: i32) {
+fn virtual_screen() -> (i32, i32, i32, i32) {
+    unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    }
+}
+
+fn send_mouse(x: i32, y: i32, flags: MOUSE_EVENT_FLAGS, data: u32) {
     let input = [INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: 0,
-                dy: 0,
-                // Negative: scroll down. The field is a u32 holding the signed delta.
-                mouseData: (notches * WHEEL_DELTA).wrapping_neg() as u32,
-                dwFlags: MOUSEEVENTF_WHEEL,
-                time: 0,
-                dwExtraInfo: 0,
-            },
+            mi: MOUSEINPUT { dx: x, dy: y, mouseData: data, dwFlags: flags, time: 0, dwExtraInfo: 0 },
         },
     }];
     let sent = unsafe { SendInput(&input, std::mem::size_of::<INPUT>() as i32) };
     if sent != 1 {
-        warn!("scrollshot: SendInput reported {sent} of 1 wheel events delivered");
+        warn!("scrollshot: SendInput reported {sent} of 1 mouse events delivered");
     }
+}
+
+/// Move the pointer with a real `WM_MOUSEMOVE`, normalised over the virtual screen the way
+/// `MOUSEEVENTF_ABSOLUTE` asks for. This is also how the cursor is *parked*: a teleported cursor is
+/// invisible to the game's input system, which is the exact way a first build lost every scroll.
+fn send_move_abs(x: i32, y: i32) {
+    let (vx, vy, vw, vh) = virtual_screen();
+
+    if vw < 2 || vh < 2 {
+        warn!("scrollshot: no virtual screen metrics, the pointer stays where it is");
+        return;
+    }
+
+    let nx = (((x - vx) as f64 * 65535.0) / (vw as f64 - 1.0)).clamp(0.0, 65535.0).round() as i32;
+    let ny = (((y - vy) as f64 * 65535.0) / (vh as f64 - 1.0)).clamp(0.0, 65535.0).round() as i32;
+    send_mouse(nx, ny, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0);
+}
+
+/// The y positions of a press-to-release drag, in `steps` hops, ending exactly on `to`.
+fn drag_offsets(from: i32, to: i32, steps: usize) -> Vec<i32> {
+    (1..=steps).map(|k| from + (to - from) * k as i32 / steps as i32).collect()
+}
+
+/// Press at `distance / 2` above the aim, walk `distance` pixels up in per-frame hops, release.
+/// The gesture is centred on the aim so it stays inside the moving band, and a pointer that has
+/// travelled this far never fires the button it started on: the game culls that as a drag, exactly
+/// as it does under a finger.
+fn drag_scroll(aim_x: i32, aim_y: i32, distance: usize) {
+    let from = aim_y + distance as i32 / 2;
+    let to = from - distance as i32;
+
+    send_move_abs(aim_x, from);
+    std::thread::sleep(DRAG_PRESS_WAIT);
+    send_mouse(aim_x, from, MOUSEEVENTF_LEFTDOWN, 0);
+    std::thread::sleep(DRAG_STEP_WAIT);
+
+    for ny in drag_offsets(from, to, DRAG_STEPS) {
+        send_move_abs(aim_x, ny);
+        std::thread::sleep(DRAG_STEP_WAIT);
+    }
+
+    send_mouse(aim_x, to, MOUSEEVENTF_LEFTUP, 0);
+}
+
+/// Rows one drag step should scroll: 55% of the band, but never past what `travel` can place and
+/// never so small that a step costs more settle time than it buys in content.
+fn step_distance(region_height: usize) -> usize {
+    let limit = region_height.saturating_sub(DRAG_STEP_MARGIN).max(DRAG_MIN_STEP);
+    ((region_height * 55 / 100).max(DRAG_MIN_STEP)).min(limit)
 }
 
 // ---------------------------------------------------------------------------
@@ -539,7 +608,7 @@ pub fn travel(prev: &Gray, cur: &Gray, probe: usize, last_moved: Option<usize>) 
     bands.truncate(BAND_CANDIDATES);
 
     let mut best: Option<(f64, usize)> = None;
-    // First pass stays within the narrow window of the previous step - wheel steps are similar
+    // First pass stays within the narrow window of the previous step - drag steps are similar
     // sizes - and a confident hit there skips the full scan entirely.
     let narrow = last_moved.map(|lm| lm.saturating_sub(NARROW_WINDOW)..=(lm.min(max_moved) + NARROW_WINDOW));
     for pass in 0..2 {
@@ -793,7 +862,8 @@ fn worker() {
 
         let center = client_center(hwnd);
         if let Some((x, y)) = center {
-            let _ = unsafe { SetCursorPos(x, y) };
+            // A real move: the game's pointer only follows messages, never teleports.
+            send_move_abs(x, y);
         }
 
         let first = request_frame().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
@@ -801,14 +871,19 @@ fn worker() {
             return Err("unexpected frame size".to_owned());
         }
 
-        send_wheel(WHEEL_NOTCHES);
+        // A probe drag over the window middle, sized small enough that even a short list keeps
+        // enough overlap for the region pass to place it.
+        if let Some((x, y)) = center {
+            drag_scroll(x, y, (first.h / 6).max(DRAG_MIN_STEP));
+        }
+
         let mut last = settle_capture().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
         if last.w != first.w || last.h != first.h {
             return Err("the window changed size mid-capture".to_owned());
         }
 
         let Some(region) = detect_region(&first, &last) else {
-            // The screen did not move on the first wheel: nothing to stitch, one viewport is a
+            // The screen did not move on the first drag: nothing to stitch, one viewport is a
             // perfectly good screenshot.
             let full = Region { top: 0, bottom: first.h, left: 0, right: first.w };
             let mut stitcher = Stitcher::new(first.w, full);
@@ -823,10 +898,8 @@ fn worker() {
             return Ok((1, stitcher.canvas_rows));
         };
 
-        // Aim the wheel at the middle of what is actually moving, not at the window middle.
-        if let Some((x, y)) = region_center(hwnd, &region) {
-            let _ = unsafe { SetCursorPos(x, y) };
-        }
+        // Aim the drag at the middle of what is actually moving, not at the window middle.
+        let aim = region_center(hwnd, &region).or(center);
 
         let stride = if first.w >= 1920 { 3 } else { 2 };
         let mw = match_width(first.w);
@@ -835,18 +908,40 @@ fn worker() {
         let mut stitcher = Stitcher::new(first.w, region);
         stitcher.add_first(&first);
 
-        let mut prev_gray = gray_of(&last, region.top, region.bottom, 0, mw, stride);
+        // The probe drag already scrolled a band between `first` and `last`, and that band has to
+        // be stitched like any other step - measured, never assumed - or the canvas jumps it.
+        let mut prev_gray = gray_of(&first, region.top, region.bottom, 0, mw, stride);
         let mut steps = 1usize;
         let mut skipped = 0usize;
         let mut still = 0usize;
         let mut last_moved: Option<usize> = None;
+
+        let step_px = step_distance(region.height());
+
+        {
+            let cur_gray = gray_of(&last, region.top, region.bottom, 0, mw, stride);
+            match travel(&prev_gray, &cur_gray, probe, None) {
+                None => {
+                    skipped += 1;
+                    let _ = stitcher.add_whole(&last);
+                },
+                Some(m) if m >= STILL_PX => {
+                    last_moved = Some(m);
+                    let _ = stitcher.add_more(&last, m);
+                },
+                Some(_) => {},
+            }
+            prev_gray = cur_gray;
+        }
 
         while steps < MAX_STEPS {
             if CANCEL.load(Ordering::Relaxed) {
                 info!("scrollshot: cancelled by the player after {steps} steps");
                 break;
             }
-            send_wheel(WHEEL_NOTCHES);
+            if let Some((x, y)) = aim {
+                drag_scroll(x, y, step_px);
+            }
             let Some(cur) = settle_capture() else {
                 return Err("timeout waiting for game frames".to_owned());
             };
@@ -1038,7 +1133,7 @@ mod tests {
         let region = detect_region(&viewport(&scene, 0), &viewport(&scene, 137)).unwrap();
         let mut prev_g = gray_of(&viewport(&scene, 0), region.top, region.bottom, 0, match_width(W), 2);
         let mut last_moved = None;
-        // Irregular offsets prove the shift is measured, not assumed from the wheel size.
+        // Irregular offsets prove the shift is measured, not assumed from the drag size.
         for &off in [137usize, 91, 150, 64, 0].iter() {
             pos += off;
             let cur = viewport(&scene, pos);
@@ -1171,5 +1266,26 @@ mod tests {
         let g1 = gray_of(&a, 0, VIEW_H, 0, match_width(W), 2);
         let g2 = gray_of(&b, 0, VIEW_H, 0, match_width(W), 2);
         assert_eq!(travel(&g1, &g2, 60, None), Some(0), "identical repeats must read as still");
+    }
+
+    #[test]
+    fn a_drag_path_walks_from_press_to_release() {
+        let path = drag_offsets(500, 300, DRAG_STEPS);
+        assert_eq!(path.len(), DRAG_STEPS);
+        assert_eq!(*path.last().unwrap(), 300, "the last hop lands exactly on the release point");
+        assert!(path.windows(2).all(|w| w[1] < w[0]), "every hop moves toward the release");
+        // A hop is only a drag if the game sees it inside a frame: the path never stands still.
+        assert!(drag_offsets(300, 300, DRAG_STEPS).windows(2).all(|w| w[1] == w[0]));
+    }
+
+    #[test]
+    fn a_drag_step_never_outruns_what_the_stitch_can_place() {
+        // travel() places a step only while a full probe band survives, so a step must stay
+        // DRAG_STEP_MARGIN rows short of the region - and that limit, not the wanted share, binds
+        // as soon as the band is short.
+        assert_eq!(step_distance(800), 440, "a tall band takes the wanted share");
+        assert_eq!(step_distance(260), 260 - DRAG_STEP_MARGIN, "a short band takes the limit");
+        assert!(step_distance(800) <= 800 - DRAG_STEP_MARGIN);
+        assert!(step_distance(120) >= DRAG_MIN_STEP, "a hopeless band keeps a sane floor");
     }
 }
