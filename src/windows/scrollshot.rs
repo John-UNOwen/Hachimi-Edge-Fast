@@ -100,6 +100,12 @@ const PROBE_ROWS_MAX: usize = 110;
 const BAND_CANDIDATES: usize = 8;
 const NARROW_WINDOW: usize = 48;
 const STILL_PX: usize = 3;
+// A scrolled list rewrites a wide, tall stretch of the viewport between two frames. A blinking
+// readout - the FPS counter proved it live - differs in only a few thin rows, and a probe that
+// believed it starts a session aimed at a number ticker. Below these extents a diff is chrome.
+const MIN_MOVED_ROWS: usize = 40;
+const MIN_MOVED_COLS: usize = 120;
+const MIN_MOVED_PIXELS: usize = 6_000;
 
 // End conditions. A stopped scroll is only believed after STILL_STEPS_AT_END in a row, because one
 // dropped drag must not end the capture early. MAX_STEPS and MAX_CANVAS_BYTES are the cost
@@ -348,6 +354,36 @@ fn region_center(hwnd: HWND, region: &Region) -> Option<(i32, i32)> {
     Some((x, y))
 }
 
+/// Screen position of a point given in frame pixels. The capture is the client area, so a frame
+/// coordinate is the client origin plus the offset - and only screen coordinates reach `SendInput`.
+fn client_point_on_screen(hwnd: HWND, fx: i32, fy: i32) -> Option<(i32, i32)> {
+    let mut rect = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut rect) }.ok()?;
+    let mut origin = POINT { x: rect.left, y: rect.top };
+    if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
+        return None;
+    }
+    Some((origin.x + fx, origin.y + fy))
+}
+
+/// Where the probe looks for a scrollable region, in frame pixels, tried in order. The window
+/// middle first: the one guess that suits a full-viewport list, which is where the drag era's
+/// sessions lived. Dialog content boxes sit elsewhere - a details dialog hugs the left, its list
+/// below the middle - so the ladder follows with points inside those boxes. Frame fractions keep
+/// every point valid at any resolution; it is still the pixel diff, never a template, that decides
+/// what actually moved.
+fn probe_points(w: usize, h: usize) -> Vec<(i32, i32)> {
+    [
+        (0.50f32, 0.50f32),
+        (0.30f32, 0.65f32),
+        (0.70f32, 0.65f32),
+        (0.50f32, 0.35f32),
+    ]
+    .into_iter()
+    .map(|(fx, fy)| ((w as f32 * fx) as i32, (h as f32 * fy) as i32))
+    .collect()
+}
+
 fn virtual_screen() -> (i32, i32, i32, i32) {
     unsafe {
         (
@@ -517,6 +553,8 @@ pub fn detect_region(f0: &Frame, f1: &Frame) -> Option<Region> {
     let mut bottom = 0usize;
     let mut left = usize::MAX;
     let mut right = 0usize;
+    let mut changed_rows = 0usize;
+    let mut changed_pixels = 0usize;
 
     for y in 0..h {
         let r0 = &f0.rgba[y * f0.row_bytes()..(y + 1) * f0.row_bytes()];
@@ -529,6 +567,7 @@ pub fn detect_region(f0: &Frame, f1: &Frame) -> Option<Region> {
                 + (r0[i + 2] as i32 - r1[i + 2] as i32).abs();
             if d > 24 {
                 changed = true;
+                changed_pixels += 1;
                 if x < left {
                     left = x;
                 }
@@ -538,6 +577,7 @@ pub fn detect_region(f0: &Frame, f1: &Frame) -> Option<Region> {
             }
         }
         if changed {
+            changed_rows += 1;
             if top == usize::MAX {
                 top = y;
             }
@@ -546,6 +586,11 @@ pub fn detect_region(f0: &Frame, f1: &Frame) -> Option<Region> {
     }
 
     if top == usize::MAX {
+        return None;
+    }
+    // Extents under the minimums are a blinking ticker or a pulsing highlight, not a scrolled
+    // list: the probe has to answer nothing and move on to its next candidate.
+    if changed_rows < MIN_MOVED_ROWS || right - left < MIN_MOVED_COLS || changed_pixels < MIN_MOVED_PIXELS {
         return None;
     }
     // Widen a little: antialiased edges sit just outside the strict diff.
@@ -920,42 +965,50 @@ fn worker() {
             return Err("unexpected frame size".to_owned());
         }
 
-        // The probe decides the mode where the pointer already rests: wheel notches at the window
-        // middle first, and if the wheel answers nothing, the drag the lists are known to follow.
-        // Whichever one moves the list is the one every step of this session uses.
+        // The probe walks the ladder of points and tries the wheel, then the drag, at each one.
+        // The first point and input that move a real band (see the region minimums: a blinking
+        // readout is not a scrolled list) define the region, the mode, and the first aim.
         let mut use_wheel = false;
         let mut probe_notches = 1usize;
         let mut last = first.clone();
+        let mut aim_probe: Option<(i32, i32)> = None;
+        let mut probe_rung = 0usize;
+        let mut region: Option<Region> = None;
 
-        if let Some((x, y)) = center {
-            wheel_scroll(x, y, WHEEL_PROBE_NOTCHES);
-            let probe = settle_capture().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
-            if probe.w != first.w || probe.h != first.h {
-                return Err("the window changed size mid-capture".to_owned());
+        for (rung, (px, py)) in probe_points(first.w, first.h).into_iter().enumerate() {
+            probe_rung = rung + 1;
+            let Some((x, y)) = client_point_on_screen(hwnd, px, py) else {
+                continue;
+            };
+            for wheel_try in [true, false] {
+                if wheel_try {
+                    wheel_scroll(x, y, WHEEL_PROBE_NOTCHES);
+                } else {
+                    // Sized small enough that even a short list keeps enough overlap for the
+                    // region pass to place it.
+                    drag_scroll(x, y, (first.h / 6).max(DRAG_MIN_STEP));
+                }
+                let probe = settle_capture().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
+                if probe.w != first.w || probe.h != first.h {
+                    return Err("the window changed size mid-capture".to_owned());
+                }
+                if let Some(r) = detect_region(&first, &probe) {
+                    use_wheel = wheel_try;
+                    probe_notches = WHEEL_PROBE_NOTCHES;
+                    aim_probe = Some((x, y));
+                    region = Some(r);
+                    last = probe;
+                    break;
+                }
             }
-            if detect_region(&first, &probe).is_some() {
-                use_wheel = true;
-                probe_notches = WHEEL_PROBE_NOTCHES;
-                last = probe;
+            if region.is_some() {
+                break;
             }
         }
 
-        if !use_wheel {
-            // A probe drag over the window middle, sized small enough that even a short list keeps
-            // enough overlap for the region pass to place it.
-            if let Some((x, y)) = center {
-                drag_scroll(x, y, (first.h / 6).max(DRAG_MIN_STEP));
-            }
-
-            last = settle_capture().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
-            if last.w != first.w || last.h != first.h {
-                return Err("the window changed size mid-capture".to_owned());
-            }
-        }
-
-        let Some(region) = detect_region(&first, &last) else {
-            // The screen did not move on the first drag: nothing to stitch, one viewport is a
-            // perfectly good screenshot.
+        let Some(region) = region else {
+            // No ladder point moved the screen: nothing to stitch, one viewport is a perfectly
+            // good screenshot.
             let full = Region { top: 0, bottom: first.h, left: 0, right: first.w };
             let mut stitcher = Stitcher::new(first.w, full);
             stitcher.add_first(&first);
@@ -969,17 +1022,17 @@ fn worker() {
             return Ok((1, stitcher.canvas_rows));
         };
 
-        // Aim candidates, window middle first (the probe already moved this list from there),
-        // the moving band's middle second. A measured still rotates to the next candidate, so
-        // ending the session needs the list to answer no candidate at all, not merely one.
+        // Aim candidates: the point the probe moved the list at, then the moving band's middle.
+        // A measured still rotates to the next candidate, so ending the session needs the list to
+        // answer no candidate at all, not merely one.
         info!(
-            "scrollshot: probe moved the list with the {}{}",
+            "scrollshot: probe point {probe_rung} moved the list with the {}{}",
             if use_wheel { "wheel" } else { "drag" },
-            if use_wheel { "" } else { "; the wheel answered nothing, every step will drag" }
+            if use_wheel { "" } else { "; the wheel answered nothing there, every step will drag" }
         );
         let mut aims: Vec<(i32, i32)> = Vec::new();
-        if let Some(c) = center {
-            aims.push(c);
+        if let Some(p) = aim_probe {
+            aims.push(p);
         }
         if let Some(rc) = region_center(hwnd, &region) {
             if !aims.contains(&rc) {
@@ -995,7 +1048,7 @@ fn worker() {
         let mut stitcher = Stitcher::new(first.w, region);
         stitcher.add_first(&first);
 
-        // The probe drag already scrolled a band between `first` and `last`, and that band has to
+        // The probe already scrolled a band between `first` and `last`, and that band has to
         // be stitched like any other step - measured, never assumed - or the canvas jumps it.
         let mut prev_gray = gray_of(&first, region.top, region.bottom, 0, mw, stride);
         let mut steps = 1usize;
@@ -1062,7 +1115,7 @@ fn worker() {
                     still += 1;
                     if still == 1 && aims.len() > 1 {
                         aim_i = (aim_i + 1) % aims.len();
-                        info!("scrollshot: step measured still, rotating the drag to aim candidate {}", aim_i + 1);
+                        info!("scrollshot: step measured still, rotating the step to aim candidate {}", aim_i + 1);
                     }
                     if still >= STILL_STEPS_AT_END {
                         info!("scrollshot: reached the bottom after {steps} steps");
@@ -1248,6 +1301,50 @@ mod tests {
         let region = detect_region(&f0, &f1).expect("content moved");
         assert_eq!(region.top, HEADER, "header rows must read as chrome");
         assert_eq!(region.bottom, VIEW_H - FOOTER, "footer rows must read as chrome");
+    }
+
+    #[test]
+    fn a_blinking_readout_is_not_a_scrolled_list() {
+        // The failure this guard was written from: an FPS ticker in the corner differs between
+        // every two frames. Thin across rows and narrow across columns alike, it must read as
+        // nothing moved, or the probe declares a win aimed at the counter.
+        let scene = synth();
+        let f0 = viewport(&scene, 0);
+
+        let mut band = f0.clone();
+        for y in 2..14 {
+            for x in 0..W {
+                let i = (y * W + x) * 4;
+                band.rgba[i] = 255;
+                band.rgba[i + 1] = 0;
+                band.rgba[i + 2] = 255;
+            }
+        }
+        assert!(detect_region(&f0, &band).is_none(), "a few lit rows across the top is chrome");
+
+        let mut strip = f0.clone();
+        for y in 2..200 {
+            for x in 150..170 {
+                let i = (y * W + x) * 4;
+                strip.rgba[i] = 255;
+                strip.rgba[i + 1] = 0;
+                strip.rgba[i + 2] = 255;
+            }
+        }
+        assert!(detect_region(&f0, &strip).is_none(), "a narrow tall strip is chrome");
+    }
+
+    #[test]
+    fn the_probe_ladder_starts_at_the_middle_and_reaches_dialog_boxes() {
+        let pts = probe_points(1920, 1080);
+        assert_eq!(pts[0], (960, 540), "a full-viewport list answers at the window middle");
+        // The details dialog's skill list spans x 276..826, y 509..912 at this size; one rung
+        // must land inside that box or the ladder still only finds full-screen lists.
+        assert!(
+            pts.iter().skip(1).any(|&(x, y)| x > 276 && x < 826 && y > 509 && y < 912),
+            "a rung must reach the skill box of a left-hugging dialog: {pts:?}"
+        );
+        assert!(pts.iter().all(|&(x, y)| x > 0 && y > 0 && x < 1920 && y < 1080), "every rung stays inside the frame");
     }
 
     #[test]
