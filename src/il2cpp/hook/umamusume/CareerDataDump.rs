@@ -547,6 +547,26 @@ fn screen_snapshot_json(now_us: i64) -> Option<Value> {
     }))
 }
 
+/// Every row a binding window ever carried, merged by SkillId: the virtualized list hands the
+/// door a card or two at a time, and across a scroll the union is the screen.
+fn observed_rows_json(now_us: i64) -> Option<Value> {
+    let observed = lock_or_recover(&skill_capture::ROWS_OBSERVED);
+
+    if observed.is_empty() {
+        return None;
+    }
+
+    let stamp = skill_capture::ROWS_STAMP_US.load(atomic::Ordering::Relaxed);
+    let rows: Vec<Value> = observed.values().map(|fields| Value::Object(Map::from_iter(fields.iter().map(|(name, value)| (name.clone(), json!(value)))))).collect();
+
+    Some(json!({
+        "capturedAtUs": stamp,
+        "ageSec": (now_us - stamp).max(0) / 1_000_000,
+        "count": rows.len(),
+        "rows": rows,
+    }))
+}
+
 fn observed_tips_json() -> Value {
     let observed = lock_or_recover(&skill_capture::TIPS_OBSERVED);
     let mut map = Map::new();
@@ -758,6 +778,10 @@ fn run_dump() -> Result<String, DumpError> {
     }
 
     root.insert("skillTipsObserved".to_owned(), observed_tips_json());
+
+    if let Some(rows) = observed_rows_json(now_us) {
+        root.insert("skillRowsObserved".to_owned(), rows);
+    }
     root.insert("skillMasterNames".to_owned(), master_names_json());
     root.insert("skillIdsOffered".to_owned(), observed_ids_json());
     info!("Career dump: owned snapshots done in {} ms", elapsed());

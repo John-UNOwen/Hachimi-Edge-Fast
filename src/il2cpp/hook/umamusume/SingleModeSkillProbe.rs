@@ -113,7 +113,7 @@ static SP_SHAPE: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 // Bounded everywhere: rows by ROW_CAP, fields by FIELD_CAP, names by the caps below.
 
 const MASTER_NAME_CAP: usize = 256;
-const MASTER_STR_CAP: usize = 96;
+const ROWS_OBSERVED_CAP: usize = 640;const MASTER_STR_CAP: usize = 96;
 const MASTER_STRINGS_PER_ROW: usize = 24;
 const OBSERVED_SKILL_CAP: usize = 512;
 
@@ -148,6 +148,10 @@ pub(crate) static MASTER_NAMES: Mutex<BTreeMap<i32, Vec<(String, String)>>> = Mu
 pub(crate) static OBSERVED_SKILLS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 // skill id -> (tip discount, hint level), each filled by whichever door reported it.
 pub(crate) static TIPS_OBSERVED: Mutex<BTreeMap<i32, (Option<i32>, Option<i32>)>> = Mutex::new(BTreeMap::new());
+// skill id -> the row's scalar fields (SkillId, Level, NeedPoint, OriginNeedPoint, HintLv,
+// DiscountRateForDisplay, IsAcquired...), from the last time a binding window carried that id.
+pub(crate) static ROWS_OBSERVED: Mutex<BTreeMap<i32, Vec<(String, i64)>>> = Mutex::new(BTreeMap::new());
+pub(crate) static ROWS_STAMP_US: AtomicI64 = AtomicI64::new(-1);
 
 /// The metadata name for a field, cut to what the game's own C# called it. Auto-properties store
 /// their value in `<Name>k__BackingField`; private fields here carry no such prefix, so anything
@@ -236,6 +240,14 @@ fn capture_screen_rows(rows_list: *mut Il2CppObject, top: i32) {
         }
 
         rows.push(fields);
+    }
+
+    // The door is handed a virtualized binding window, not the screen: one call is often 1-2 rows,
+    // and a long scroll touches every card on the list. Merge every row seen, keyed by its own
+    // SkillId, newest observation winning: across a visit the union is the whole screen, and the
+    // dump reads this table instead of whichever window happened to be largest.
+    if merge_rows(&rows) {
+        ROWS_STAMP_US.store(ProbeSuite::now_us(), atomic::Ordering::Relaxed);
     }
 
     // The list object's own header names the class, and the class is what the SP shape was read
@@ -347,14 +359,37 @@ fn capture_observed_ids(ids: *mut Il2CppObject) {
 
 /// Fold one tip observation into the map. Pure over owned data so the merge rule is testable
 /// without the game: discount and level fill apart, and a later fill never erases the earlier one.
-pub(crate) fn observe_tips(observed: &mut BTreeMap<i32, (Option<i32>, Option<i32>)>, skill_id: i32, value: i32, is_level: bool) {
-    if observed.len() >= OBSERVED_SKILL_CAP && !observed.contains_key(&skill_id) {
+pub(crate) fn observe_tips(observed: &mut BTreeMap<i32, (Option<i32>, Option<i32>)>, skill_id: i32, value: i32, is_level: bool) {    if observed.len() >= OBSERVED_SKILL_CAP && !observed.contains_key(&skill_id) {
         return;
     }
 
     let entry = observed.entry(skill_id).or_insert((None, None));
 
     if is_level { entry.1 = Some(value); } else { entry.0 = Some(value); }
+}
+
+/// Merge one binding window's rows into `ROWS_OBSERVED`, newest winning, cap respected, a row
+/// without a SkillId not trusted with a slot. True when anything was merged, so the stamp only
+/// moves when the table actually grew or refreshed.
+fn merge_rows(rows: &[Vec<(String, i64)>]) -> bool {
+    let mut observed = lock_or_recover(&ROWS_OBSERVED);
+    let mut merged = false;
+
+    for fields in rows {
+        // The row's scalar readers hand i64; a skill id that leaves the i32 range is not this
+        // game's row, it is a field read on the wrong stride.
+        let Some((_, raw)) = fields.iter().find(|(name, _)| name == "SkillId") else { continue };
+        let Ok(id) = i32::try_from(*raw) else { continue };
+
+        if observed.len() >= ROWS_OBSERVED_CAP && !observed.contains_key(&id) {
+            break;
+        }
+
+        observed.insert(id, fields.clone());
+        merged = true;
+    }
+
+    merged
 }
 
 // How many rows the element dumps print in full, and how wide each object level goes. A row that
