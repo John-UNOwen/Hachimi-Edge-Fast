@@ -3753,6 +3753,12 @@ impl Gui {
                             self.show_menu = false;
                             self.menu_anim_time = None;
                         }
+                        // The capture reads this same swap chain, so the menu closes before it starts.
+                        if ui.button(t!("menu.scroll_screenshot")).clicked() {
+                            self.show_menu = false;
+                            self.menu_anim_time = None;
+                            crate::windows::scrollshot::start();
+                        }
                     }
                     // did this because android phones have a notch
                     #[cfg(target_os = "android")]

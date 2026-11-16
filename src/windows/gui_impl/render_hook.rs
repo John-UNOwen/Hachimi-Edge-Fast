@@ -73,6 +73,11 @@ extern "C" fn IDXGISwapChain_Present(this: *mut c_void, sync_interval: c_uint, f
         return orig_fn(this, sync_interval, flags);
     }
 
+    // Scrolling screenshot: hand this backbuffer to the capture worker when one is waiting.
+    // The call is a relaxed atomic load while no session runs, and it is placed before the
+    // `is_empty()` early-out below precisely because during a session the menu is closed.
+    crate::windows::scrollshot::capture_if_requested(this);
+
     let mut gui = recover_lock(Gui::instance_or_init("windows.menu_open_key"));
     let painter_mutex = match init_painter(this) {
         Ok(v) => v,

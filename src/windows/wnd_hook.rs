@@ -571,6 +571,12 @@ extern "system" fn wnd_proc(hwnd: HWND, umsg: c_uint, wparam: WPARAM, lparam: LP
                 }
 
                 if current_key == Hachimi::instance().config.load().windows.menu_open_key {
+                    // During a scrolling screenshot the menu key is the stop key: the frames it
+                    // would capture with the menu open are unusable, so it cancels instead.
+                    if crate::windows::scrollshot::is_active() {
+                        crate::windows::scrollshot::cancel();
+                        return LRESULT(0);
+                    }
                     let Some(mut gui) = Gui::instance().map(|m| recover_lock(m)) else {
                         return unsafe { orig_fn(hwnd, umsg, wparam, lparam) };
                     };
