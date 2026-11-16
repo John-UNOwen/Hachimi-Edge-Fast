@@ -1,13 +1,13 @@
-//! Scrolling screenshot: scroll a screen with a real mouse drag, capture the backbuffer at
-//! every settled step, and stitch the frames into one tall PNG that also lands on the clipboard.
+//! Scrolling screenshot: scroll a screen with real mouse input, capture the backbuffer at every
+//! settled step, and stitch the frames into one tall PNG that also lands on the clipboard.
 //!
-//! The drag, never the wheel, is deliberate. This client is a touch-first port: its lists follow a
-//! dragged pointer and most screens carry no wheel handler at all, and even where Unity would route
-//! a wheel it reaches only the widget the EventSystem believes the pointer is over - a position fed
-//! by real input messages, which `SetCursorPos` does not produce. A first build that sent the wheel
-//! and teleported the cursor measured no motion and saved one static viewport. Every pointer
-//! position here therefore travels through `SendInput` as a real message, and every scroll is the
-//! press-move-release the game answers with on its own.
+//! The wheel leads and the drag is the fallback, decided per session by a probe. The wheel rides
+//! the same pointer position as everything else: the pointer is parked over the aim point with a
+//! real `SendInput` move, then the notches go in, so the widget the game raycasts for its scroll
+//! handler is the one under the cursor. That distinction is the whole reason a first build failed:
+//! it teleported the cursor with `SetCursorPos`, which produces no message, and measured no motion.
+//! If the probe wheel moves nothing, the same probe retries as the press-move-release drag the
+//! lists are known to answer, and the session runs on that.
 //!
 //! The stitching method is the receipt-factor one the Mirako toolchain documents: find where the
 //! foot of the previous frame landed in the next one, demand that the *whole* shared stretch agrees
@@ -41,7 +41,7 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 use windows::Win32::System::Ole::CF_DIB;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSE_EVENT_FLAGS, MOUSEINPUT,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_WHEEL, MOUSE_EVENT_FLAGS, MOUSEINPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetCursorPos, GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN,
@@ -64,6 +64,15 @@ const DRAG_STEP_WAIT: Duration = Duration::from_millis(50);
 const DRAG_PRESS_WAIT: Duration = Duration::from_millis(120);
 const DRAG_RELEASE_HOLD: Duration = Duration::from_millis(120);
 const DRAG_MIN_STEP: usize = 40;
+// The wheel step. Notches are the only size the wheel takes, so the count adapts to what the
+// previous step measured (see `wheel_notches_for`); the cap keeps a misread scale from turning one
+// step into a viewport and skipping past what `travel` can place.
+const WHEEL_PROBE_NOTCHES: usize = 2;
+const WHEEL_MIN_NOTCHES: usize = 1;
+const WHEEL_MAX_NOTCHES: usize = 6;
+const WHEEL_ARM_WAIT: Duration = Duration::from_millis(150);
+const WHEEL_STEP_WAIT: Duration = Duration::from_millis(60);
+const WHEEL_REST_HOLD: Duration = Duration::from_millis(200);
 // The cap on one step: the whole gesture plus the settle has to finish before the next press with
 // the list at rest, so the step stays a distance the game can lay down inside one settle.
 const DRAG_STEP_CAP: usize = 500;
@@ -406,6 +415,35 @@ fn drag_scroll(aim_x: i32, aim_y: i32, distance: usize) {
     // not as thrown, and lets it come to rest before the lift.
     std::thread::sleep(DRAG_RELEASE_HOLD);
     send_mouse(aim_x, to, MOUSEEVENTF_LEFTUP, 0);
+}
+
+/// The wheel step: park the pointer over the aim with a real move message, then push `notches`
+/// wheel notches down. A wheel event carries the pointer position with it, so the widget the game
+/// raycasts for its scroll handler is the one under the aim. Negative delta advances the list
+/// downward, the same direction an upward drag takes it. Like the drag, the step ends with a beat
+/// of rest: a wheeled ScrollRect glides on inertia too, and the capture wants it arrived.
+fn wheel_scroll(aim_x: i32, aim_y: i32, notches: usize) {
+    send_move_abs(aim_x, aim_y);
+    std::thread::sleep(WHEEL_ARM_WAIT);
+
+    for _ in 0..notches.max(1) {
+        send_mouse(aim_x, aim_y, MOUSEEVENTF_WHEEL, (-120i32) as u32);
+        std::thread::sleep(WHEEL_STEP_WAIT);
+    }
+
+    std::thread::sleep(WHEEL_REST_HOLD);
+}
+
+/// How many notches the next wheel step should push so its measured move lands near `target` px,
+/// given the last step moved `notch_px` per notch. The wheel's size per notch is nobody's promise,
+/// so the count is only ever steered toward the target, and bounded so one misread cannot overrun
+/// the overlap `travel` needs.
+fn wheel_notches_for(target: usize, notch_px: f64) -> usize {
+    if notch_px <= 1.0 {
+        return WHEEL_MAX_NOTCHES;
+    }
+
+    ((target as f64 / notch_px).round() as i64).clamp(WHEEL_MIN_NOTCHES as i64, WHEEL_MAX_NOTCHES as i64) as usize
 }
 
 /// Rows one drag step should scroll: 40% of the band, never so fast the settle loses the list,
@@ -882,15 +920,37 @@ fn worker() {
             return Err("unexpected frame size".to_owned());
         }
 
-        // A probe drag over the window middle, sized small enough that even a short list keeps
-        // enough overlap for the region pass to place it.
+        // The probe decides the mode where the pointer already rests: wheel notches at the window
+        // middle first, and if the wheel answers nothing, the drag the lists are known to follow.
+        // Whichever one moves the list is the one every step of this session uses.
+        let mut use_wheel = false;
+        let mut probe_notches = 1usize;
+        let mut last = first.clone();
+
         if let Some((x, y)) = center {
-            drag_scroll(x, y, (first.h / 6).max(DRAG_MIN_STEP));
+            wheel_scroll(x, y, WHEEL_PROBE_NOTCHES);
+            let probe = settle_capture().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
+            if probe.w != first.w || probe.h != first.h {
+                return Err("the window changed size mid-capture".to_owned());
+            }
+            if detect_region(&first, &probe).is_some() {
+                use_wheel = true;
+                probe_notches = WHEEL_PROBE_NOTCHES;
+                last = probe;
+            }
         }
 
-        let mut last = settle_capture().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
-        if last.w != first.w || last.h != first.h {
-            return Err("the window changed size mid-capture".to_owned());
+        if !use_wheel {
+            // A probe drag over the window middle, sized small enough that even a short list keeps
+            // enough overlap for the region pass to place it.
+            if let Some((x, y)) = center {
+                drag_scroll(x, y, (first.h / 6).max(DRAG_MIN_STEP));
+            }
+
+            last = settle_capture().ok_or_else(|| "timeout waiting for game frames".to_owned())?;
+            if last.w != first.w || last.h != first.h {
+                return Err("the window changed size mid-capture".to_owned());
+            }
         }
 
         let Some(region) = detect_region(&first, &last) else {
@@ -909,9 +969,14 @@ fn worker() {
             return Ok((1, stitcher.canvas_rows));
         };
 
-        // Aim candidates, window middle first (the probe drag already moved this list from there),
+        // Aim candidates, window middle first (the probe already moved this list from there),
         // the moving band's middle second. A measured still rotates to the next candidate, so
         // ending the session needs the list to answer no candidate at all, not merely one.
+        info!(
+            "scrollshot: probe moved the list with the {}{}",
+            if use_wheel { "wheel" } else { "drag" },
+            if use_wheel { "" } else { "; the wheel answered nothing, every step will drag" }
+        );
         let mut aims: Vec<(i32, i32)> = Vec::new();
         if let Some(c) = center {
             aims.push(c);
@@ -939,6 +1004,8 @@ fn worker() {
         let mut last_moved: Option<usize> = None;
 
         let step_px = step_distance(region.height());
+        // The count of notches the next wheel step pushes; the probe's own move steers the first one.
+        let mut notches = WHEEL_PROBE_NOTCHES;
 
         {
             let cur_gray = gray_of(&last, region.top, region.bottom, 0, mw, stride);
@@ -949,6 +1016,9 @@ fn worker() {
                 },
                 Some(m) if m >= STILL_PX => {
                     last_moved = Some(m);
+                    if use_wheel {
+                        notches = wheel_notches_for(step_px, m as f64 / probe_notches.max(1) as f64);
+                    }
                     let _ = stitcher.add_more(&last, m);
                 },
                 Some(_) => {},
@@ -962,8 +1032,13 @@ fn worker() {
                 break;
             }
             if let Some((x, y)) = aims.get(aim_i).copied().or(center) {
-                drag_scroll(x, y, step_px);
+                if use_wheel {
+                    wheel_scroll(x, y, notches);
+                } else {
+                    drag_scroll(x, y, step_px);
+                }
             }
+            let used_notches = notches;
             let Some(cur) = settle_capture() else {
                 return Err("timeout waiting for game frames".to_owned());
             };
@@ -999,6 +1074,9 @@ fn worker() {
                 Some(m) => {
                     still = 0;
                     last_moved = Some(m);
+                    if use_wheel {
+                        notches = wheel_notches_for(step_px, m as f64 / used_notches.max(1) as f64);
+                    }
                     match stitcher.add_more(&cur, m) {
                         None => {
                             // `travel` said rows moved yet none were new: treat it as still.
@@ -1021,7 +1099,12 @@ fn worker() {
             // One line per step: this is the thread's whole view of the game, and a session that
             // ends too early is only diagnosable from what each step actually measured.
             let moved_note = measured.map(|m| m.to_string()).unwrap_or_else(|| "unplaced".to_owned());
-            info!("scrollshot: step {steps}: moved {moved_note} skipped {skipped} still {still} aim {}", aim_i + 1);
+            let mode_note = if use_wheel {
+                format!("wheel x{used_notches}")
+            } else {
+                format!("drag {step_px} px")
+            };
+            info!("scrollshot: step {steps}: moved {moved_note} skipped {skipped} still {still} aim {} {mode_note}", aim_i + 1);
 
             prev_gray = cur_gray;
             last = cur;
@@ -1328,5 +1411,17 @@ mod tests {
         assert_eq!(step_distance(1500), DRAG_STEP_CAP, "a window taller than the cap takes the cap");
         assert_eq!(step_distance(200), 200 - DRAG_STEP_MARGIN, "a short band takes the stitch limit");
         assert!(step_distance(120) >= DRAG_MIN_STEP, "a hopeless band keeps a sane floor");
+    }
+
+    #[test]
+    fn wheel_notches_steer_toward_the_measured_step_and_stay_bounded() {
+        // The count follows the px the last step measured per notch, so a 350 px target at 90 px
+        // a notch asks for four; a notch that barely moves is chased only to the cap, and one that
+        // overruns the target never goes below a single notch.
+        assert_eq!(wheel_notches_for(350, 90.0), 4);
+        assert_eq!(wheel_notches_for(350, 350.0), 1);
+        assert_eq!(wheel_notches_for(350, 2.0), WHEEL_MAX_NOTCHES, "a crawling notch is capped, not chased");
+        assert_eq!(wheel_notches_for(50, 400.0), WHEEL_MIN_NOTCHES, "an overrunning notch never goes under one");
+        assert_eq!(wheel_notches_for(350, 0.0), WHEEL_MAX_NOTCHES, "an unmeasured notch starts at the cap");
     }
 }
