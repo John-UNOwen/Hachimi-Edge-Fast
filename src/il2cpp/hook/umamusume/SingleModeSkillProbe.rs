@@ -412,14 +412,18 @@ const NEST_LIST_MAX: usize = 4;
 /// zero the number is held in the clear and `fakeValue` is it. Once a key is current, the real
 /// number sits obfuscated inside `hiddenValue` behind the key, and this answers `None`: the line
 /// says "held obscured" rather than guessing, and the raw fields are logged either way.
+/// The documented "plaintext" rule of the anti-cheat int - measured false on this client: with
+/// `currentCryptoKey` zero the number on screen was 2948 while this rule answered the slot's
+/// 479. Only the raw-shape witness lines use it now; the file's numbers come from the field's own
+/// decoder method (CareerDataDump::obscured_value_at).
 pub(crate) fn obscured_int_plain(current_crypto_key: i32, fake_value: i32) -> Option<i32> {
     (current_crypto_key == 0).then_some(fake_value)
 }
 
-/// The live-captured shape of the `ObscuredInt` struct: the `(name, offset)` pairs that produced
-/// the proven `SP raw[...]` lines. Anyone decoding an `ObscuredInt` sitting in memory should read
-/// through these offsets rather than re-walking the metadata: this is the walk that demonstrably
-/// finds the fields, offsets and all, on this exact client.
+/// The live-captured shape of the `ObscuredInt` struct: the `(name, offset)` pairs the probe's
+/// raw-shape witness reads. Proven for layout, not for values - the slots it lands on hold
+/// decoys. Kept so the dump's `shape=` counter-witness prints the same named ints the doors
+/// always printed.
 pub(crate) fn obscured_int_shape() -> Vec<(String, usize)> {
     SP_SHAPE.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -433,7 +437,7 @@ fn sp_text(chara: *mut Il2CppObject) -> String {
 
     let base = unsafe { (chara as *mut u8).add(offset) };
     let shape = SP_SHAPE.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let mut out = String::from(" SP raw[");
+    let mut out = String::from(" SP shape[");
     let mut crypto_current: Option<i32> = None;
     let mut fake: Option<i32> = None;
 
@@ -447,10 +451,13 @@ fn sp_text(chara: *mut Il2CppObject) -> String {
 
     out.push(']');
 
+    // Never claim this is the SP: the field's plaintext slots hold decoys on this client (the
+    // career dump measured shape 479 against the game's own decoder 2948). The shape answer is
+    // printed only as evidence of what the raw memory holds.
     if let (Some(key), Some(value)) = (crypto_current, fake) {
         match obscured_int_plain(key, value) {
-            Some(plain) => { let _ = write!(out, " SP {plain}"); },
-            None => out.push_str(" SP held obscured"),
+            Some(plain) => { let _ = write!(out, " shapePlain {plain} (decoy slot)"); },
+            None => out.push_str(" shape held obscured"),
         }
     }
 

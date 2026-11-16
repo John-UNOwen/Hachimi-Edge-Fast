@@ -269,17 +269,11 @@ unsafe fn call_object(addr: usize, this: *mut Il2CppObject) -> *mut Il2CppObject
     getter(this)
 }
 
-/// Decode one `Obscured*` struct sitting at a base address, its class at hand. The decode reads
-/// through the probe's live-captured `ObscuredInt` shape - the offsets that demonstrably produced
-/// the `SP raw[...]` lines - instead of re-walking metadata and re-solving the struct's size: a
-/// run proved that walk-then-gate path answer `<held>` for a field the same second's live door
-/// read in plain text (`fakeValue=451`). Shapes other than `ObscuredInt` answer `None`: an
-/// unknown shape is never a guessed number.
 /// The ObscuredInt decode: ask the live field itself. Reading the struct's plaintext ints is a
-/// decoy on this client — a measured run had the raw shape read answer 479 while the game's own
+/// decoy on this client - a measured run had the raw shape read answer 479 while the game's own
 /// decoder answered 2948, the number on screen. So the file carries only what the field's own
 /// class answers: resolve the decoder method against the real metadata, invoke it on the inline
-/// data, and read the boxed int back. Any miss answers `None` — never a guessed number.
+/// data, and read the boxed int back. Any miss answers `None` - never a guessed number.
 unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> Option<i64> {
     if struct_class.is_null() {
         return None;
