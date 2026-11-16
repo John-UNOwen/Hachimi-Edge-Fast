@@ -788,13 +788,6 @@ fn run_dump() -> Result<String, DumpError> {
     root.insert("characterFields".to_owned(), unsafe { character_fields_json(chara) });
     info!("Career dump: character fields scanned in {} ms", elapsed());
 
-    // The same flat scan over the career state, whenever that root is itself fresh: if the number
-    // the skill screen shows does not live on the character, it lives near here.
-    if data_at != 0 && is_fresh(now_us, data_stamp) {
-        root.insert("careerStateFields".to_owned(), unsafe { character_fields_json(data_at as *mut Il2CppObject) });
-        info!("Career dump: career state scanned in {} ms", elapsed());
-    }
-
     let body = serde_json::to_string_pretty(&Value::Object(root)).map_err(|e| DumpError::Failed(e.to_string()))?;
     info!("Career dump: json ready, {} bytes, {} ms all together", body.len(), elapsed());
 
