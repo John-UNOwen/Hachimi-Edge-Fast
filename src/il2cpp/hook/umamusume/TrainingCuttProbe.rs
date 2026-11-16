@@ -500,6 +500,15 @@ static STORY_SKIP_TRAINING_CUTT: CutProbe = CutProbe::counted("StoryViewControll
 // game's own 5.680, item 82), so what is left of the cut's length is a duration asked for elsewhere.
 // Sampled, not counted: what matters is the number the game took.
 static UTILS_GET_HIGH_SPEED_PLAY_DURATION: CutProbe = CutProbe::peaked("SingleModeUtils::GetHighSpeedPlayDuration()");
+// The third door on the same class: `GetCutTimeScale/0`, the sibling of the scale door `training_cut_speed`
+// sits on, on the A20 door list since the 2026-10-08 dump and armed by nothing until now. A shipped
+// companion's speed layer names these two together (Overseer 1.3.0, third inspection pass), which makes
+// the number this one hands worth reading before anyone thinks about a lever. Sampled, not counted.
+static UTILS_GET_CUT_TIME_SCALE: CutProbe = CutProbe::peaked("SingleModeUtils::GetCutTimeScale()");
+// The succession cut helper's own skip, named by that same companion's `[inspire]` cluster. This fork's
+// hold-out click presses the same helper's `CleanupPlaying()`; what no log here has said is whether the
+// client itself ever walks `SkipRuntime()` on this class. Counted, called by nothing of ours.
+static SUCCESSION_CUT_HELPER_SKIP_RUNTIME: CutProbe = CutProbe::counted("SingleModeSuccessionCutInHelper::SkipRuntime()");
 // Item 90: `Gallop.TimelineTrainingCuttController` keeps a cut clock in public float fields `StartTime`,
 // `DelayTime`, `TotalTime` and in delegate slots wired by `Init`. Nothing counts that class today, so no
 // run knows whether a training cut on this client runs through it. One counted door where the delegates
@@ -4390,6 +4399,31 @@ def_detour! {
     }
 }
 
+// `SingleModeUtils::GetCutTimeScale/0 -> static float()` (`introspect.log:24382`), again a static target:
+// wrapper declares only the return, no `this` (A3). Census only: the detour hands the game's own number
+// straight back and takes a peaked sample of it.
+type GetCutTimeScaleFn = extern "C" fn() -> f32;
+def_detour! {
+    SingleModeUtils_GetCutTimeScale() -> f32 {
+            let value = get_orig_fn!(SingleModeUtils_GetCutTimeScale, GetCutTimeScaleFn)();
+        UTILS_GET_CUT_TIME_SCALE.sample(value);
+
+        value
+    }
+}
+
+// `SingleModeSuccessionCutInHelper::SkipRuntime/0 -> void()`, counted and never called from this side. The
+// dump truncates around this class and names only its `OnEndCutIn/0`, so whether this client walks the
+// skip at all is exactly what a run has to say before a lever is placed on it (A4).
+type SuccessionCutInHelperSkipRuntimeFn = extern "C" fn(this: *mut Il2CppObject);
+def_detour! {
+    SingleModeSuccessionCutInHelper_SkipRuntime(this: *mut Il2CppObject) {
+            SUCCESSION_CUT_HELPER_SKIP_RUNTIME.count();
+
+        get_orig_fn!(SingleModeSuccessionCutInHelper_SkipRuntime, SuccessionCutInHelperSkipRuntimeFn)(this);
+    }
+}
+
 // Item 90: `TimelineTrainingCuttController::Init/9`, where a caller wires that controller's clock: the
 // preload, start, stop and per frame delegates, the `Action<float>` that pushes current time, and the
 // `Func<bool>` that says the cut is over. Every argument is a reference handed straight back (A5).
@@ -5344,6 +5378,9 @@ pub fn init(umamusume: *const Il2CppImage) {
     // duration door nothing has asked yet, and the cutt controller whose clock fields no run has read.
     let single_mode_utils = class_for_label(umamusume, "Gallop.SingleModeUtils");
     let timeline_cutt_controller = class_for_label(umamusume, "Gallop.TimelineTrainingCuttController");
+    // The succession cut-in helper, beside the same class: the succession screen's helper, whose skip door
+    // no log of ours has ever seen crossed.
+    let succession_cut_helper = class_for_label(umamusume, "Gallop.SingleModeSuccessionCutInHelper");
 
     // The plate UI keeps its cascade timing in four instance floats. They are resolved next to the door
     // that reads them, and nothing here writes them: a duration hook has to know which number the
@@ -5478,6 +5515,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     // when it does not, which is what a lever on any of them has to be priced against.
     probe!(story_view, StoryViewController_SkipTrainingCutt, "SkipTrainingCutt", NO_PARAMS, VOID, "StoryViewController::SkipTrainingCutt");
     static_probe!(single_mode_utils, SingleModeUtils_GetHighSpeedPlayDuration, "GetHighSpeedPlayDuration", NO_PARAMS, R4, "SingleModeUtils::GetHighSpeedPlayDuration");
+    static_probe!(single_mode_utils, SingleModeUtils_GetCutTimeScale, "GetCutTimeScale", NO_PARAMS, R4, "SingleModeUtils::GetCutTimeScale");
+    probe!(succession_cut_helper, SingleModeSuccessionCutInHelper_SkipRuntime, "SkipRuntime", NO_PARAMS, VOID, "SingleModeSuccessionCutInHelper::SkipRuntime");
     generic_probe!(timeline_cutt_controller, TimelineTrainingCuttController_Init, "Init", NINE_REFERENCES, VOID, "TimelineTrainingCuttController::Init");
 
     probe!(cut_in_helper, TrainingCuttHelper_SkipRuntime, "SkipRuntime", NO_PARAMS, VOID, "SingleModeTrainingCutInHelper::SkipRuntime");
