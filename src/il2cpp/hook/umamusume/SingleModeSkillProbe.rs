@@ -381,6 +381,14 @@ pub(crate) fn obscured_int_plain(current_crypto_key: i32, fake_value: i32) -> Op
     (current_crypto_key == 0).then_some(fake_value)
 }
 
+/// The live-captured shape of the `ObscuredInt` struct: the `(name, offset)` pairs that produced
+/// the proven `SP raw[...]` lines. Anyone decoding an `ObscuredInt` sitting in memory should read
+/// through these offsets rather than re-walking the metadata: this is the walk that demonstrably
+/// finds the fields, offsets and all, on this exact client.
+pub(crate) fn obscured_int_shape() -> Vec<(String, usize)> {
+    SP_SHAPE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 fn sp_text(chara: *mut Il2CppObject) -> String {
     let offset = SP_FIELD_OFFSET.load(atomic::Ordering::Relaxed);
 

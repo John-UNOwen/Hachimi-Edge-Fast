@@ -267,52 +267,29 @@ unsafe fn call_object(addr: usize, this: *mut Il2CppObject) -> *mut Il2CppObject
     getter(this)
 }
 
-/// Decode one `Obscured*` struct sitting at a base address, its class at hand: the instance ints
-/// named by the live dump (`currentCryptoKey, hiddenValue, fakeValue`) are read and the v3 plain
-/// rule applied. Statics are skipped outright: reading one here would call a neighbour's bytes the
-/// key. None when the shape does not name the fields the rule needs - an unknown shape is never a
-/// guessed number.
+/// Decode one `Obscured*` struct sitting at a base address, its class at hand. The decode reads
+/// through the probe's live-captured `ObscuredInt` shape - the offsets that demonstrably produced
+/// the `SP raw[...]` lines - instead of re-walking metadata and re-solving the struct's size: a
+/// run proved that walk-then-gate path answer `<held>` for a field the same second's live door
+/// read in plain text (`fakeValue=451`). Shapes other than `ObscuredInt` answer `None`: an
+/// unknown shape is never a guessed number.
 unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> Option<i64> {
     if struct_class.is_null() {
         return None;
     }
 
-    // Reads stay inside the struct: a field offset the metadata reports past the struct's own size
-    // would be read from its neighbours' bytes, so it is not read at all.
-    let struct_size = il2cpp_class_value_size(struct_class, std::ptr::null_mut());
-
-    if struct_size <= 0 {
+    if skill_capture::as_string(il2cpp_class_get_name(struct_class)).as_deref() != Some("ObscuredInt") {
         return None;
     }
 
-    let struct_size = struct_size as usize;
-
     let mut crypto_current: Option<i32> = None;
     let mut fake: Option<i32> = None;
-    let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
 
-    loop {
-        let held = il2cpp_class_get_fields(struct_class, &mut iter);
+    for (name, field_offset) in skill_capture::obscured_int_shape() {
+        let held = *(base.add(field_offset) as *const i32);
 
-        if held.is_null() {
-            break;
-        }
-
-        let held_type = il2cpp_field_get_type(held);
-
-        if held_type.is_null() || il2cpp_field_get_flags(held) & 0x10 != 0 || (*held_type).type_() != I4 || il2cpp_field_get_offset(held) + 4 > struct_size {
-            continue;
-        }
-
-        let name = match skill_capture::as_string(il2cpp_field_get_name(held)) {
-            Some(name) => name,
-            None => continue,
-        };
-
-        let value = *((base.add(il2cpp_field_get_offset(held))) as *const i32);
-
-        if name.eq_ignore_ascii_case("currentCryptoKey") { crypto_current = Some(value); }
-        if name.eq_ignore_ascii_case("fakeValue") { fake = Some(value); }
+        if name.eq_ignore_ascii_case("currentCryptoKey") { crypto_current = Some(held); }
+        if name.eq_ignore_ascii_case("fakeValue") { fake = Some(held); }
     }
 
     match (crypto_current, fake) {
