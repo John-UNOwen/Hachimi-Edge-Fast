@@ -218,7 +218,7 @@ Rules learned the hard way (each has an id in the frozen record):
   name, `hachimi::il2cpp::hook::` cut off - `umamusume::NowLoading::Hide`. Both `new_hook!` log lines
   print it, so the key a player needs is in the log of the build they run. A key equal to the bare
   wrapper name still does what this option has done since it existed - it puts down every hook sharing
-  that name, and 14 of them are armed in more than one file - so a config written before ids were keys
+  that name, and 15 of them are armed in more than one file - so a config written before ids were keys
   keeps its effect, and after hooking the log names the hooks such a key put down and the ids that
   would put down one of them instead. A key that is neither an id nor a bare name reaches nothing, and
   the log says so and names the ids its last segment does reach (C27). `python tools/scan_hook_barriers.py`
@@ -228,7 +228,7 @@ Rules learned the hard way (each has an id in the frozen record):
   to one id, no bare name reaches a different population than the wrapper-name rule it replaced, and the two
   copies of the rule agree. It exits 1 on a decision written in a shape it cannot read, so the rule cannot be
   rewritten past the audit. The audit attests the decision and the population; the behaviour is held by
-  `cargo test --lib`, which calls `hook_is_disabled` over the 14 names / 38 sites of `COLLIDING_KEYS` and over
+  `cargo test --lib`, which calls `hook_is_disabled` over the 15 names / 40 sites of `COLLIDING_KEYS` and over
   `SINGLE_NAME_KEYS`, whose contents the audit re-checks against the tree.
 - New speed groups are installed **last** in `umamusume::init`.
 - Names come from the live client. Confirm them in `introspect.log` (`debug_mode: true`) before

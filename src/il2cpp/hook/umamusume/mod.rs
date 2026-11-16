@@ -87,6 +87,7 @@ pub mod SceneManager;
 pub mod AnimationSpeed;
 pub mod SingleModeResultContentBase;
 // The Inspiration event screen's own continue button, pressed by the lever that already ends its cut-in.
+mod SingleModeScenarioLiveTopController;
 mod SingleModeSuccessionEventViewController;
 mod StoryFrameProbe;
 mod TrainingCuttProbe;
@@ -103,6 +104,8 @@ mod DialogProbe;
 mod InheritFlowProbe;
 mod ProbeSuite;
 mod SkillSparkProbe;
+// The career Grand Live's own doors, and the visit clock over the two screens it is played on.
+mod ScenarioLiveProbe;
 mod LowResolutionCamera;
 
 #[cfg(target_os = "windows")]
@@ -383,6 +386,9 @@ pub fn init() {
     SingleModeResultContentBase::init(image);
     // The same lever one step further on the same screen: the click the Inspiration event owes its own button.
     SingleModeSuccessionEventViewController::init(image);
+    // And the same shape on the career Grand Live: the click the concert's own skip button is owed, pressed on the
+    // object the concert's own controller holds and only after the game's own flags say the button is up (item 125).
+    SingleModeScenarioLiveTopController::init(image);
 
     // Diagnostic only, and only when debug_mode is on: records which frame stepping paths this
     // client really calls. It has to run after the scaling modules so it observes the same class
@@ -408,4 +414,8 @@ pub fn init() {
     DialogProbe::init(image);
     SkillSparkProbe::init(image);
     InheritFlowProbe::init(image);
+    // Last, and observe only: the doors the career Grand Live plays through, and one line per visit to
+    // views 1620 and 1621 that says what those doors and the story timeline's waits were doing while the
+    // screen held. Nothing in it presses the concert's own skip.
+    ScenarioLiveProbe::init(image);
 }

@@ -3,7 +3,7 @@ use std::sync::atomic::{self, AtomicBool, AtomicI32, AtomicI64};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use super::{CutStateProbe, DialogProbe, InheritFlowProbe, SkillSparkProbe, StoryEventProbe, TrainingCuttProbe};
+use super::{CutStateProbe, DialogProbe, InheritFlowProbe, ScenarioLiveProbe, SkillSparkProbe, StoryEventProbe, TrainingCuttProbe};
 use super::TrainingCuttProbe::CutProbe;
 
 // The probe suite's shared parts: one clock, the list of every stamped door, and the watchdog that reads both.
@@ -51,6 +51,7 @@ pub(crate) fn all_doors() -> Vec<&'static CutProbe> {
     doors.extend(CutStateProbe::PROBES.iter().copied());
     doors.extend(SkillSparkProbe::PROBES.iter().copied());
     doors.extend(InheritFlowProbe::PROBES.iter().copied());
+    doors.extend(ScenarioLiveProbe::PROBES.iter().copied());
 
     doors
 }

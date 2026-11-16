@@ -220,6 +220,7 @@ config_editor:
   auto_skip_result_screens: "Omitir automáticamente las animaciones de las pantallas de resultados"
   skip_training_cut: "Skip the training cut-in through the game's own skip door"
   skip_inspiration_cut: "Skip the Inspiration cut-in and click its own continue button"
+  skip_grand_live: "Skip the career Grand Live through its own skip door"
   high_speed_settings: "Subir los ajustes de alta velocidad de la historia y del entrenamiento al máximo del juego"
   story_high_speed_mode: "Poner la reproducción de la historia en el modo de alta velocidad del juego"
   graphics_quality: "Calidad gráfica"

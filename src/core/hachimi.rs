@@ -1408,6 +1408,17 @@ pub struct Config {
     // (ledger item 111).
     #[serde(default)]
     pub skip_inspiration_cut: bool,
+    // Skips the career Grand Live (`SingleModeScenarioLiveTop`, view 1621) by making the click its own skip button
+    // is owed. A session on the player's other PC stood on that screen eleven times for 468 s with the concert's
+    // `SingleModeScenarioLiveCutControl::Skip()` crossed zero times, so the time went on a click the game was
+    // ready to take and nobody made. This build clicks `OnLiveButtonClicked` on the
+    // `SingleModeScenarioLiveTopGrandLive3DController` the live's own controller holds, and only once that
+    // controller's `_isGrandLiveTop`, its `_currentPhase` being a `PhaseGrandLiveAnimation`, and that phase's own
+    // `_canSkipLive` and `_isShowedLiveButton` all say the button is up: the lever asks where the game is asking
+    // (C70), and the client's own saved skip setting is never written, because that is the player's to leave
+    // alone. At `false` no address is called and the concert keeps its own button (item 125).
+    #[serde(default)]
+    pub skip_grand_live: bool,
     // Raises the story and training High Speed settings that the Global options screen does not
     // expose, using StoryManager's own max and save path.
     #[serde(default)]

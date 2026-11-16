@@ -75,6 +75,15 @@ pub fn requested_view_id() -> i32 {
     REQUESTED_VIEW_ID.load(atomic::Ordering::Acquire)
 }
 
+// How many view changes this process has been asked for. A lever whose door only runs while its own screen is up cannot
+// see that screen leave and come back: the view id it reads on return is the number it read on the way in. The live
+// skip lever needs this count to know a live ended (C84). One `fetch_add` per view change on a door this module already
+// holds, and a run this long asks for 309 of them.
+static VIEW_CHANGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub fn view_changes() -> usize {
+    VIEW_CHANGES.load(atomic::Ordering::Acquire)
+}
+
 pub fn is_race_scene_family() -> bool {
     let id = current_scene_id();
     matches!(
@@ -111,6 +120,7 @@ fn ChangeViewCommon(next_view_id: i32) {
         }
     }
     REQUESTED_VIEW_ID.store(next_view_id, atomic::Ordering::Release);
+    VIEW_CHANGES.fetch_add(1, atomic::Ordering::Release);
     debug!("next_view_id = {}", next_view_id);
 
     // Nothing speed related runs here. `AnimationSpeed::apply()` already ran in the ChangeView

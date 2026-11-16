@@ -2170,7 +2170,7 @@ pub fn init() {
         crate::core::settings_preset::open_arm_window(preset);
 
         info!(
-            "Config snapshot: preset {} transition {} result {} story {} plate {} cut {} tag_cut {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} cut_skip {} inspiration_skip {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
+            "Config snapshot: preset {} transition {} result {} story {} plate {} cut {} tag_cut {} ui_animation {} time_scale {} story_tcps {} choice_delay {} target_fps {}{} auto_skip_result {} cut_skip {} inspiration_skip {} grand_live_skip {} high_speed_settings {} story_high_speed {} hide_now_loading {} physics {:?} cyspring_mono_uncap_frame_scale {}",
             preset,
             config.transition_speed,
             config.result_screen_speed,
@@ -2187,6 +2187,7 @@ pub fn init() {
             config.auto_skip_result_screens,
             config.skip_training_cut,
             config.skip_inspiration_cut,
+            config.skip_grand_live,
             umamusume::HighSpeedSetting::effective_enabled(config.high_speed_settings),
             config.story_high_speed_mode,
             config.hide_now_loading,
@@ -2355,7 +2356,7 @@ mod tests {
     }
 
     /// The population `python tools/scan_hook_barriers.py --summary` prints under "wrapper names armed
-    /// more than once in the tree": 14 bare names over 38 arming sites, each site written as the id its
+    /// more than once in the tree": 15 bare names over 40 arming sites, each site written as the id its
     /// site keys on, in the order the audit prints them. Reprinted from the tool rather than remembered
     /// from a run, because the claim these tests make is about that population and nothing else.
     const COLLIDING_KEYS: &[(&str, &[&str])] = &[
@@ -2379,6 +2380,13 @@ mod tests {
             &["umamusume::LowResolutionCamera::Initialize", "umamusume::PartsNickNameRibbon::Initialize", "umamusume::TextFrame::Initialize"],
         ),
         ("Play", &["umamusume::JikkyoDisplay::Play", "umamusume::PartsCommonHeaderTitle::TitlePlayer::Play"]),
+        (
+            "ScenarioLiveCutControl_Skip",
+            &[
+                "umamusume::ScenarioLiveProbe::ScenarioLiveCutControl_Skip",
+                "umamusume::SingleModeScenarioLiveTopController::ScenarioLiveCutControl_Skip",
+            ],
+        ),
         (
             "SetFontSize",
             &["umamusume::StoryViewTextControllerLandscape::SetFontSize", "umamusume::StoryViewTextControllerSingleMode::SetFontSize"],
@@ -2480,7 +2488,7 @@ mod tests {
         // reached. The replaced rule is spelled out here instead of called, so the comparison is not
         // this module's own answer checked against itself.
         let population: Vec<&str> = COLLIDING_KEYS.iter().flat_map(|(_, ids)| ids.iter().copied()).collect();
-        assert_eq!(population.len(), 38, "the fixture is the 38 sites the audit prints over 14 shared names");
+        assert_eq!(population.len(), 40, "the fixture is the 40 sites the audit prints over 15 shared names");
 
         for (key, expected) in COLLIDING_KEYS.iter() {
             let configured = keys([*key]);

@@ -114,6 +114,13 @@ def_detour! {
         super::DialogProbe::report_if_due();
         super::SkillSparkProbe::report_if_due();
         super::InheritFlowProbe::report_if_due();
+        // The concert census and its per visit lines, on the same tick and the same quiet path rule. The
+        // lines are due on a schedule of their own, so a screen that is holding prints while its totals
+        // have not moved.
+        super::ScenarioLiveProbe::report_if_due();
+        // What the concert skip lever did, on the same tick and the same rule. A build with the switch off answers
+        // this call with one atomic load and no line.
+        super::SingleModeScenarioLiveTopController::report_if_due();
 
         #[cfg(target_os = "windows")]
         {

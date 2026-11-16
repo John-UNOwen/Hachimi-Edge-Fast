@@ -43,17 +43,29 @@ const fn bit(flag: bool) -> f64 {
 struct FrameProbe {
     name: &'static str,
     calls: AtomicUsize,
+    // The last value this door handed the probe, as `f64` bits, or a bit pattern that is not a number
+    // when it never handed one. The Grand Live visit line reads the story's wait numbers off this slot
+    // instead of putting another hook on a path the game polls a frame at a time, which is the same
+    // reason `IsHighSpeedMode()` is read from a wrapper rather than probed (below).
+    last: AtomicI64,
 }
 
 impl FrameProbe {
     const fn new(name: &'static str) -> Self {
-        Self { name, calls: AtomicUsize::new(0) }
+        Self { name, calls: AtomicUsize::new(0), last: AtomicI64::new(NEVER_SEEN) }
     }
 
     // Frame counts, flags and scales all fit the same slot. A whole number prints without a
     // fraction, so `32` and `0.3` both read the way they should.
     fn observe(&self, values: &[f64]) {
         let calls = self.calls.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        // One relaxed store on a door the game polls up to a hundred times a second, and no formatting:
+        // the last value is kept so a report can print what the story is sitting in right now instead of
+        // only how many times it was asked.
+        if let Some(value) = values.last() {
+            self.last.store(value.to_bits() as i64, atomic::Ordering::Relaxed);
+        }
 
         if calls <= PROBE_DETAIL_LIMIT {
             debug!("Frame probe {} call {}: {:?}", self.name, calls, values);
@@ -63,8 +75,19 @@ impl FrameProbe {
         }
     }
 
-    fn calls(&self) -> usize {
+    pub(crate) fn calls(&self) -> usize {
         self.calls.load(atomic::Ordering::Relaxed)
+    }
+
+    // The last value this door handed the probe, rounded to a whole number, or -1 when it never handed
+    // one. A door that carries more than one value hands the answer it owes the game last, because
+    // every wrapper here publishes the answer before it counts (AGENTS section 5), so what lands in the
+    // slot is the frame count or the skip answer the game received and never an argument it sent.
+    pub(crate) fn last_value(&self) -> i64 {
+        match f64::from_bits(self.last.load(atomic::Ordering::Relaxed) as u64) {
+            value if value.is_finite() => value.round() as i64,
+            _ => -1,
+        }
     }
 
     // The totals line carries the method name without its argument list.
@@ -75,6 +98,10 @@ impl FrameProbe {
         }
     }
 }
+
+// A `last` slot that has never been written. Any bit pattern that is not a number works, and -1 is the
+// one the accessors hand back, so a door nobody crossed and a door that answered -1 read the same way.
+const NEVER_SEEN: i64 = -1;
 
 static SET_FRAME_COUNT_FOR_WAITING: FrameProbe = FrameProbe::new("StoryTimelineController::SetFrameCountForWaiting(frames)");
 static WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK: FrameProbe = FrameProbe::new("StoryTimelineController::get_WaitFrameCountUntilNextBlock()");
@@ -423,3 +450,75 @@ pub fn report_if_due() {
 static START: OnceLock<Instant> = OnceLock::new();
 static LAST_REPORT_SEC: AtomicI64 = AtomicI64::new(-1);
 static LAST_TOTALS: AtomicUsize = AtomicUsize::new(0);
+
+// The two waits the story timeline can be sitting in, as (times polled, the last answer it gave). The
+// Grand Live visit line prints these while a career live screen holds: a count that keeps climbing with
+// the frame skip check below standing still is the story waiting on a beat, and a count that has stopped
+// is the story code itself not running.
+pub(crate) fn story_wait_frame_count() -> (usize, i64) {
+    (WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK.calls(), WAIT_FRAME_COUNT_UNTIL_NEXT_BLOCK.last_value())
+}
+
+pub(crate) fn story_waiting_frame_count() -> (usize, i64) {
+    (WAITING_FRAME_COUNT.calls(), WAITING_FRAME_COUNT.last_value())
+}
+
+// How many times the game asked whether a story end frame or a Grand Live wait frame may be skipped.
+// This is the door that names the concert's own wait frame, so its count is the one that says whether
+// the concert screen is inside the story timeline's stepping path at all.
+pub(crate) fn story_or_live_wait_skipped_calls() -> usize {
+    STORY_END_FRAME_SKIPPED.calls()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_door_that_never_answered_has_no_last_value() {
+        let door = FrameProbe::new("test door never crossed");
+
+        assert_eq!(door.calls(), 0);
+        assert_eq!(door.last_value(), -1, "a door nobody crossed reads as no answer, not as 0");
+    }
+
+    #[test]
+    fn the_last_value_is_the_answer_the_door_owes_and_not_an_argument() {
+        let door = FrameProbe::new("test door with two inputs and an answer");
+
+        // The shape `IsStoryEndFrameOrGrandLiveWaitFrameSkipped` observes: two frames it was asked about
+        // and the answer it gave, in that order.
+        door.observe(&[3.0, 45.0, 1.0]);
+        assert_eq!(door.last_value(), 1, "the answer is the last value, not the frame it was asked about");
+        assert_eq!(door.calls(), 1, "one crossing is one call, whatever the door carried");
+
+        door.observe(&[4.0, 46.0, 0.0]);
+        assert_eq!(door.last_value(), 0, "the newest answer replaces the old one");
+
+        door.observe(&[]);
+        assert_eq!(door.last_value(), 0, "a crossing that carried nothing keeps the last answer on the slot");
+        assert_eq!(door.calls(), 3);
+    }
+
+    #[test]
+    fn a_frame_count_lands_on_the_slot_exactly_as_the_game_handed_it() {
+        let door = FrameProbe::new("test wait frame count");
+
+        door.observe(&[184.0]);
+        assert_eq!(door.last_value(), 184);
+        assert_eq!(story_or_live_wait_skipped_calls(), STORY_END_FRAME_SKIPPED.calls(), "the accessor reads the door it names");
+    }
+
+    #[test]
+    fn the_census_doors_are_measured_under_two_names_nowhere() {
+        let mut names: Vec<&str> = PROBES.iter().map(|probe| probe.name).collect();
+        let total = names.len();
+
+        names.sort_unstable();
+        names.dedup();
+
+        assert_eq!(names.len(), total, "two story doors share a name in this census");
+        assert_eq!(total, 12);
+    }
+}
+

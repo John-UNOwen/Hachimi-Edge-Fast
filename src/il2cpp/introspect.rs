@@ -123,6 +123,25 @@ const FULL_DUMP_NAMES: &[&str] = &[
     // result part and the view that holds the button get their own blocks (item 111). A name the client lacks prints
     // nothing.
     "SingleModeSuccessionEventViewController", "SingleModeSuccessionEventView", "PartsSingleModeSuccessionCutResult",
+    // The career Grand Live: view 1621 `SingleModeScenarioLiveTop` and the 1620 selection top. A 2026-10-30
+    // session on another PC stood on 1621 eleven times for 468 s, the longest stay 85 s, and the two doors
+    // of ours that armed there read the concert's own `Skip()` zero times across the whole session and its
+    // `get_CanSkipLive` 19 times. The screen's own skip path and its phase path have therefore never been
+    // printed, and a lever on a guessed signature measures nothing (C47). The widened single lines at
+    // `introspect-run62.log:23123` to `:23127` are not a surface, and `PhaseGrandLiveAnimation` sits in them
+    // with no owner named (`:23125`), so its simple name is what a dump has to reach by its own budget.
+    // Item 125. The launch of 2026-10-30 22:26 Z printed four of these five and named nothing for
+    // `SingleModeScenarioLiveTopViewController`, so that name is a guess this client does not answer;
+    // the phase animation it did print takes its `UpdateType` from
+    // `SingleModeScenarioLiveTopController` (`introspect-run65.log:23176`), the concert's own cut control
+    // reads its state from a `SingleModeScenarioLiveCutModel` through `field _model` (`:23167`), the phase
+    // class hands out a `SingleModeScenarioLiveTopGrandLive3DController` (`:23173`), and the live's main
+    // view is where its `field _outAnimationDelayTween` sits (`:22907`). A skip lever has to be written
+    // against the class that holds the button, so those four take the slot the guessed name left.
+    "SingleModeScenarioLiveTopController", "SingleModeScenarioLiveSelectViewController",
+    "SingleModeScenarioLiveCutControl", "SingleModeScenarioLiveCutModel", "SingleModeScenarioLiveTopModel",
+    "PhaseGrandLiveAnimation", "SingleModeScenarioLiveTopGrandLive3DController",
+    "PartsSingleModeScenarioLiveMainView",
 ];
 
 /// A field whose held class the walk cannot reach by name. `AnimateToUnity.AnMotion` and `AnRoot` are in no image
@@ -141,10 +160,13 @@ const REACHED_VIA_FIELDS: &[(&str, &str)] = &[
 /// is bounded, so the log grows by these classes and not by whatever else matches a filter. One simple name can
 /// match in more than one image, so a dump can print more allowlist blocks than the list has names: 61 in the run 45 dump
 /// (`introspect-run45.log:29078`) and 48 in the run 42 dump
-/// (`introspect-run42.log:27687`). The budget is sized over the widest of those plus the three Inspiration names added
-/// after them (item 111): a client that renames a state machine takes the slot rather than crowding a name the C58
-/// cascade is measured against out.
-const MAX_ALLOWLIST_CLASSES: usize = 72;
+/// (`introspect-run42.log:27687`). The budget is sized over the widest of those plus the names added after them,
+/// the three Inspiration ones and the eight Grand Live ones (item 111, item 125): a client that renames a state
+/// machine takes the slot rather than crowding a name the C58 cascade is measured against out. The launch of
+/// 2026-10-30 22:26 Z spent 67 of the 72 slots its list had and printed 67 blocks
+/// (`introspect-run65.log`, tail line `563 classes (67 from the allowlist)`), which is five slots of room for a
+/// list that had just grown by the four names above, so the ceiling moves with the list rather than trimming it.
+const MAX_ALLOWLIST_CLASSES: usize = 78;
 
 /// Shape of the dump itself, stamped into the file. Bump it when the log gains or loses a
 /// kind of line so an older file fails the comparison and is rewritten rather than reused as

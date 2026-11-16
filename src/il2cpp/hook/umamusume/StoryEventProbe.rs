@@ -1,4 +1,4 @@
-use std::sync::atomic::{self, AtomicI32, AtomicI64, AtomicUsize};
+use std::sync::atomic::{self, AtomicBool, AtomicI32, AtomicI64, AtomicUsize};
 use std::sync::OnceLock;
 use std::time::Instant;
 use std::fmt::Write as _;
@@ -211,6 +211,46 @@ fn a_cut_in_tick_is_recent(last_tick: i64, now: i64) -> bool {
 /// itself make a write allowed. This is C57's cut-in half of that guard; only its citations moved here.
 pub(crate) fn cut_in_engine_driving() -> bool {
     a_cut_in_tick_is_recent(CUT_IN_TICK_MS.load(atomic::Ordering::Relaxed), elapsed_ms())
+}
+
+/// The view a cut-in run is standing open on, or `0` when none is. `SingleModeScenarioLiveTopController` reads the
+/// live's cut-in window from here instead of hooking `OnPlayCutIn` and `OnEndCutIn` itself: this module already holds
+/// those two doors in a `debug_mode` build and one address carries one hook. The answer is a view and not a yes because
+/// a cut-in open on another screen is not the live's window. Run 70 opened the live's cut-in on view 1621
+/// (`player-run70.log:2414`) and closed it there 5,308 ms later (`:2533`), and its Inspiration cut-in on view 1501
+/// (`:2345`). In a build without `debug_mode` this module arms nothing, so the answer is `0` and the live module reads
+/// the window off its own pair of doors.
+pub(crate) fn open_cut_in_view() -> i32 {
+    if RUN_OPENED_MS.load(atomic::Ordering::Relaxed) < 0 {
+        return 0;
+    }
+
+    RUN_VIEW_ID.load(atomic::Ordering::Relaxed)
+}
+
+/// Set once `init` has armed its counted doors, so another module can tell an unarmed door from a door the game never
+/// crossed. `arm_cut_in_stamp` is not on this list: it is armed in every build and carries no count.
+static DOORS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this file armed its counted doors. Without `debug_mode` it arms the cut-in stamp and nothing else, so every
+/// count it holds stays 0 and a reader has to be told that a zero here is an unarmed door rather than a door the game
+/// never crossed.
+pub(crate) fn doors_armed() -> bool {
+    DOORS_ARMED.load(atomic::Ordering::Relaxed)
+}
+
+/// The three doors on `Gallop.SingleModeTrainingCutInHelper` that step a cut and end it, as this probe counted them
+/// this session: `OnTimelineUpdatePost(time)` (`introspect-run69.log:27270`), `CleanupPlaying()` (`:27267`) and
+/// `OnTerminateRuntime(controller)` (`:27258`). `SingleModeScenarioLiveTopController` reads them for its park line
+/// because it cannot hold them itself: one address carries one hook, and this file holds them in a `debug_mode` build.
+/// A cut that was skipped but never torn down reads as the timeline door still crossing while both end doors sit at 0,
+/// which is the shape item125 measured on a career live that would not leave its screen.
+pub(crate) fn training_cut_in_cut_doors() -> (usize, usize, usize) {
+    (
+        TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.calls(),
+        TRAINING_CUT_IN_CLEANUP_PLAYING.calls(),
+        TRAINING_CUT_IN_ON_TERMINATE_RUNTIME.calls(),
+    )
 }
 
 // A cut-in run only exists when the close lands after its open. A negative open means nothing was
@@ -803,6 +843,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     static_generic_probe!(context_extension, ContextExtension_SetTimeAll, "SetTimeAll", HELPERS_AND_VALUE, VOID, "ContextExtension::SetTimeAll");
     static_generic_probe!(context_extension, ContextExtension_GetCurrentTime, "GetCurrentTime", HELPERS, R4, "ContextExtension::GetCurrentTime");
 
+    DOORS_ARMED.store(true, atomic::Ordering::Release);
+
     info!("Story event probe: {installed} doors installed, {} of them carry a counted kind in the totals line, cut-in length read from the cut-in engine and attributed to the view it plays on", PROBES.len());
 
     if !missing.is_empty() {
@@ -920,6 +962,21 @@ mod tests {
         assert_eq!(bucket_for(ViewId::Story as i32, false), ViewBucket::Story);
         // A race scene still wins over a view id, because a cut-in inside a race is not a story beat.
         assert_eq!(bucket_for(ViewId::StoryEventMission as i32, true), ViewBucket::Race);
+    }
+
+    #[test]
+    fn the_three_cut_doors_a_live_lever_reads_are_named_as_the_dump_spells_them() {
+        // `SingleModeScenarioLiveTopController` reads `training_cut_in_cut_doors` by position and prints each number
+        // under these names, so a label that drifted would put a teardown count beside the wrong door in the live's
+        // park line. The three spellings are the dump's own: `introspect-run69.log:27270`, `:27267`, `:27258`.
+        assert_eq!(TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.label(), "SingleModeTrainingCutInHelper::OnTimelineUpdatePost(time)");
+        assert_eq!(TRAINING_CUT_IN_CLEANUP_PLAYING.label(), "SingleModeTrainingCutInHelper::CleanupPlaying()");
+        assert_eq!(TRAINING_CUT_IN_ON_TERMINATE_RUNTIME.label(), "SingleModeTrainingCutInHelper::OnTerminateRuntime(controller)");
+        assert_eq!(
+            training_cut_in_cut_doors(),
+            (TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.calls(), TRAINING_CUT_IN_CLEANUP_PLAYING.calls(), TRAINING_CUT_IN_ON_TERMINATE_RUNTIME.calls()),
+            "the tuple is the step door first and the two end doors after it, in that order"
+        );
     }
 
     #[test]

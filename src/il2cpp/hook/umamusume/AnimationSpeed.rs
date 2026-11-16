@@ -2070,6 +2070,9 @@ fn mirror_config(config: &Config) {
     // says not to pay.
     SKIP_TRAINING_CUT.store(config.skip_training_cut, Ordering::Release);
     SKIP_INSPIRATION_CUT.store(config.skip_inspiration_cut, Ordering::Release);
+    // The Grand Live skip is the same shape: a switch read at a per frame door, so it mirrors as a bool and a
+    // build that leaves it off calls nothing through it.
+    SKIP_GRAND_LIVE.store(config.skip_grand_live, Ordering::Release);
     // Clamped here so neither story choice site divides by the delay itself: `CheckChoiceAutoTap`
     // runs while a choice is up and `GetTimeScaleByHighSpeedType` is a story path getter, so both
     // read this mirror instead of the config (C24).
@@ -2105,11 +2108,31 @@ pub(crate) fn skip_inspiration_cut() -> bool {
     SKIP_INSPIRATION_CUT.load(Ordering::Acquire)
 }
 
-/// What the Inspiration skip hands `CutInTimelineController::SkipRuntime(time)`: the client's own skip to the end.
-/// Run 60a recorded the client making this call itself on a story event cut-in, `CutInHelper::OnStart` at
-/// 21:49:35.912, `SkipRuntime(time) call 3: [-1.0]` 176 ms later, and `CutInHelper::OnEnd` with `CleanupPlaying` 3 ms
-/// after that, so this is a value the client already sends and a jump it already survives, not a guess at a length.
-pub(crate) const INSPIRATION_SKIP_TIME_SEC: f32 = -1.0;
+// `skip_grand_live`, mirrored for the same per frame door. Neutral default: at `false` nothing is called.
+static SKIP_GRAND_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether this build may make the career Grand Live the click its own skip door is waiting for.
+pub(crate) fn skip_grand_live() -> bool {
+    SKIP_GRAND_LIVE.load(Ordering::Acquire)
+}
+
+/// What the Inspiration skip hands `CutInTimelineController::SkipRuntime(time)`: the number the client itself hands
+/// these two timelines on the way to their cut end. Run 70 has it outright, `run log/player-run70.log:1811` to `:1816`:
+/// `SkipRuntime(time) call 1: [-1.0]` and `call 2: [-1.0]` at 00:41:30.417 and .456 (this build asking both
+/// timelines), then `call 3: [1.9666666984558105]` and `call 4: [1.9666666984558105]` at .493, 37 ms and 76 ms after
+/// the ask, and that visit's cut closed 3,135 ms after its first tick. Run 63 is the same shape, `[-1.0]` and `[-1.0]`
+/// at 07:12:28.081 and .124 then `[1.9666666984558105]` on both timelines at .172 (`run log/player-run63.log:1747` to
+/// `:1760`), `OnEndCutt` after that. Run 61 measures where the number sits in the cut: `PlayCutIn()` at 05:28:03.090,
+/// the cut's own pause beat `OnPauseCutt()` 2,227 ms later at 05:28:05.317 and `OnEndCutt(controller)` 1,428 ms after
+/// that (`run log/hachimi-run61.log:5523`, `:5531`, `:5536`), on the 3.240 s cut-in its census priced at scale 1.000
+/// (`:5548`).
+///
+/// What this used is `-1.0`, the client's own skip to the end on another screen: run 60a `CutInHelper::OnStart` at
+/// 21:49:35.912 with `SkipRuntime(time) call 3: [-1.0]` 176 ms later and `CutInHelper::OnEnd` with `CleanupPlaying`
+/// 3 ms after that. It is a jump the client survives. It is not the value this cut's end path uses, and no run has
+/// `OnEndCutt` crossing behind a `-1.0` this build sent: five sessions of asks end with the timeline sitting past its
+/// own total and the view's `OnEndCutt` never crossed (C85).
+pub(crate) const INSPIRATION_SKIP_TIME_SEC: f32 = 1.966_666_7;
 
 /// How long an Inspiration cut-in timeline must have been ticking before it is asked to end. The client waited 176 ms
 /// in run 60a, and asking in the frame a timeline resets is the shape that left a completion closure reading a null on
@@ -2147,15 +2170,18 @@ pub(crate) const INSPIRATION_REASK_INTERVAL_MS: i64 = 1_000;
 /// pinned after that has not been moved by this door.
 pub(crate) const INSPIRATION_REASK_MAX: usize = 4;
 
-/// The visit gates on a re-ask, all over numbers the caller already holds: `asks` counts the re-asks this build has
-/// made to this timeline and `last_ask_ms` when the last one went, `now_ms` is this visit to the door and `seen_ms`
-/// when this timeline was first seen ticking. `button_armed_ms` is when the game last set the succession button up:
-/// an arm at or after this timeline's first tick says the visit already reached the step after the cut, so asking
-/// again would only ask a cut that is done, and could ask the screen twice. The timeline's own answer is a separate
-/// check, `inspiration_state_allows_ask`, because reading it costs a door call and these gates decide whether that
-/// call is worth making.
-pub(crate) fn inspiration_reask_time(asks: usize, last_ask_ms: i64, now_ms: i64, seen_ms: i64, button_armed_ms: i64) -> bool {
-    asks < INSPIRATION_REASK_MAX && last_ask_ms >= 0 && now_ms - last_ask_ms >= INSPIRATION_REASK_INTERVAL_MS && !(button_armed_ms >= seen_ms)
+/// The visit gates on a re-ask, over the two numbers this build already keeps for the timeline: `asks` counts the
+/// re-asks it has made and `last_ask_ms` when the last one went, against `now_ms`, this visit to the door.
+///
+/// The gate that used to sit here is gone, and the run that removed it is named: `SetupSuccessionButton` crossed
+/// 34 ms *before* `PrepareCutIn` on view 1501 at 06:35:38 of the session of 2026-10-30, so the game wiring the
+/// succession button up says nothing about whether this timeline has a cut left to play. Reading it as "the cut is
+/// done" made the re-asks answer a question the arm does not ask.
+///
+/// A cut that really has closed still bounds itself: the timeline keeps ticking after it ends, the next re-ask reads
+/// `IsEnd` through `inspiration_state_allows_ask`, and a refusal spends an ask without spending a door call.
+pub(crate) fn inspiration_reask_time(asks: usize, last_ask_ms: i64, now_ms: i64) -> bool {
+    asks < INSPIRATION_REASK_MAX && last_ask_ms >= 0 && now_ms - last_ask_ms >= INSPIRATION_REASK_INTERVAL_MS
 }
 
 /// The value this client is measured handing its own cut-in skip door. `CutInTimelineController::SkipRuntime(time)`
@@ -4031,7 +4057,8 @@ mod tests {
 
     #[test]
     fn the_inspiration_skip_asks_once_on_the_inspiration_views_and_only_after_the_cut_ran_a_while() {
-        assert_eq!(INSPIRATION_SKIP_TIME_SEC, -1.0, "the client's own skip to the end is -1.0 (run 60a)");
+        assert_eq!(INSPIRATION_SKIP_TIME_SEC, 1.966_666_7, "the ask hands the number the client itself hands these two timelines before their cut end (run 70 :1815, run 63 :1759)");
+        assert!(INSPIRATION_SKIP_TIME_SEC > 0.0 && INSPIRATION_SKIP_TIME_SEC < 3.240, "the ask lands on the pause beat inside the 3.240 s Inspiration cut-in, not past its end (run 61 :5531, :5548)");
         assert!(inspiration_skip_due(1501, 1_000, 1_000 + INSPIRATION_SKIP_AFTER_MS, false));
         assert!(inspiration_skip_due(1500, 1_000, 1_000 + INSPIRATION_SKIP_AFTER_MS, false));
         assert!(!inspiration_skip_due(1501, 1_000, 1_000 + INSPIRATION_SKIP_AFTER_MS - 1, false), "asked in the frames a timeline resets in (C64)");
@@ -7191,18 +7218,21 @@ mod tests {
 
     #[test]
     fn a_pinned_timeline_is_reasked_on_the_interval_and_stops_at_the_cap() {
-        assert!(inspiration_reask_time(1, 200, 1_200, 0, -1), "1 s after the first ask, the second is due");
-        assert!(!inspiration_reask_time(1, 200, 1_199, 0, -1), "the interval has not run out");
-        assert!(inspiration_reask_time(INSPIRATION_REASK_MAX - 1, 4_200, 5_200, 0, -1), "the last re-ask this build will make");
-        assert!(!inspiration_reask_time(INSPIRATION_REASK_MAX, 5_200, 6_200, 0, -1), "the cap stops the asks");
-        assert!(!inspiration_reask_time(0, -1, 9_000, 0, -1), "a timeline never asked has no re-ask to time");
+        assert!(inspiration_reask_time(1, 200, 1_200), "1 s after the first ask, the second is due");
+        assert!(!inspiration_reask_time(1, 200, 1_199), "the interval has not run out");
+        assert!(inspiration_reask_time(INSPIRATION_REASK_MAX - 1, 4_200, 5_200), "the last re-ask this build will make");
+        assert!(!inspiration_reask_time(INSPIRATION_REASK_MAX, 5_200, 6_200), "the cap stops the asks");
+        assert!(!inspiration_reask_time(0, -1, 9_000), "a timeline never asked has no re-ask to time");
     }
 
+    // The gate this test used to hold open measured false in game. At 06:35:38 of the session of 2026-10-30 the
+    // client crossed `SetupSuccessionButton` at 38.504 and `PrepareCutIn` at 38.534, so a button that went up 700 ms
+    // after a timeline started is a button that went up before its own cut, and the re-ask rule cannot read a cut's
+    // end out of it. A closed cut bounds the asks through `inspiration_state_allows_ask`, which asks the timeline.
     #[test]
-    fn the_reask_stops_once_the_visit_has_reached_the_step_after_the_cut() {
-        assert!(!inspiration_reask_time(1, 200, 1_500, 200, 900), "the button went up 700 ms after this timeline started, so its cut is done");
-        assert!(inspiration_reask_time(1, 200, 1_500, 900, 200), "an arm that predates this timeline's first tick says nothing about it");
-        assert!(!inspiration_state_allows_ask(true, false), "an ended timeline is not asked again");
+    fn the_reask_rule_does_not_read_the_cut_out_of_the_button() {
+        assert!(inspiration_reask_time(1, 200, 1_500), "a button armed after this timeline started says nothing about this timeline");
+        assert!(!inspiration_state_allows_ask(true, false), "an ended timeline is the one that is not asked again");
         assert!(!inspiration_state_allows_ask(false, true), "a paused timeline is not asked again");
     }
 }
