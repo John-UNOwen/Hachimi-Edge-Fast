@@ -113,7 +113,11 @@ static SP_SHAPE: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 // Bounded everywhere: rows by ROW_CAP, fields by FIELD_CAP, names by the caps below.
 
 const MASTER_NAME_CAP: usize = 256;
-const ROWS_OBSERVED_CAP: usize = 640;const MASTER_STR_CAP: usize = 96;
+const ROWS_OBSERVED_CAP: usize = 640;
+// The screen-open list walk's own bounds: the whole skill list is at most the catalogue this
+// screen can offer, and each SkillInfo chain is base skill plus upgrades, never a longer line.
+const FULL_OUTER_CAP: usize = 256;
+const FULL_INNER_CAP: usize = 8;const MASTER_STR_CAP: usize = 96;
 const MASTER_STRINGS_PER_ROW: usize = 24;
 const OBSERVED_SKILL_CAP: usize = 512;
 
@@ -188,6 +192,114 @@ fn field_int(at: *const u8, kind: Il2CppTypeEnum) -> Option<i64> {
     })
 }
 
+/// The scalar fields of one row object, as owned `(name, value)` pairs. One shared walk serves
+/// both row sources: the binding window's `Info` elements and the screen-open list's `SkillInfo`
+/// chains, which carry the same fields under the same names.
+fn row_scalar_fields(element: *mut Il2CppObject) -> Vec<(String, i64)> {
+    let klass = il2cpp_object_get_class(element);
+    let mut fields = Vec::new();
+    let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
+
+    loop {
+        let field = il2cpp_class_get_fields(klass, &mut iter);
+
+        if field.is_null() {
+            break;
+        }
+
+        if il2cpp_field_get_flags(field) & 0x10 != 0 || fields.len() >= FIELD_CAP {
+            continue;
+        }
+
+        let kind = unsafe { (*il2cpp_field_get_type(field)).type_() };
+        let at = unsafe { (element as *mut u8).add(il2cpp_field_get_offset(field)) };
+
+        if let Some(value) = field_int(at, kind) {
+            if let Some(name) = as_string(il2cpp_field_get_name(field)) {
+                fields.push((clean_field_name(&name), value));
+            }
+        }
+    }
+
+    fields
+}
+
+/// The screen-open seam: `CalcNeedRareSkillPoint` is handed the **whole** skill list in one call
+/// the moment the screen builds - sixty rows where the binding door sees two. Each `SkillInfo`
+/// element wraps its row chain in a `_skillList` of the very `Info` objects the binding door
+/// hands, so reading one level deeper here captures the full screen without a scroll; the rows
+/// merge into the same table, and the walk stays inside a list the game is holding right now.
+fn capture_full_row_list(skills_list: *mut Il2CppObject) {
+    if skills_list.is_null() {
+        return;
+    }
+
+    let Some((items, count)) = list_backing(skills_list) else { return };
+
+    if count == 0 || !list_elements_are_refs(items) {
+        return;
+    }
+
+    let capacity = il2cpp_array_length(items) as usize;
+    let (data, stride) = array_data(items);
+    let shown = count.min(capacity).min(FULL_OUTER_CAP);
+    let mut rows = Vec::new();
+
+    for index in 0..shown {
+        let skill_info = unsafe { *(data.add(index * stride) as *mut *mut Il2CppObject) };
+
+        if skill_info.is_null() {
+            continue;
+        }
+
+        let klass = il2cpp_object_get_class(skill_info);
+        let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
+
+        loop {
+            let field = il2cpp_class_get_fields(klass, &mut iter);
+
+            if field.is_null() {
+                break;
+            }
+
+            if il2cpp_field_get_flags(field) & 0x10 != 0 {
+                continue;
+            }
+
+            let Some(name) = as_string(il2cpp_field_get_name(field)) else { continue };
+
+            if clean_field_name(&name) != "_skillList" {
+                continue;
+            }
+
+            // Not a list (or a value-element one) answers from `list_backing` and its ref check;
+            // anything else about the field is never assumed.
+            let at = unsafe { (skill_info as *mut u8).add(il2cpp_field_get_offset(field)) };
+            let inner = unsafe { *(at as *mut *mut Il2CppObject) };
+            let Some((inner_items, inner_count)) = list_backing(inner) else { continue };
+
+            if inner_count == 0 || !list_elements_are_refs(inner_items) {
+                continue;
+            }
+
+            let inner_capacity = il2cpp_array_length(inner_items) as usize;
+            let (inner_data, inner_stride) = array_data(inner_items);
+
+            for row_index in 0..inner_count.min(inner_capacity).min(FULL_INNER_CAP) {
+                let row = unsafe { *(inner_data.add(row_index * inner_stride) as *mut *mut Il2CppObject) };
+
+                if !row.is_null() {
+                    rows.push(row_scalar_fields(row));
+                }
+            }
+        }
+    }
+
+    if merge_rows(&rows) {
+        ROWS_STAMP_US.store(ProbeSuite::now_us(), atomic::Ordering::Relaxed);
+    }
+}
+
 /// Copy the screen's rows into owned data. Only while the door hands a list of references: an
 /// unreadable or value-element list leaves the previous snapshot standing.
 fn capture_screen_rows(rows_list: *mut Il2CppObject, top: i32) {
@@ -214,32 +326,7 @@ fn capture_screen_rows(rows_list: *mut Il2CppObject, top: i32) {
             continue;
         }
 
-        let klass = il2cpp_object_get_class(element);
-        let mut fields = Vec::new();
-        let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
-
-        loop {
-            let field = il2cpp_class_get_fields(klass, &mut iter);
-
-            if field.is_null() {
-                break;
-            }
-
-            if il2cpp_field_get_flags(field) & 0x10 != 0 || fields.len() >= FIELD_CAP {
-                continue;
-            }
-
-            let kind = unsafe { (*il2cpp_field_get_type(field)).type_() };
-            let at = unsafe { (element as *mut u8).add(il2cpp_field_get_offset(field)) };
-
-            if let Some(value) = field_int(at, kind) {
-                if let Some(name) = as_string(il2cpp_field_get_name(field)) {
-                    fields.push((clean_field_name(&name), value));
-                }
-            }
-        }
-
-        rows.push(fields);
+        rows.push(row_scalar_fields(element));
     }
 
     // The door is handed a virtualized binding window, not the screen: one call is often 1-2 rows,
@@ -776,6 +863,10 @@ def_detour! {
             CALC_RARE.count();
 
         get_orig_fn!(SingleModeUtils_CalcNeedRareSkillPoint, CalcRareFn)(skills);
+
+        // The whole list in one hand at screen build: capture the rows it carries so the dump
+        // holds every card even when the player never scrolls a row.
+        capture_full_row_list(skills);
 
         // After the game's own pass: the same list carries the rare-point totals it just computed.
         if verbose() && CALC_RARE.calls() <= PROBE_DETAIL_LIMIT {
