@@ -114,7 +114,7 @@ static SP_SHAPE: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 
 const MASTER_NAME_CAP: usize = 256;
 const MASTER_STR_CAP: usize = 96;
-const MASTER_STRINGS_PER_ROW: usize = 8;
+const MASTER_STRINGS_PER_ROW: usize = 24;
 const OBSERVED_SKILL_CAP: usize = 512;
 
 #[derive(Clone, Default)]
@@ -243,10 +243,16 @@ fn capture_screen_rows(rows_list: *mut Il2CppObject, top: i32) {
     let chara = unsafe { *(rows_list as *mut usize) };
     let stamp = ProbeSuite::now_us();
     let mut snap = lock_or_recover(&SCREEN_SNAP);
-    snap.rows = rows;
-    snap.top = top;
-    snap.stamp_us = stamp;
-    snap.chara = chara;
+
+    // The door is handed different windows as the screen scrolls, and a late call can carry a
+    // 1-row remainder of a screen the player already left. Keep the fullest recent snapshot
+    // (newer wins ties): the rows the player was looking at, not the last call.
+    if rows.len() >= snap.rows.len() {
+        snap.rows = rows;
+        snap.top = top;
+        snap.stamp_us = stamp;
+        snap.chara = chara;
+    }
 }
 
 /// The first sighting of a master row's Id: its string fields are the skill's display name. Rows
@@ -295,10 +301,15 @@ fn capture_master_name(row: *mut Il2CppObject) {
         let held = unsafe { *( (row as *mut u8).add(il2cpp_field_get_offset(field)) as *mut *mut Il2CppString ) };
 
         if let Some(text) = unsafe { held.as_ref() } {
-            if let Some(name) = as_string(il2cpp_field_get_name(field)) {
-                let full = text.as_utf16str().to_string();
-                let short: String = full.chars().take(MASTER_STR_CAP).collect();
-                strings.push((clean_field_name(&name), short));
+            let full = text.as_utf16str().to_string();
+
+            // Empty strings are fields this row does not use; keeping them out is what leaves the
+            // cap for the name the caller came for.
+            if !full.is_empty() {
+                if let Some(name) = as_string(il2cpp_field_get_name(field)) {
+                    let short: String = full.chars().take(MASTER_STR_CAP).collect();
+                    strings.push((clean_field_name(&name), short));
+                }
             }
         }
     }
@@ -755,15 +766,12 @@ def_detour! {
     SingleModeUtils_GetSkillFrameSprite(row: *mut Il2CppObject) -> *mut Il2CppObject {
             MASTER_ROW.count();
 
+        // The capture reads this row's own fields flat: Id plus its non-empty strings, which is the
+        // skill's name and tags. The deeper walk this door used to log was dropped on purpose: a
+        // live run showed a field behind a pointer the barrier only survives by answering null
+        // (`Hook barrier had no answer for SingleModeUtils_GetSkillFrameSprite`), and everything the
+        // walk printed, the capture and the dump now keep in owned data.
         capture_master_name(row);
-
-        // The master row is the skill's name and its catalogue entry. Rows repeat every cell bind, so
-        // only the first ones print; the count carries the rest.
-        if verbose() && MASTER_ROW.calls() <= 24 {
-            let mut line = format!("master call {}: ", MASTER_ROW.calls());
-            dump_fields_at(&mut line, row, MASTER_CAP, 0);
-            info!("Skill buy probe: {line}");
-        }
 
         get_orig_fn!(SingleModeUtils_GetSkillFrameSprite, MasterRowFn)(row)
     }

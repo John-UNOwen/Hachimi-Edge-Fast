@@ -116,13 +116,11 @@ const STRING_GETTERS: &[(&str, &str, &str)] = &[
     ("character", "startTime", "get_StartTime"),
 ];
 // ObscuredInt properties: their getters return a 20-byte struct, so they are read at the
-// backing-field offset instead, decoded by the same rule the SP read uses (A5).
+// backing-field offset instead, decoded by the same rule the SP read uses (A5). Only properties
+// whose backing field holds the live value belong here: the run's JSON proved MaxSpeed..MaxWiz
+// resolve their caps through the parameter dictionaries and leave their backing fields at 1, so
+// those five stay out and `maxHp`, a real `int()` getter, stays in the table above.
 const OBSCURED_GETTERS: &[(&str, &str, &str)] = &[
-    ("stats", "maxSpeed", "MaxSpeed"),
-    ("stats", "maxStamina", "MaxStamina"),
-    ("stats", "maxPower", "MaxPower"),
-    ("stats", "maxGuts", "MaxGuts"),
-    ("stats", "maxWiz", "MaxWiz"),
     ("character", "talentLevel", "TalentLevel"),
     ("character", "limitBreakCount", "LimitBreakCount"),
 ];
@@ -592,6 +590,78 @@ fn observed_ids_json() -> Value {
     Value::Array(observed.iter().map(|id| json!(id)).collect())
 }
 
+/// Every number the character object itself holds: each instance scalar field as its value, each
+/// `Obscured*` as its decoded plain number (or `<held>` while the anti-cheat wrapper has the key
+/// on), bounded and named by the runtime metadata. The dump earned this the honest way: a run read
+/// `SkillPoint` as 518 from the live object while the skill screen showed 2948, so which field the
+/// screen actually reads is data the file answers directly instead of a guess carried in code.
+unsafe fn character_fields_json(chara: *mut Il2CppObject) -> Value {
+    let mut map = Map::new();
+    let klass = il2cpp_object_get_class(chara);
+    let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
+    let mut walked = 0usize;
+
+    loop {
+        let field = il2cpp_class_get_fields(klass, &mut iter);
+
+        if field.is_null() {
+            break;
+        }
+
+        if il2cpp_field_get_flags(field) & 0x10 != 0 {
+            continue;
+        }
+
+        if walked >= FIELD_SCAN_CAP {
+            map.insert("_fieldsOverCap".to_owned(), Value::Bool(true));
+            break;
+        }
+
+        walked += 1;
+
+        let name = match skill_capture::as_string(il2cpp_field_get_name(field)) {
+            Some(name) => clean_field_name(&name),
+            None => continue,
+        };
+
+        let kind = (*il2cpp_field_get_type(field)).type_();
+        let at = (chara as *const u8).add(il2cpp_field_get_offset(field));
+
+        let value = match kind {
+            I4 => json!( *(at as *const i32) ),
+            U4 => json!( *(at as *const u32) ),
+            I2 => json!( *(at as *const i16) ),
+            U2 => json!( *(at as *const u16) ),
+            I1 => json!( *(at as *const i8) ),
+            U1 => json!( *(at as *const u8) ),
+            I8 => json!( *(at as *const i64) ),
+            U8 => json!( *(at as *const u64) ),
+            BOOL => json!( *(at as *const u8) != 0 ),
+            VALUETYPE => {
+                let struct_class = il2cpp_type_get_class_or_element_class(il2cpp_field_get_type(field));
+                let struct_name = if struct_class.is_null() { String::new() } else { skill_capture::as_string(il2cpp_class_get_name(struct_class)).unwrap_or_default() };
+
+                if struct_name.starts_with("Obscured") {
+                    match obscured_value_at(at, struct_class) {
+                        Some(value) => json!(value),
+                        None => Value::String("<held>".to_owned()),
+                    }
+                }
+                else {
+                    continue;
+                }
+            },
+            _ => continue,
+        };
+
+        map.insert(name, value);
+    }
+
+    Value::Object(map)
+}
+
+const FIELD_SCAN_CAP: usize = 140;
+
 /// What the dump can refuse with: no live career to read, or a real failure on the way out.
 enum DumpError {
     NoCareer,
@@ -674,6 +744,13 @@ fn run_dump() -> Result<String, DumpError> {
     root.insert("skillTipsObserved".to_owned(), observed_tips_json());
     root.insert("skillMasterNames".to_owned(), master_names_json());
     root.insert("skillIdsOffered".to_owned(), observed_ids_json());
+    root.insert("characterFields".to_owned(), unsafe { character_fields_json(chara) });
+
+    // The same flat scan over the career state, whenever that root is itself fresh: if the number
+    // the skill screen shows does not live on the character, it lives near here.
+    if data_at != 0 && is_fresh(now_us, data_stamp) {
+        root.insert("careerStateFields".to_owned(), unsafe { character_fields_json(data_at as *mut Il2CppObject) });
+    }
 
     let body = serde_json::to_string_pretty(&Value::Object(root)).map_err(|e| DumpError::Failed(e.to_string()))?;
 
