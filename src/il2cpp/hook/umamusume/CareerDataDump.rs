@@ -285,13 +285,19 @@ unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> 
         return None;
     }
 
+    // Which decoder the class actually carries is a client fact, measured at the call: this
+    // build answers only through `ToString` (a run proved `game=None` from the int names while
+    // the text path returned "2948"). The int candidates stay first in case a later client
+    // ships them; a text answer is parsed strictly, never guessed from free-form output.
     let mut method = std::ptr::null();
+    let mut text_decoder = false;
 
-    for candidate in ["GetDecryptedValue", "get_Value"] {
+    for candidate in ["GetDecryptedValue", "get_Value", "ToString"] {
         let Ok(c_name) = std::ffi::CString::new(candidate) else { continue };
         method = il2cpp_class_get_method_from_name(struct_class, c_name.as_ptr(), 0);
 
         if !method.is_null() {
+            text_decoder = candidate == "ToString";
             break;
         }
     }
@@ -305,6 +311,12 @@ unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> 
 
     if !exc.is_null() || result.is_null() {
         return None;
+    }
+
+    if text_decoder {
+        let text = (result as *mut Il2CppString).as_ref()?.as_utf16str().to_string();
+
+        return text.trim().parse::<i64>().ok();
     }
 
     let held = il2cpp_object_unbox(result);
