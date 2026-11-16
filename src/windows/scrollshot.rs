@@ -54,12 +54,19 @@ use crate::windows::utils::get_game_dir;
 use crate::windows::wnd_hook;
 
 // The drag. The press rests a beat before moving so the game reads a grab and not a flick, and the
-// move lands in ten steps a frame apart because a ScrollRect drag is built from the pointer's
-// per-frame positions - one jump would be read as a drag of a few pixels.
-const DRAG_STEPS: usize = 10;
-const DRAG_STEP_WAIT: Duration = Duration::from_millis(22);
-const DRAG_PRESS_WAIT: Duration = Duration::from_millis(90);
+// move lands in hops a frame apart because a ScrollRect drag is built from the pointer's per-frame
+// positions. The release is held still before the button lifts for the opposite reason: the game
+// estimates fling velocity from the last hops, and a still beat before release means the list
+// arrives and stops instead of flying - a release straight off a fast hop was the way a first drag
+// flung the list while the capture thread chased it and later presses killed its momentum.
+const DRAG_STEPS: usize = 8;
+const DRAG_STEP_WAIT: Duration = Duration::from_millis(50);
+const DRAG_PRESS_WAIT: Duration = Duration::from_millis(120);
+const DRAG_RELEASE_HOLD: Duration = Duration::from_millis(120);
 const DRAG_MIN_STEP: usize = 40;
+// The cap on one step: the whole gesture plus the settle has to finish before the next press with
+// the list at rest, so the step stays a distance the game can lay down inside one settle.
+const DRAG_STEP_CAP: usize = 500;
 // A step the stitch cannot place is a duplicated viewport, and `travel` places one only while a
 // full probe band survives the shift, so a step stays this many rows short of the region height.
 const DRAG_STEP_MARGIN: usize = PROBE_ROWS_MAX + 20;
@@ -395,14 +402,18 @@ fn drag_scroll(aim_x: i32, aim_y: i32, distance: usize) {
         std::thread::sleep(DRAG_STEP_WAIT);
     }
 
+    // The pointer stops dead while the button is still down: the game reads the list as arriving,
+    // not as thrown, and lets it come to rest before the lift.
+    std::thread::sleep(DRAG_RELEASE_HOLD);
     send_mouse(aim_x, to, MOUSEEVENTF_LEFTUP, 0);
 }
 
-/// Rows one drag step should scroll: 55% of the band, but never past what `travel` can place and
-/// never so small that a step costs more settle time than it buys in content.
+/// Rows one drag step should scroll: 40% of the band, never so fast the settle loses the list,
+/// never past what `travel` can place, and never so small a step costs more settle than content.
 fn step_distance(region_height: usize) -> usize {
+    let wanted = ((region_height * 40 / 100).max(DRAG_MIN_STEP)).min(DRAG_STEP_CAP);
     let limit = region_height.saturating_sub(DRAG_STEP_MARGIN).max(DRAG_MIN_STEP);
-    ((region_height * 55 / 100).max(DRAG_MIN_STEP)).min(limit)
+    wanted.min(limit)
 }
 
 // ---------------------------------------------------------------------------
@@ -898,8 +909,19 @@ fn worker() {
             return Ok((1, stitcher.canvas_rows));
         };
 
-        // Aim the drag at the middle of what is actually moving, not at the window middle.
-        let aim = region_center(hwnd, &region).or(center);
+        // Aim candidates, window middle first (the probe drag already moved this list from there),
+        // the moving band's middle second. A measured still rotates to the next candidate, so
+        // ending the session needs the list to answer no candidate at all, not merely one.
+        let mut aims: Vec<(i32, i32)> = Vec::new();
+        if let Some(c) = center {
+            aims.push(c);
+        }
+        if let Some(rc) = region_center(hwnd, &region) {
+            if !aims.contains(&rc) {
+                aims.push(rc);
+            }
+        }
+        let mut aim_i = 0usize;
 
         let stride = if first.w >= 1920 { 3 } else { 2 };
         let mw = match_width(first.w);
@@ -939,7 +961,7 @@ fn worker() {
                 info!("scrollshot: cancelled by the player after {steps} steps");
                 break;
             }
-            if let Some((x, y)) = aim {
+            if let Some((x, y)) = aims.get(aim_i).copied().or(center) {
                 drag_scroll(x, y, step_px);
             }
             let Some(cur) = settle_capture() else {
@@ -951,20 +973,28 @@ fn worker() {
             steps += 1;
 
             let cur_gray = gray_of(&cur, region.top, region.bottom, 0, mw, stride);
-            match travel(&prev_gray, &cur_gray, probe, last_moved) {
+            let measured: Option<usize> = match travel(&prev_gray, &cur_gray, probe, last_moved) {
                 None => {
                     // Cannot place it: add it whole and keep counting it.
                     skipped += 1;
                     if !stitcher.add_whole(&cur) {
+                        last = cur;
                         break;
                     }
+                    None
                 }
                 Some(m) if m < STILL_PX => {
                     still += 1;
+                    if still == 1 && aims.len() > 1 {
+                        aim_i = (aim_i + 1) % aims.len();
+                        info!("scrollshot: step measured still, rotating the drag to aim candidate {}", aim_i + 1);
+                    }
                     if still >= STILL_STEPS_AT_END {
                         info!("scrollshot: reached the bottom after {steps} steps");
+                        last = cur;
                         break;
                     }
+                    Some(m)
                 }
                 Some(m) => {
                     still = 0;
@@ -974,14 +1004,25 @@ fn worker() {
                             // `travel` said rows moved yet none were new: treat it as still.
                             still += 1;
                             if still >= STILL_STEPS_AT_END {
+                                last = cur;
                                 break;
                             }
                         }
-                        Some(false) => break, // canvas cap reached
+                        Some(false) => {
+                            last = cur;
+                            break; // canvas cap reached
+                        }
                         Some(true) => {}
                     }
+                    Some(m)
                 }
-            }
+            };
+
+            // One line per step: this is the thread's whole view of the game, and a session that
+            // ends too early is only diagnosable from what each step actually measured.
+            let moved_note = measured.map(|m| m.to_string()).unwrap_or_else(|| "unplaced".to_owned());
+            info!("scrollshot: step {steps}: moved {moved_note} skipped {skipped} still {still} aim {}", aim_i + 1);
+
             prev_gray = cur_gray;
             last = cur;
         }
@@ -1280,12 +1321,12 @@ mod tests {
 
     #[test]
     fn a_drag_step_never_outruns_what_the_stitch_can_place() {
-        // travel() places a step only while a full probe band survives, so a step must stay
-        // DRAG_STEP_MARGIN rows short of the region - and that limit, not the wanted share, binds
-        // as soon as the band is short.
-        assert_eq!(step_distance(800), 440, "a tall band takes the wanted share");
-        assert_eq!(step_distance(260), 260 - DRAG_STEP_MARGIN, "a short band takes the limit");
-        assert!(step_distance(800) <= 800 - DRAG_STEP_MARGIN);
+        // travel() places a step only while a full probe band survives, and the settle has to
+        // catch the list at rest between presses, so a step answers to three bounds: the band's
+        // share, the fling cap, and the stitch margin - whichever is smallest wins.
+        assert_eq!(step_distance(800), 320, "a tall band takes the share");
+        assert_eq!(step_distance(1500), DRAG_STEP_CAP, "a window taller than the cap takes the cap");
+        assert_eq!(step_distance(200), 200 - DRAG_STEP_MARGIN, "a short band takes the stitch limit");
         assert!(step_distance(120) >= DRAG_MIN_STEP, "a hopeless band keeps a sane floor");
     }
 }
