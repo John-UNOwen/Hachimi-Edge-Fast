@@ -61,6 +61,8 @@ jobs:
       - name: Publish
         shell: bash
         env:
+          # gh refuses GITHUB_TOKEN inside Actions and demands GH_TOKEN by name.
+          GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
