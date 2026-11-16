@@ -3759,6 +3759,13 @@ impl Gui {
                             self.menu_anim_time = None;
                             crate::windows::scrollshot::start();
                         }
+                        // Only a flag leaves the GUI thread: the dump runs on the next game tick,
+                        // where reading the career through the game's own getters is legal.
+                        if ui.button(t!("menu.career_dump")).clicked() {
+                            self.show_menu = false;
+                            self.menu_anim_time = None;
+                            crate::il2cpp::hook::umamusume::CareerDataDump::request_dump();
+                        }
                     }
                     // did this because android phones have a notch
                     #[cfg(target_os = "android")]

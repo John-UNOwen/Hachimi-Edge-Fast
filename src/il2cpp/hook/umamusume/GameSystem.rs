@@ -122,6 +122,9 @@ def_detour! {
         // What the concert skip lever did, on the same tick and the same rule. A build with the switch off answers
         // this call with one atomic load and no line.
         super::SingleModeScenarioLiveTopController::report_if_due();
+        // The career dump button's request, if this tick got one: every game read the JSON needs
+        // happens here, on the game thread, not on the GUI thread that set the flag.
+        super::CareerDataDump::poll();
 
         #[cfg(target_os = "windows")]
         {

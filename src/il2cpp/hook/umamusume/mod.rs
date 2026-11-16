@@ -106,6 +106,9 @@ mod ProbeSuite;
 mod SkillSparkProbe;
 // The career skill buy screen: the rows it offers, their price, hint discount and the SP beside them.
 mod SingleModeSkillProbe;
+// The menu's career dump button: the live career serialized to JSON, reading through the snapshots
+// above plus fresh getter calls on the game thread.
+pub(crate) mod CareerDataDump;
 // The career Grand Live's own doors, and the visit clock over the two screens it is played on.
 mod ScenarioLiveProbe;
 mod LowResolutionCamera;
@@ -417,8 +420,12 @@ pub fn init() {
     SkillSparkProbe::init(image);
     InheritFlowProbe::init(image);
     // The career skill buy screen's doors, observe only: what it offers, what it costs, what the hint
-    // discount is, and the SP the character holds beside it.
+    // discount is, and the SP the character holds beside it. Armed always; only its lines follow
+    // `debug_mode`, because the career dump below reads the snapshots these doors keep.
     SingleModeSkillProbe::init(image);
+    // The career dump button's liveness doors and getter table; the file itself is written from
+    // `GameSystem::Update` on the tick the button was pressed.
+    CareerDataDump::init(image);
     // Last, and observe only: the doors the career Grand Live plays through, and one line per visit to
     // views 1620 and 1621 that says what those doors and the story timeline's waits were doing while the
     // screen held. Nothing in it presses the concert's own skip.
