@@ -25,8 +25,8 @@
 //! The SP is read off the same `this` the discount doors receive, at the offset of
 //! `field <SkillPoint>k__BackingField [struct<ObscuredInt:20B>]` from that block, so no struct return
 //! ever travels through a wrapper (A5). `ObscuredInt` is the anti-cheat int wrapper; its own fields are
-//! read by their runtime names, the raw ints are always logged, and the decoded value is labelled as a
-//! decode so a run can check it against the number on screen.
+//! read by their runtime names, the raw ints are always logged, and the plain number is printed as
+//! `SP <n>` only when the wrapper says it is holding the value in the clear.
 //!
 //! Nothing here changes an argument or a return value. Every wrapper hands the call to the game
 //! untouched, and the whole module is behind `debug_mode`, so a player who has that off gets no hook at all.
@@ -92,24 +92,28 @@ static LAST_TOTALS: AtomicUsize = AtomicUsize::new(0);
 static SP_FIELD_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static SP_SHAPE: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 
-// How many rows the element dumps print in full, and how deep one row's own nested list goes. A row that
-// outgrows these is counted and named, never silently half-printed.
+// How many rows the element dumps print in full, and how wide each object level goes. A row that
+// outgrows these is counted and named, never silently half-printed. The master-data row is the one
+// object dumped wider than a screen row: its name and rate fields sit past a screen row's width,
+// and it prints once per skill rather than once per field.
 const FIELD_CAP: usize = 24;
+const MASTER_CAP: usize = 80;
 const ROW_CAP: usize = 14;
 const STRING_CAP: usize = 64;
+// A nested object (a row's MasterData, a list element) is walked only below its owner and only a
+// level or two down: the fields that matter sit on the first level, and an unbounded walk could
+// follow any object graph off across the log line.
+const NEST_CAP: usize = 16;
+const NEST_DEPTH: usize = 2;
+const NEST_LIST_MAX: usize = 4;
 
-// The `ObscuredInt` state value that means "the int is masked" in the anti-cheat wrapper: the four bytes
-// of "ALLD", its documented magic. Anything else and the value field is the plain number.
-const OBSCURED_MASKED: i32 = 0x4C4C_4441;
-
-/// The decode candidate for an `ObscuredInt` read as `(value field, mask field, state field)` ints.
-/// The masked state means value and mask are the two halves of one number; any other state says the
-/// value is already plain. A read without a value field decodes to nothing rather than to a guess.
-pub(crate) fn obscured_int_decode(value: i32, mask: i32, state: Option<i32>) -> i32 {
-    match state {
-        Some(OBSCURED_MASKED) => value ^ mask,
-        _ => value,
-    }
+/// The plaintext rule for the anti-cheat int this client uses. The live dump of the SP field named
+/// its ints `cryptoKey, currentCryptoKey, hiddenValue, fakeValue`: while `currentCryptoKey` is
+/// zero the number is held in the clear and `fakeValue` is it. Once a key is current, the real
+/// number sits obfuscated inside `hiddenValue` behind the key, and this answers `None`: the line
+/// says "held obscured" rather than guessing, and the raw fields are logged either way.
+pub(crate) fn obscured_int_plain(current_crypto_key: i32, fake_value: i32) -> Option<i32> {
+    (current_crypto_key == 0).then_some(fake_value)
 }
 
 fn sp_text(chara: *mut Il2CppObject) -> String {
@@ -122,33 +126,35 @@ fn sp_text(chara: *mut Il2CppObject) -> String {
     let base = unsafe { (chara as *mut u8).add(offset) };
     let shape = SP_SHAPE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let mut out = String::from(" SP raw[");
-    let mut value: Option<i32> = None;
-    let mut mask: Option<i32> = None;
-    let mut state: Option<i32> = None;
+    let mut crypto_current: Option<i32> = None;
+    let mut fake: Option<i32> = None;
 
     for (name, field_offset) in &shape {
         let held = unsafe { *(base.add(*field_offset) as *const i32) };
         let _ = write!(out, " {name}={held}");
 
-        if name.contains("value") { value = Some(held); }
-        if name.contains("mask") { mask = Some(held); }
-        if name.contains("state") { state = Some(held); }
+        if name.eq_ignore_ascii_case("currentCryptoKey") { crypto_current = Some(held); }
+        if name.eq_ignore_ascii_case("fakeValue") { fake = Some(held); }
     }
 
     out.push(']');
 
-    if let (Some(v), Some(m)) = (value, mask) {
-        let _ = write!(out, " decoded {}", obscured_int_decode(v, m, state));
+    if let (Some(key), Some(value)) = (crypto_current, fake) {
+        match obscured_int_plain(key, value) {
+            Some(plain) => { let _ = write!(out, " SP {plain}"); },
+            None => out.push_str(" SP held obscured"),
+        }
     }
 
     out
 }
 
-/// `name=value` for one instance field of a live object. Every primitive the metadata can name is read;
-/// strings are printed truncated; a generic `List<T>` is printed by its live size; anything else is
-/// named by type so the shape is still visible. A null object or field prints its own marker instead of
-/// reading through it.
-fn field_value_text(obj: *mut Il2CppObject, field: *mut FieldInfo) -> String {
+/// `name=value` for one instance field of a live object, at one level of the walk. Every primitive
+/// the metadata can name is read; strings are printed truncated; an object field is walked one
+/// level down while the depth allows; a generic `List<T>` is expanded only while it is short, the
+/// depth allows, and its element class is proven a reference by the runtime itself. A null object
+/// or field prints its own marker instead of reading through it.
+fn field_value_text(obj: *mut Il2CppObject, field: *mut FieldInfo, depth: usize) -> String {
     let kind = unsafe { (*il2cpp_field_get_type(field)).type_() };
     let at = unsafe { (obj as *mut u8).add(il2cpp_field_get_offset(field)) };
 
@@ -181,11 +187,11 @@ fn field_value_text(obj: *mut Il2CppObject, field: *mut FieldInfo) -> String {
             let held = unsafe { *(at as *mut *mut Il2CppObject) };
             let type_name = as_string(il2cpp_type_get_name(il2cpp_field_get_type(field))).unwrap_or_else(|| "?".to_owned());
 
-            if !type_name.contains("System.Collections.Generic.List") || held.is_null() {
+            if !type_name.contains("System.Collections.Generic.List") {
                 return format!("<{type_name}>");
             }
 
-            format!("List{} ", list_text(held))
+            list_value_text(held, depth)
         },
         VALUETYPE | ENUM => {
             let class = il2cpp_type_get_class_or_element_class(il2cpp_field_get_type(field));
@@ -196,7 +202,17 @@ fn field_value_text(obj: *mut Il2CppObject, field: *mut FieldInfo) -> String {
         CLASS | Il2CppTypeEnum_IL2CPP_TYPE_OBJECT | Il2CppTypeEnum_IL2CPP_TYPE_SZARRAY | Il2CppTypeEnum_IL2CPP_TYPE_ARRAY => {
             let held = unsafe { *(at as *mut *mut c_void) };
 
-            if held.is_null() { String::from("<null>") } else { String::from("<obj>") }
+            if held.is_null() {
+                String::from("<null>")
+            }
+            else if depth < NEST_DEPTH {
+                let mut walked = String::new();
+                dump_fields_at(&mut walked, held as *mut Il2CppObject, NEST_CAP, depth + 1);
+                walked
+            }
+            else {
+                String::from("<obj>")
+            }
         },
         _ => String::from("<skipped>"),
     }
@@ -230,13 +246,70 @@ fn list_size(list: *mut Il2CppObject) -> Option<usize> {
     Some(count as usize)
 }
 
-/// `n items [first element preview]` for a live list. Only the first element is previewed inside a
-/// field dump; row dumps walk the list itself.
-fn list_text(list: *mut Il2CppObject) -> String {
-    match list_size(list) {
-        Some(count) => format!("[{count} items]"),
-        None => String::from("[unreadable list]"),
+/// The element array of a live list and the element count the list itself reports. Null slots are
+/// the caller's to notice; an unreadable shape answers `None` rather than an empty list.
+fn list_backing(list: *mut Il2CppObject) -> Option<(*mut Il2CppArray, usize)> {
+    let count = list_size(list)?;
+    let items_field = il2cpp_class_get_field_from_name(il2cpp_object_get_class(list), c"_items".as_ptr());
+
+    if items_field.is_null() {
+        return None;
     }
+
+    let items = unsafe { *( (list as *mut u8).add(il2cpp_field_get_offset(items_field)) as *mut *mut Il2CppArray ) };
+
+    if items.is_null() {
+        return None;
+    }
+
+    Some((items, count))
+}
+
+/// The data area of a reference array and the element stride, both as the runtime itself reports
+/// them. The stride is read, never assumed: one build's pointer is not another's slot size.
+fn array_data(items: *mut Il2CppArray) -> (*mut u8, usize) {
+    let stride = il2cpp_array_element_size(il2cpp_object_get_class(items as *mut Il2CppObject)) as usize;
+
+    (unsafe { (items as *mut u8).add(il2cpp_array_object_header_size() as usize) }, stride)
+}
+
+/// Whether a list's elements are references the dump may walk as objects. The array's own element
+/// class is asked of the runtime: value elements stay counts, because reading one as a pointer
+/// would dereference a number as an address.
+fn list_elements_are_refs(items: *mut Il2CppArray) -> bool {
+    let element = il2cpp_class_get_element_class(il2cpp_object_get_class(items as *mut Il2CppObject));
+
+    !element.is_null() && !il2cpp_class_is_valuetype(element as *const Il2CppClass)
+}
+
+/// `List[n items]`, or the elements themselves while the list is short enough, shallow enough,
+/// and provably of references to expand without burying the line or reading anything wrong.
+fn list_value_text(list: *mut Il2CppObject, depth: usize) -> String {
+    let Some(count) = list_size(list) else { return String::from("[unreadable list]") };
+
+    if count == 0 || count > NEST_LIST_MAX || depth >= NEST_DEPTH {
+        return format!("List[{count} items]");
+    }
+
+    let Some((items, _)) = list_backing(list) else {
+        return format!("List[{count} items]");
+    };
+
+    if !list_elements_are_refs(items) {
+        return format!("List[{count} items]");
+    }
+
+    let mut out = format!("List[{count}]");
+    let capacity = il2cpp_array_length(items) as usize;
+    let (data, stride) = array_data(items);
+    let shown = count.min(capacity);
+
+    for index in 0..shown {
+        let element = unsafe { *((data).add(index * stride) as *mut *mut Il2CppObject) };
+        dump_fields_at(&mut out, element, NEST_CAP, depth + 1);
+    }
+
+    out
 }
 
 /// Walk a live `List<int>`. The ints live in the array data itself, not behind element pointers, so
@@ -247,32 +320,16 @@ fn dump_int_list(out: &mut String, list: *mut Il2CppObject) {
         return;
     }
 
-    let Some(count) = list_size(list) else {
+    let Some((items, count)) = list_backing(list) else {
         out.push_str("<unreadable list>");
         return;
     };
 
-    let _ = write!(out, "[{count} ids");
-
-    let klass = il2cpp_object_get_class(list);
-    let items_field = il2cpp_class_get_field_from_name(klass, c"_items".as_ptr());
-
-    if items_field.is_null() {
-        out.push(']');
-        return;
-    }
-
-    let items = unsafe { *( (list as *mut u8).add(il2cpp_field_get_offset(items_field)) as *mut *mut Il2CppArray ) };
-
-    if items.is_null() {
-        out.push(']');
-        return;
-    }
-
     let capacity = il2cpp_array_length(items) as usize;
-    let stride = il2cpp_array_element_size(il2cpp_object_get_class(items as *mut Il2CppObject)) as usize;
-    let data = unsafe { (items as *mut u8).add(il2cpp_array_object_header_size() as usize) };
+    let (data, stride) = array_data(items);
     let shown = count.min(capacity).min(ROW_CAP);
+
+    let _ = write!(out, "[{count} ids");
 
     for index in 0..shown {
         let held = unsafe { *(((data).add(index * stride)) as *const i32) };
@@ -294,36 +351,22 @@ fn dump_ref_list(out: &mut String, list: *mut Il2CppObject) {
         return;
     }
 
-    let Some(count) = list_size(list) else {
+    let Some((items, count)) = list_backing(list) else {
         out.push_str("<unreadable list>");
         return;
     };
 
     let _ = write!(out, "[{count} rows]");
 
-    let klass = il2cpp_object_get_class(list);
-    let items_field = il2cpp_class_get_field_from_name(klass, c"_items".as_ptr());
-
-    if items_field.is_null() {
-        return;
-    }
-
-    let items = unsafe { *( (list as *mut u8).add(il2cpp_field_get_offset(items_field)) as *mut *mut Il2CppArray ) };
-
-    if items.is_null() {
-        return;
-    }
-
     let capacity = il2cpp_array_length(items) as usize;
-    let stride = il2cpp_array_element_size(il2cpp_object_get_class(items as *mut Il2CppObject)) as usize;
-    let data = unsafe { (items as *mut u8).add(il2cpp_array_object_header_size() as usize) };
+    let (data, stride) = array_data(items);
     let shown = count.min(capacity).min(ROW_CAP);
 
     for index in 0..shown {
         let element = unsafe { *((data).add(index * stride) as *mut *mut Il2CppObject) };
 
-        out.push_str(" row{index}:");
-        dump_object_fields(out, element);
+        let _ = write!(out, " row{index}:");
+        dump_fields_at(out, element, FIELD_CAP, 0);
     }
 
     if count > shown {
@@ -331,9 +374,9 @@ fn dump_ref_list(out: &mut String, list: *mut Il2CppObject) {
     }
 }
 
-/// Every instance field of one live object, by runtime metadata name. Static fields are skipped: the
-/// values that matter are the ones this object holds.
-fn dump_object_fields(out: &mut String, obj: *mut Il2CppObject) {
+/// The walk: a named field cap and the depth this object sits at, so a nested object
+/// prints narrower than its owner and the object graph cannot outrun the line.
+fn dump_fields_at(out: &mut String, obj: *mut Il2CppObject, cap: usize, depth: usize) {
     if obj.is_null() {
         out.push_str("<null>");
         return;
@@ -360,14 +403,14 @@ fn dump_object_fields(out: &mut String, obj: *mut Il2CppObject) {
 
         total += 1;
 
-        if printed >= FIELD_CAP {
+        if printed >= cap {
             continue;
         }
 
         printed += 1;
 
         let name = as_string(il2cpp_field_get_name(field)).unwrap_or_else(|| "?".to_owned());
-        let _ = write!(out, " {name}={}", field_value_text(obj, field));
+        let _ = write!(out, " {name}={}", field_value_text(obj, field, depth));
     }
 
     out.push('}');
@@ -457,7 +500,7 @@ def_detour! {
         // only the first ones print; the count carries the rest.
         if MASTER_ROW.calls() <= 24 {
             let mut line = format!("master call {}: ", MASTER_ROW.calls());
-            dump_object_fields(&mut line, row);
+            dump_fields_at(&mut line, row, MASTER_CAP, 0);
             info!("Skill buy probe: {line}");
         }
 
@@ -543,8 +586,14 @@ fn read_sp_shape(chara: *mut Il2CppClass) {
             break;
         }
 
-        // The wrapper's ints are all the dump of this struct would ever show us; the decode reads them
-        // by name from `obscured_int_decode`.
+        // The wrapper's instance ints are all the dump of this struct would ever show us; the
+        // decode reads them by name from `obscured_int_plain`. Statics are skipped outright: their
+        // offsets point into the class's static block, and reading one at `this + offset` would
+        // read a neighbour's bytes and call them the key.
+        if il2cpp_field_get_flags(held) & 0x10 != 0 {
+            continue;
+        }
+
         if unsafe { (*il2cpp_field_get_type(held)).type_() } != I4 {
             continue;
         }
@@ -685,17 +734,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unmasked_obscured_int_decodes_to_its_value_field() {
-        assert_eq!(obscured_int_decode(450, 0x1234, None), 450);
-        assert_eq!(obscured_int_decode(450, 0x1234, Some(0)), 450);
-        assert_eq!(obscured_int_decode(450, 0x1234, Some(-1)), 450);
+    fn a_plain_obscured_int_reads_through_its_fake_value_field() {
+        // The live line this rule came from: currentCryptoKey=0 hiddenValue=0 fakeValue=500.
+        assert_eq!(obscured_int_plain(0, 500), Some(500));
     }
 
     #[test]
-    fn a_masked_obscured_int_decodes_to_the_xor_of_its_two_halves() {
-        let value = 450 ^ 0x5A5A;
-        assert_eq!(obscured_int_decode(value, 0x5A5A, Some(OBSCURED_MASKED)), 450);
-        assert_eq!(obscured_int_decode(0, 0, Some(OBSCURED_MASKED)), 0);
+    fn an_obscured_int_decodes_to_nothing_rather_than_a_guess() {
+        assert_eq!(obscured_int_plain(165158, 0), None);
+        assert_eq!(obscured_int_plain(-1, 450), None);
     }
 
     #[test]
