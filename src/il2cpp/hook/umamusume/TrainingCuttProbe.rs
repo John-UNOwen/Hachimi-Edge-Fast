@@ -2377,6 +2377,7 @@ fn resolve_succession_view_doors(view: Option<*mut Il2CppClass>, helper: Option<
 
         if let Some(class) = helper {
             SUCCESSION_HELPER_CLASS.store(class as usize, atomic::Ordering::Relaxed);
+            HELPER_CLEANUP_PLAYING_ADDR = AnimationSpeed::resolve_method(class, "CleanupPlaying", NO_PARAMS, VOID);
             HELPER_STATUS_FIELD = get_field_from_name(class, c"<Status>k__BackingField");
             HELPER_IS_INITIALIZED_FIELD = get_field_from_name(class, c"<IsInitialized>k__BackingField");
             HELPER_TIMELINE_CONTROLLER_FIELD = get_field_from_name(class, c"_timelineController");
@@ -2502,6 +2503,11 @@ def_detour! {
 // missing door (A4).
 def_method_wrapper_fn!(skip_cutt_time, TRAINING_CUT_SKIP_ADDR, (), this: *mut Il2CppObject, time: f32);
 
+// The hold-out click's door: `CleanupPlaying/0` on `Gallop.SingleModeTrainingCutInHelper`
+// (`introspect-run69.log:27267`). Resolved beside the succession reads, on the same class, in every build that
+// arms the lever; inert while the address is 0, and the arming line's door list says when it did not resolve (A4).
+def_method_wrapper_fn!(press_helper_cleanup_playing, HELPER_CLEANUP_PLAYING_ADDR, (), this: *mut Il2CppObject);
+
 // Which cut run this build has already asked for, stamped by that run's open marker, and whether it is
 // inside the skip door right now: the skip advances the timeline, the timeline reaches `UpdateSpeed`,
 // and the lever must not answer that. The gate that used to be here was `set_IsPlayingCutt(playing)`,
@@ -2572,6 +2578,20 @@ const INSPIRATION_REFUSAL_HOLD_MS: i64 = 10_000;
 static INSPIRATION_SLOT_REFUSED_UNTIL_MS: [AtomicI64; INSPIRATION_SLOTS] = [const { AtomicI64::new(-1) }; INSPIRATION_SLOTS];
 static INSPIRATION_SKIPS: AtomicUsize = AtomicUsize::new(0);
 static INSPIRATION_INSIDE_DOOR: AtomicBool = AtomicBool::new(false);
+// The hold-out click. A timeline that reports itself ended while its screen waits with the succession button
+// not set up is the 2026-11-16 shape: runtime stepped to its end, the ending never arriving, the player left
+// with a soft reset. The click is the helper's own `CleanupPlaying()` - the door this client crossed 13 times
+// itself in that session to put a playing cut away, and a different door from the `Terminate` rung whose push
+// poisoned a timeline controller for a whole session in run 69 (C81). Only a helper freshly sighted stepping a
+// cut AND naming this timeline in its own `_timelineController` is clicked; nothing else is touched.
+const INSPIRATION_ESCALATE_LIMIT: usize = PROBE_DETAIL_LIMIT;
+// How fresh a helper's last `OnTimelineUpdatePost` crossing has to be for this build to call it live. A stalled
+// cut-in steps that door every frame (998 crossings in 4 s beside the same-shape live park), so anything the
+// machinery is driving reads fresh and a helper a finished cut left behind does not.
+const INSPIRATION_HELPER_FRESH_MS: i64 = 2_000;
+static INSPIRATION_ESCALATIONS: AtomicUsize = AtomicUsize::new(0);
+static INSPIRATION_ESCALATE_NOT_MADE: AtomicUsize = AtomicUsize::new(0);
+static INSPIRATION_SLOT_ESCALATED: [AtomicBool; INSPIRATION_SLOTS] = [const { AtomicBool::new(false) }; INSPIRATION_SLOTS];
 // A re-ask and a refused ask print on their own lines, so a run can tell the first ask from the follow ups and from
 // a timeline this build chose to leave alone.
 static INSPIRATION_REASKS: AtomicUsize = AtomicUsize::new(0);
@@ -2612,6 +2632,8 @@ fn inspiration_totals() -> usize {
         INSPIRATION_WATCH_LINES.load(atomic::Ordering::Relaxed),
         INSPIRATION_ATTEMPTS.load(atomic::Ordering::Relaxed),
         INSPIRATION_LADDER_REFUSED.load(atomic::Ordering::Relaxed),
+        INSPIRATION_ESCALATIONS.load(atomic::Ordering::Relaxed),
+        INSPIRATION_ESCALATE_NOT_MADE.load(atomic::Ordering::Relaxed),
     ]
     .iter()
     .sum()
@@ -2632,13 +2654,15 @@ fn note_inspiration_totals(now_ms: i64) {
     INSPIRATION_TOTALS_LAST_SUM.store(totals, atomic::Ordering::Relaxed);
 
     info!(
-        "Inspiration lever totals at {now_sec} s: first asks {} re-asks {} asks refused {} watch lines {} ladder attempts {} ladder refusals {}",
+        "Inspiration lever totals at {now_sec} s: first asks {} re-asks {} asks refused {} watch lines {} ladder attempts {} ladder refusals {} helper `CleanupPlaying()` clicks {} hold-out clicks not made {}",
         INSPIRATION_SKIPS.load(atomic::Ordering::Relaxed),
         INSPIRATION_REASKS.load(atomic::Ordering::Relaxed),
         INSPIRATION_ASKS_REFUSED.load(atomic::Ordering::Relaxed),
         INSPIRATION_WATCH_LINES.load(atomic::Ordering::Relaxed),
         INSPIRATION_ATTEMPTS.load(atomic::Ordering::Relaxed),
         INSPIRATION_LADDER_REFUSED.load(atomic::Ordering::Relaxed),
+        INSPIRATION_ESCALATIONS.load(atomic::Ordering::Relaxed),
+        INSPIRATION_ESCALATE_NOT_MADE.load(atomic::Ordering::Relaxed),
     );
 }
 
@@ -2719,6 +2743,7 @@ fn inspiration_slot(controller: usize, now_ms: i64) -> Option<usize> {
     INSPIRATION_SLOT_TICKS_AT_PREV[free].store(0, atomic::Ordering::Relaxed);
     INSPIRATION_SLOT_ATTEMPTS[free].store(0, atomic::Ordering::Relaxed);
     INSPIRATION_SLOT_LAST_ATTEMPT_MS[free].store(-1, atomic::Ordering::Relaxed);
+    INSPIRATION_SLOT_ESCALATED[free].store(false, atomic::Ordering::Relaxed);
     Some(free)
 }
 
@@ -2889,6 +2914,14 @@ pub(crate) fn inspiration_ask_held(refused_until_ms: i64, now_ms: i64) -> bool {
     refused_until_ms >= 0 && now_ms < refused_until_ms
 }
 
+/// Whether the stalled timeline in this watch line is due the hold-out click: the click rides the first watch
+/// line (the repeats read its effect), needs the timeline's own report of ended-and-not-paused and the screen
+/// still without its succession button, gets one attempt per stalled timeline, and stays inside the session's
+/// escalation budget. Whether a fresh helper actually holds this timeline is decided by the click itself.
+pub(crate) fn inspiration_escalate_due(lines: usize, ended: bool, paused: bool, button_armed: bool, slot_escalated: bool, escalations: usize, limit: usize) -> bool {
+    lines == 1 && ended && !paused && !button_armed && !slot_escalated && escalations < limit
+}
+
 /// Whether slot's timeline is due a watch line. `asked` says this build has an answer from the timeline already, and
 /// `since_first_ask_ms` how long ago that first ask went, `last_watch_ms` is the previous line's moment (`-1` for
 /// none), `watched` how many lines it has had. The watch exists for what came after the ask: on the visit of 2026-10-30
@@ -2973,6 +3006,82 @@ fn inspiration_watch(this: *mut Il2CppObject, slot: usize, view: i32, since_ask_
     // sits on is not on the timeline, so the watch now reads the view and its helpers beside the timeline it already
     // read. It costs nothing on a cut that moved, because it runs only where this line runs.
     inspiration_view_read(this, view);
+
+    // And the one thing this watch can do besides read. The 2026-11-16 capture settled what a park waits on: both
+    // timelines stepped to 3.267 of their own 3.240 and stood there being stepped, the ending never arriving, the
+    // succession button never set up. The ending the client would click is its helper's own `CleanupPlaying()`, so
+    // the first watch line of that shape clicks it - and only on the helper whose own `_timelineController` names
+    // this stalled timeline, so a helper holding another cut is never touched.
+    escalate_inspiration_holdout(this, slot, view, lines, ended, paused, since_ask_ms, now);
+}
+
+/// The hold-out click, on the helpers this client is seen stepping right now. A helper is clicked only when its
+/// last `OnTimelineUpdatePost` crossing is inside the fresh window AND its own `_timelineController` names this
+/// stalled timeline - two client-owned answers, no guessing which member of the cut this is. Once per stalled
+/// timeline, inside `INSPIRATION_ESCALATE_LIMIT` a session, through `INSPIRATION_INSIDE_DOOR` so the crossing
+/// this build leaves is not read back as the game's own.
+fn escalate_inspiration_holdout(this: *mut Il2CppObject, slot: usize, view: i32, lines: usize, ended: bool, paused: bool, since_ask_ms: i64, now: i64) {
+    let button_armed = !SingleModeSuccessionEventViewController::pending_view().is_null();
+    let slot_escalated = INSPIRATION_SLOT_ESCALATED[slot].load(atomic::Ordering::Relaxed);
+    let escalations = INSPIRATION_ESCALATIONS.load(atomic::Ordering::Relaxed);
+
+    if !inspiration_escalate_due(lines, ended, paused, button_armed, slot_escalated, escalations, INSPIRATION_ESCALATE_LIMIT) {
+        return;
+    }
+
+    INSPIRATION_SLOT_ESCALATED[slot].store(true, atomic::Ordering::Relaxed);
+
+    let holders: Vec<*mut Il2CppObject> = super::StoryEventProbe::training_cut_in_helper_sights()
+        .into_iter()
+        .filter(|(pointer, stamp)| *pointer != 0 && *stamp >= 0 && now - *stamp <= INSPIRATION_HELPER_FRESH_MS)
+        .map(|(pointer, _)| pointer as *mut Il2CppObject)
+        .filter(|helper| {
+            let held = helper_timeline_controller(*helper);
+
+            !held.is_null() && ::std::ptr::eq(held, this)
+        })
+        .collect();
+
+    if holders.is_empty() {
+        let missed = INSPIRATION_ESCALATE_NOT_MADE.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        if inspiration_line_due(missed) {
+            info!(
+                "Inspiration escalate {missed} not made: no fresh cut-helper sight names the stalled timeline {:#x} on view {view} in its own `_timelineController`, so the screen's wait stands",
+                this as usize,
+            );
+        }
+
+        return;
+    }
+
+    // The client's own crossings of this door, taken before this build's click, so the line can say what the
+    // game itself has done with it in this session.
+    let game_cleanups = super::StoryEventProbe::training_cut_in_cut_doors().1;
+
+    for helper in holders {
+        if INSPIRATION_INSIDE_DOOR.swap(true, atomic::Ordering::AcqRel) {
+            let missed = INSPIRATION_ESCALATE_NOT_MADE.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+            if inspiration_line_due(missed) {
+                warn!("Inspiration escalate dropped for {helper:p}: a press is already inside a cut-in door");
+            }
+
+            break;
+        }
+
+        press_helper_cleanup_playing(helper);
+
+        INSPIRATION_INSIDE_DOOR.store(false, atomic::Ordering::Release);
+
+        let made = INSPIRATION_ESCALATIONS.fetch_add(1, atomic::Ordering::Relaxed) + 1;
+
+        info!(
+            "Inspiration escalate {made}: clicked the stalled timeline's own cut helper `CleanupPlaying()` on {helper:p}, the fresh-sighted helper naming timeline {:#x} on view {view} in its own `_timelineController`, {since_ask_ms} ms after the ask; this client crossed that door {} times itself before this click, and the repeat watch lines of this timeline will say whether the succession button came up",
+            this as usize,
+            game_cleanups,
+        );
+    }
 }
 
 /// How many members of the view's helper array one watch line reads. The screen runs its cut through
@@ -8032,6 +8141,19 @@ mod tests {
         assert_eq!(INSPIRATION_REFUSAL_HOLD_MS, 10_000, "one refusal says itself once, and the next cut on a reused controller is still asked");
         assert!(INSPIRATION_REFUSAL_HOLD_MS < INSPIRATION_FIRST_ATTEMPT_MS, "the pump looks again well before the ladder is due anything");
         assert!(inspiration_watch_due(true, INSPIRATION_WATCH_AFTER_MS, -1, 20_000, 0), "a park that answers every ask with a refusal still gets its watch line, 5 s after the first ask");
+    }
+
+    #[test]
+    fn the_hold_out_click_rides_the_first_watch_line_of_the_ended_and_buttonless_shape() {
+        // The 2026-11-16 capture: first watch line, the timeline reporting itself ended and not paused, the
+        // succession button never set up, nothing escalated yet - that screen waited 7 s for a soft reset.
+        assert!(inspiration_escalate_due(1, true, false, false, false, 0, INSPIRATION_ESCALATE_LIMIT), "the measured park shape gets the helper's own put-away click");
+        assert!(!inspiration_escalate_due(2, true, false, false, false, 0, INSPIRATION_ESCALATE_LIMIT), "a repeat watch line reads the first click's effect instead of clicking again");
+        assert!(!inspiration_escalate_due(1, false, false, false, false, 0, INSPIRATION_ESCALATE_LIMIT), "a timeline still running its cut is the game's cut");
+        assert!(!inspiration_escalate_due(1, true, true, false, false, 0, INSPIRATION_ESCALATE_LIMIT), "a paused timeline is the client's to resume, as the ask gate already decides");
+        assert!(!inspiration_escalate_due(1, true, false, true, false, 0, INSPIRATION_ESCALATE_LIMIT), "a screen with its succession button set up is moving on without this build");
+        assert!(!inspiration_escalate_due(1, true, false, false, true, 0, INSPIRATION_ESCALATE_LIMIT), "one hold-out attempt per stalled timeline");
+        assert!(!inspiration_escalate_due(1, true, false, false, false, INSPIRATION_ESCALATE_LIMIT, INSPIRATION_ESCALATE_LIMIT), "the session budget is the bound");
     }
 
     // Run 73 played 11 Succession visits with the lever on and asked every cut-in it reached: 8 ask lines, 8 re-ask

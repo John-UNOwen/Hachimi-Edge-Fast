@@ -542,6 +542,59 @@ def_detour! {
 // the gate shut since 20:44:28.080 (`:1720`), and they crossed this door no times - it reads 230 at 20:45:25
 // (`:1840`) and 230 again at 20:45:45 (`:1884`) - so the stamp was quiet there and the write the pass at
 // 20:45:29.864 owed refused on the career screen half alone (`:1854`).
+
+// The helper instances the cut machinery is driving right now. `OnTimelineUpdatePost` is the door every live
+// cut-in's helper crosses on each frame that cut is stepped - the 2026-11-16 park counted 998 of them in 4 s -
+// so the address plus the millisecond of its last crossing separates a helper holding a running cut from one a
+// finished cut left behind. The Inspiration hold-out click (`TrainingCuttProbe`) takes only these as objects to
+// click, and takes one of them only when the helper's own `_timelineController` names the stalled timeline.
+static HELPER_SIGHT_POINTER: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
+static HELPER_SIGHT_MS: [AtomicI64; 4] = [const { AtomicI64::new(-1) }; 4];
+
+fn note_helper_sight(helper: *mut Il2CppObject, now_ms: i64) {
+    let seen = helper as usize;
+
+    for (index, slot) in HELPER_SIGHT_POINTER.iter().enumerate() {
+        if slot.load(atomic::Ordering::Relaxed) == seen {
+            HELPER_SIGHT_MS[index].store(now_ms, atomic::Ordering::Relaxed);
+
+            return;
+        }
+    }
+
+    // Free slot first (stamp `-1` or pointer `0`), else the oldest stamp: the table describes what is being
+    // driven now, and the quietest sight is the one that stopped describing anything longest ago.
+    let mut target = 0usize;
+
+    for (index, pair) in HELPER_SIGHT_POINTER.iter().zip(HELPER_SIGHT_MS.iter()).enumerate() {
+        let stamp = pair.1.load(atomic::Ordering::Relaxed);
+
+        if stamp < 0 || pair.0.load(atomic::Ordering::Relaxed) == 0 || stamp < HELPER_SIGHT_MS[target].load(atomic::Ordering::Relaxed) {
+            target = index;
+
+            if stamp < 0 {
+                break;
+            }
+        }
+    }
+
+    HELPER_SIGHT_POINTER[target].store(seen, atomic::Ordering::Relaxed);
+    HELPER_SIGHT_MS[target].store(now_ms, atomic::Ordering::Relaxed);
+}
+
+/// The helper instances this client stepped, with the moment of each one's last step. A slot never filled reads
+/// `(0, -1)`. Read by the Inspiration hold-out click, and by nothing on a hot path.
+pub(crate) fn training_cut_in_helper_sights() -> [(usize, i64); 4] {
+    let mut sights = [(0usize, -1i64); 4];
+
+    for (index, sight) in sights.iter_mut().enumerate() {
+        sight.0 = HELPER_SIGHT_POINTER[index].load(atomic::Ordering::Relaxed);
+        sight.1 = HELPER_SIGHT_MS[index].load(atomic::Ordering::Relaxed);
+    }
+
+    sights
+}
+
 def_detour! {
     TrainingCutInHelper_OnTimelineUpdatePost(this: *mut Il2CppObject, time: f32) {
             TRAINING_CUT_IN_ON_TIMELINE_UPDATE_POST.observe_peak(&[time as f64], time);
@@ -549,6 +602,9 @@ def_detour! {
         // The stamp is not measurement. It is what `cut_in_engine_driving` answers from, and it is the
         // reason the high speed option writes hold off while a cut-in runtime is being stepped.
         CUT_IN_TICK_MS.store(elapsed_ms(), atomic::Ordering::Relaxed);
+
+        // The same stamping, per helper: who is being driven right now.
+        note_helper_sight(this, elapsed_ms());
 
         get_orig_fn!(TrainingCutInHelper_OnTimelineUpdatePost, CutInRateFn)(this, time);
     }
