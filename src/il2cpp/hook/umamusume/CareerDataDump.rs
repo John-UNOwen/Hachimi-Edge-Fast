@@ -277,6 +277,16 @@ unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> 
         return None;
     }
 
+    // Reads stay inside the struct: a field offset the metadata reports past the struct's own size
+    // would be read from its neighbours' bytes, so it is not read at all.
+    let struct_size = il2cpp_class_value_size(struct_class, std::ptr::null_mut());
+
+    if struct_size <= 0 {
+        return None;
+    }
+
+    let struct_size = struct_size as usize;
+
     let mut crypto_current: Option<i32> = None;
     let mut fake: Option<i32> = None;
     let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
@@ -288,7 +298,9 @@ unsafe fn obscured_value_at(base: *const u8, struct_class: *mut Il2CppClass) -> 
             break;
         }
 
-        if il2cpp_field_get_flags(held) & 0x10 != 0 || (*il2cpp_field_get_type(held)).type_() != I4 {
+        let held_type = il2cpp_field_get_type(held);
+
+        if held_type.is_null() || il2cpp_field_get_flags(held) & 0x10 != 0 || (*held_type).type_() != I4 || il2cpp_field_get_offset(held) + 4 > struct_size {
             continue;
         }
 
@@ -601,6 +613,17 @@ unsafe fn character_fields_json(chara: *mut Il2CppObject) -> Value {
     let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
     let mut walked = 0usize;
 
+    // The ceiling every raw read below is checked against: a field whose reported offset cannot
+    // fit its type inside the object is not this object's field, and reading it is how a dump
+    // faults a game thread without ever getting to say so.
+    let object_size = il2cpp_class_instance_size(klass);
+
+    if object_size <= 0 {
+        return json!({"_scan": "no instance size"});
+    }
+
+    let object_size = object_size as usize;
+
     loop {
         let field = il2cpp_class_get_fields(klass, &mut iter);
 
@@ -624,21 +647,28 @@ unsafe fn character_fields_json(chara: *mut Il2CppObject) -> Value {
             None => continue,
         };
 
-        let kind = (*il2cpp_field_get_type(field)).type_();
-        let at = (chara as *const u8).add(il2cpp_field_get_offset(field));
+        let field_type = il2cpp_field_get_type(field);
+
+        if field_type.is_null() {
+            continue;
+        }
+
+        let kind = (*field_type).type_();
+        let offset = il2cpp_field_get_offset(field);
+        let at = (chara as *const u8).add(offset);
 
         let value = match kind {
-            I4 => json!( *(at as *const i32) ),
-            U4 => json!( *(at as *const u32) ),
-            I2 => json!( *(at as *const i16) ),
-            U2 => json!( *(at as *const u16) ),
-            I1 => json!( *(at as *const i8) ),
-            U1 => json!( *(at as *const u8) ),
-            I8 => json!( *(at as *const i64) ),
-            U8 => json!( *(at as *const u64) ),
-            BOOL => json!( *(at as *const u8) != 0 ),
-            VALUETYPE => {
-                let struct_class = il2cpp_type_get_class_or_element_class(il2cpp_field_get_type(field));
+            I4 if offset + 4 <= object_size => json!( *(at as *const i32) ),
+            U4 if offset + 4 <= object_size => json!( *(at as *const u32) ),
+            I2 if offset + 2 <= object_size => json!( *(at as *const i16) ),
+            U2 if offset + 2 <= object_size => json!( *(at as *const u16) ),
+            I1 if offset + 1 <= object_size => json!( *(at as *const i8) ),
+            U1 if offset + 1 <= object_size => json!( *(at as *const u8) ),
+            I8 if offset + 8 <= object_size => json!( *(at as *const i64) ),
+            U8 if offset + 8 <= object_size => json!( *(at as *const u64) ),
+            BOOL if offset + 1 <= object_size => json!( *(at as *const u8) != 0 ),
+            VALUETYPE if offset + 20 <= object_size => {
+                let struct_class = il2cpp_type_get_class_or_element_class(field_type);
                 let struct_name = if struct_class.is_null() { String::new() } else { skill_capture::as_string(il2cpp_class_get_name(struct_class)).unwrap_or_default() };
 
                 if struct_name.starts_with("Obscured") {
@@ -648,7 +678,7 @@ unsafe fn character_fields_json(chara: *mut Il2CppObject) -> Value {
                     }
                 }
                 else {
-                    continue;
+                    Value::String(format!("<{struct_name}>"))
                 }
             },
             _ => continue,
@@ -705,6 +735,13 @@ fn run_dump() -> Result<String, DumpError> {
 
     info!("Career dump: reading through a character the game touched {} s ago", age_sec(now_us, if via_chara_door { chara_stamp } else { data_stamp }));
 
+    // The stage markers are the dump's black box: every later result is logged too, so the last
+    // marker a run printed is the phase a fault died in. A void detour swallows faults with no
+    // line of their own (the barrier only counts them until detach), and a press that "did
+    // nothing" leaves exactly this trail.
+    let stage = std::time::Instant::now();
+    let elapsed = || stage.elapsed().as_millis();
+
     WALK_NODES.with(|nodes| nodes.set(WALK_NODE_BUDGET));
 
     let mut root = Map::new();
@@ -729,6 +766,7 @@ fn run_dump() -> Result<String, DumpError> {
         Some(value) => json!(value),
         None => Value::String("<unreadable>".to_owned()),
     });
+    info!("Career dump: getters done in {} ms", elapsed());
 
     let lists: Vec<(&'static str, usize)> = lock_or_recover(&BOUND_LIST).iter().map(|(section, _, addr)| (*section, *addr)).collect();
 
@@ -736,6 +774,7 @@ fn run_dump() -> Result<String, DumpError> {
         let list = unsafe { call_object(addr, chara) };
         root.insert(section.to_owned(), unsafe { json_of_list(list, 0) });
     }
+    info!("Career dump: lists walked in {} ms", elapsed());
 
     if let Some(screen) = screen_snapshot_json(now_us) {
         root.insert("skillLearningScreen".to_owned(), screen);
@@ -744,15 +783,20 @@ fn run_dump() -> Result<String, DumpError> {
     root.insert("skillTipsObserved".to_owned(), observed_tips_json());
     root.insert("skillMasterNames".to_owned(), master_names_json());
     root.insert("skillIdsOffered".to_owned(), observed_ids_json());
+    info!("Career dump: owned snapshots done in {} ms", elapsed());
+
     root.insert("characterFields".to_owned(), unsafe { character_fields_json(chara) });
+    info!("Career dump: character fields scanned in {} ms", elapsed());
 
     // The same flat scan over the career state, whenever that root is itself fresh: if the number
     // the skill screen shows does not live on the character, it lives near here.
     if data_at != 0 && is_fresh(now_us, data_stamp) {
         root.insert("careerStateFields".to_owned(), unsafe { character_fields_json(data_at as *mut Il2CppObject) });
+        info!("Career dump: career state scanned in {} ms", elapsed());
     }
 
     let body = serde_json::to_string_pretty(&Value::Object(root)).map_err(|e| DumpError::Failed(e.to_string()))?;
+    info!("Career dump: json ready, {} bytes, {} ms all together", body.len(), elapsed());
 
     // The id for the file name is read through the same bound getter table the JSON used; when the
     // getter was never bound, the file is still written, just named by epoch alone.
@@ -787,7 +831,22 @@ pub fn poll() {
         return;
     }
 
-    match run_dump() {
+    // Under an explicit catch: this runs inside a void detour, where the hook barrier swallows a
+    // panicking body with no line at all. Catching here is what turns "the button did nothing"
+    // into a logged, named failure.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_dump));
+
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let reason = payload.downcast_ref::<String>().cloned().or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned())).unwrap_or_else(|| "panic without a message".to_owned());
+
+            info!("Career dump: the dump body panicked: {reason}");
+            Err(DumpError::Failed(reason))
+        },
+    };
+
+    match outcome {
         Ok(name) => request_notification(NotificationRequest::Custom(t!("notification.career_dump_saved", name = name).to_string())),
         Err(DumpError::NoCareer) => {
             let reason = t!("notification.career_dump_no_career").to_string();
