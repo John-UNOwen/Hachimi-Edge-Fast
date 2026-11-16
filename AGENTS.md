@@ -148,6 +148,13 @@ cargo clippy --target aarch64-linux-android --all-targets -- -D warnings
   gated `cfg(any(target_os = "android", test))`: a Windows `--all-targets` run lints them and
   `cargo test --lib` runs their tests, while Windows `check`, `clippy` without `--all-targets`, and
   `build --release` never compile them (C43).
+- Release (`.github/workflows/create_release.yml`): pushing a tag matching `v*` (this fork's
+  `v<base>-fork.N` scheme, since the Cargo version stays at the upstream base) builds
+  `cargo build --release` on a Windows runner and publishes a GitHub release named for the tag,
+  carrying `cri_mana_vpx.dll` and its sha256 - what the in-game updater and the player both expect
+  (C4). Release notes come from `RELEASE_NOTES.md` at the tag when committed, else GitHub's
+  generated notes. The upstream workflow's Android leg and installer chain were dropped by
+  decision (section 1; fork releases have only ever shipped the dll).
 - Android builds use `tools/android/build.sh` (needs `ANDROID_NDK_ROOT`). For the Android clippy leg on
   a Windows host, the tool names CI writes into the environment are the *Linux* ones: in a Windows NDK
   copy `aarch64-linux-android24-clang` and `llvm-ar` are bash wrapper scripts Windows cannot exec, and
