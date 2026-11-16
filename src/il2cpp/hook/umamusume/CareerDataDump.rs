@@ -92,7 +92,9 @@ const I4_GETTERS: &[(&str, &str, &str)] = &[
     ("stats", "guts", "get_Guts"),
     ("stats", "wiz", "get_Wiz"),
 ];
-// enum getters: 4-byte enums, so the value travels in a register and the wrapper declares an i32 (A5).
+// enum getters: the returned enum travels in a register, so the wrapper declares an i32 (A5). This
+// metadata reports those returns as VALUETYPE, not ENUM - the live run's resolver line said it
+// plainly: `get_CharaGrade returns il2cpp type 17, wrapper expects 85`.
 const ENUM_GETTERS: &[(&str, &str, &str)] = &[
     ("character", "charaGrade", "get_CharaGrade"),
     ("character", "motivation", "get_Motivation"),
@@ -590,21 +592,48 @@ fn observed_ids_json() -> Value {
     Value::Array(observed.iter().map(|id| json!(id)).collect())
 }
 
-fn run_dump() -> Result<String, String> {
+/// What the dump can refuse with: no live career to read, or a real failure on the way out.
+enum DumpError {
+    NoCareer,
+    Failed(String),
+}
+
+fn age_sec(now_us: i64, stamp_us: i64) -> i64 {
+    if stamp_us < 0 { -1 } else { (now_us - stamp_us).max(0) / 1_000_000 }
+}
+
+fn run_dump() -> Result<String, DumpError> {
     let now_us = ProbeSuite::now_us();
-    let stamp_us = DATA_STAMP_US.load(atomic::Ordering::Acquire);
-    let data = DATA_AT.load(atomic::Ordering::Acquire) as *mut Il2CppObject;
 
-    if data.is_null() || !is_fresh(now_us, stamp_us) {
-        return Err(t!("notification.career_dump_no_career").to_string());
+    // Two liveness paths, freshest first:
+    // - The character itself, stamped by the tip doors. Those doors are the game's own row binds
+    //   and fire by the hundreds on a skill screen, so while that screen lives the pointer was
+    //   read by the game moments ago and is used directly.
+    // - The career state, stamped by its own HUD-clock door, with `get_Character` re-deriving the
+    //   character fresh. This is the path for pressing the button anywhere else in a run.
+    let chara_at = skill_capture::CHARA_AT.load(atomic::Ordering::Acquire);
+    let chara_stamp = skill_capture::CHARA_STAMP_US.load(atomic::Ordering::Relaxed);
+    let data_at = DATA_AT.load(atomic::Ordering::Acquire);
+    let data_stamp = DATA_STAMP_US.load(atomic::Ordering::Relaxed);
+
+    let mut via_chara_door = false;
+    let chara = if chara_at != 0 && is_fresh(now_us, chara_stamp) {
+        via_chara_door = true;
+        chara_at as *mut Il2CppObject
     }
-
-    // The character is re-derived from the state the game itself just used, never remembered.
-    let chara = unsafe { call_object(GET_CHARACTER_ADDR.load(atomic::Ordering::Relaxed), data) };
+    else if data_at != 0 && is_fresh(now_us, data_stamp) {
+        unsafe { call_object(GET_CHARACTER_ADDR.load(atomic::Ordering::Relaxed), data_at as *mut Il2CppObject) }
+    }
+    else {
+        return Err(DumpError::NoCareer);
+    };
 
     if chara.is_null() {
-        return Err(t!("notification.career_dump_failed", reason = t!("notification.career_dump_no_career")).to_string());
+        info!("Career dump: refused, no character behind the fresh state (state {} s, character {} s old)", age_sec(now_us, data_stamp), age_sec(now_us, chara_stamp));
+        return Err(DumpError::NoCareer);
     }
+
+    info!("Career dump: reading through a character the game touched {} s ago", age_sec(now_us, if via_chara_door { chara_stamp } else { data_stamp }));
 
     WALK_NODES.with(|nodes| nodes.set(WALK_NODE_BUDGET));
 
@@ -614,7 +643,7 @@ fn run_dump() -> Result<String, String> {
 
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     root.insert("generatedAtEpochSec".to_owned(), json!(epoch));
-    root.insert("careerDataAgeSec".to_owned(), json!((now_us - stamp_us).max(0) / 1_000_000));
+    root.insert("careerDataAgeSec".to_owned(), json!(age_sec(now_us, data_stamp)));
 
     let last_month = LAST_MONTH.load(atomic::Ordering::Relaxed);
 
@@ -646,7 +675,7 @@ fn run_dump() -> Result<String, String> {
     root.insert("skillMasterNames".to_owned(), master_names_json());
     root.insert("skillIdsOffered".to_owned(), observed_ids_json());
 
-    let body = serde_json::to_string_pretty(&Value::Object(root)).map_err(|e| e.to_string())?;
+    let body = serde_json::to_string_pretty(&Value::Object(root)).map_err(|e| DumpError::Failed(e.to_string()))?;
 
     // The id for the file name is read through the same bound getter table the JSON used; when the
     // getter was never bound, the file is still written, just named by epoch alone.
@@ -657,7 +686,7 @@ fn run_dump() -> Result<String, String> {
     let name = format!("career_{chara_id}_{epoch}.json");
     let path = Hachimi::instance().get_data_path(&name);
 
-    std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::write(&path, body).map_err(|e| DumpError::Failed(format!("{}: {e}", path.display())))?;
 
     DUMPS_DONE.fetch_add(1, atomic::Ordering::Relaxed);
     info!("Career dump: wrote {name}");
@@ -683,7 +712,15 @@ pub fn poll() {
 
     match run_dump() {
         Ok(name) => request_notification(NotificationRequest::Custom(t!("notification.career_dump_saved", name = name).to_string())),
-        Err(reason) => request_notification(NotificationRequest::Custom(t!("notification.career_dump_failed", reason = reason).to_string())),
+        Err(DumpError::NoCareer) => {
+            let reason = t!("notification.career_dump_no_career").to_string();
+            info!("Career dump: refused, {reason}");
+            request_notification(NotificationRequest::Custom(reason));
+        },
+        Err(DumpError::Failed(reason)) => {
+            info!("Career dump: failed, {reason}");
+            request_notification(NotificationRequest::Custom(t!("notification.career_dump_failed", reason = reason).to_string()));
+        },
     }
 }
 
@@ -716,8 +753,8 @@ pub fn init(umamusume: *const Il2CppImage) {
     if let Some(class) = chara {
         for (table, spec, ret) in [
             (&BOUND_I4, I4_GETTERS, I4),
-            (&BOUND_ENUM, ENUM_GETTERS, ENUM),
-            (&BOUND_U8, U8_GETTERS, U8),
+            (&BOUND_ENUM, ENUM_GETTERS, VALUETYPE),
+            (&BOUND_U8, U8_GETTERS, VALUETYPE),
             (&BOUND_STRING, STRING_GETTERS, STRING),
         ] {
             for (section, key, method) in spec {

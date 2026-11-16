@@ -129,6 +129,21 @@ pub(crate) struct ScreenSnap {
 }
 
 pub(crate) static SCREEN_SNAP: Mutex<ScreenSnap> = Mutex::new(ScreenSnap { rows: Vec::new(), top: 0, stamp_us: -1, chara: 0 });
+
+// The character pointer, stamped by the doors whose `this` it is. Those doors are proven to fire
+// on any skill screen visit, so on that screen the character itself is the freshest live career
+// pointer there is; the career dump reads it before falling back to the state root.
+pub(crate) static CHARA_AT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static CHARA_STAMP_US: AtomicI64 = AtomicI64::new(-1);
+
+pub(crate) fn stamp_chara(chara: *mut Il2CppObject) {
+    if chara.is_null() {
+        return;
+    }
+
+    CHARA_STAMP_US.store(ProbeSuite::now_us(), atomic::Ordering::Relaxed);
+    CHARA_AT.store(chara as usize, atomic::Ordering::Release);
+}
 pub(crate) static MASTER_NAMES: Mutex<BTreeMap<i32, Vec<(String, String)>>> = Mutex::new(BTreeMap::new());
 pub(crate) static OBSERVED_SKILLS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 // skill id -> (tip discount, hint level), each filled by whichever door reported it.
@@ -762,6 +777,7 @@ def_detour! {
     WorkSingleModeCharaData_GetTipsSkillPointDiscount(this: *mut Il2CppObject, skill_id: i32) -> i32 {
         let result = get_orig_fn!(WorkSingleModeCharaData_GetTipsSkillPointDiscount, DiscountFn)(this, skill_id);
 
+        stamp_chara(this);
         observe_tips(&mut lock_or_recover(&TIPS_OBSERVED), skill_id, result, false);
 
         // The first reads carry the SP so one line per row answers cost and affordability at once;
@@ -783,6 +799,7 @@ def_detour! {
     WorkSingleModeCharaData_GetTipsSkillLevel(this: *mut Il2CppObject, skill_id: i32) -> i32 {
         let result = get_orig_fn!(WorkSingleModeCharaData_GetTipsSkillLevel, LevelFn)(this, skill_id);
 
+        stamp_chara(this);
         observe_tips(&mut lock_or_recover(&TIPS_OBSERVED), skill_id, result, true);
 
         detail_line(&TIPS_LEVEL, 40, || format!("skill {skill_id} hint level {result}"));
