@@ -113,6 +113,7 @@ def_detour! {
         // The dialog and skill screen census, on the same tick and the same quiet path rule.
         super::DialogProbe::report_if_due();
         super::SkillSparkProbe::report_if_due();
+        super::SingleModeSkillProbe::report_if_due();
         super::InheritFlowProbe::report_if_due();
         // The concert census and its per visit lines, on the same tick and the same quiet path rule. The
         // lines are due on a schedule of their own, so a screen that is holding prints while its totals
