@@ -6,8 +6,10 @@
 //! real `SendInput` move, then the notches go in, so the widget the game raycasts for its scroll
 //! handler is the one under the cursor. That distinction is the whole reason a first build failed:
 //! it teleported the cursor with `SetCursorPos`, which produces no message, and measured no motion.
-//! If the probe wheel moves nothing, the same probe retries as the press-move-release drag the
-//! lists are known to answer, and the session runs on that.
+//! If the wheel answers nothing at any probe point, only then does the probe press: the whole
+//! candidate ladder retries as the drag the lists are known to answer, and the session runs on
+//! that. A "moved" probe counts only as a placeable scroll - a dialog closing behind a stray
+//! press is a huge diff and no scroll, and gets rejected.
 //!
 //! The stitching method is the receipt-factor one the Mirako toolchain documents: find where the
 //! foot of the previous frame landed in the next one, demand that the *whole* shared stretch agrees
@@ -599,6 +601,23 @@ pub fn detect_region(f0: &Frame, f1: &Frame) -> Option<Region> {
     Some(Region { top, bottom, left, right })
 }
 
+/// The probe has to find a *scroll*, not merely a change: a stray press that closed a modal
+/// rewrote half the screen and was mistaken for a moved list. A diff earns belief only when the
+/// previous frame's foot band places inside the next one at a measured shift - the same test
+/// every later step passes, run here on the probe's own pair.
+fn probe_moved(f0: &Frame, f1: &Frame) -> Option<(Region, usize)> {
+    let region = detect_region(f0, f1)?;
+    let stride = if f0.w >= 1920 { 3 } else { 2 };
+    let mw = match_width(f0.w);
+    let band = (region.height() / 6).clamp(PROBE_ROWS_MIN, PROBE_ROWS_MAX);
+    let g0 = gray_of(f0, region.top, region.bottom, 0, mw, stride);
+    let g1 = gray_of(f1, region.top, region.bottom, 0, mw, stride);
+    match travel(&g0, &g1, band, None) {
+        Some(m) if m >= STILL_PX => Some((region, m)),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Travel: how far did the content move up between two settled frames
 // ---------------------------------------------------------------------------
@@ -965,9 +984,11 @@ fn worker() {
             return Err("unexpected frame size".to_owned());
         }
 
-        // The probe walks the ladder of points and tries the wheel, then the drag, at each one.
-        // The first point and input that move a real band (see the region minimums: a blinking
-        // readout is not a scrolled list) define the region, the mode, and the first aim.
+        // The probe walks the ladder of points, wheel only. A wheel notch cannot press anything,
+        // so the harmless input gets every candidate before any press happens: a first pass that
+        // mixed the drag in pressed a modal's backdrop at the middle point and closed the dialog.
+        // Only when the wheel answered nothing anywhere does the drag phase press the same points.
+        // Either way a candidate counts only as `probe_moved`: a real, placeable scroll.
         let mut use_wheel = false;
         let mut probe_notches = 1usize;
         let mut last = first.clone();
@@ -975,13 +996,16 @@ fn worker() {
         let mut probe_rung = 0usize;
         let mut region: Option<Region> = None;
 
-        for (rung, (px, py)) in probe_points(first.w, first.h).into_iter().enumerate() {
-            probe_rung = rung + 1;
-            let Some((x, y)) = client_point_on_screen(hwnd, px, py) else {
-                continue;
-            };
-            for wheel_try in [true, false] {
-                if wheel_try {
+        for wheel_phase in [true, false] {
+            if !wheel_phase && region.is_none() {
+                info!("scrollshot: the wheel answered nothing at any probe point, trying the drag");
+            }
+            for (rung, (px, py)) in probe_points(first.w, first.h).into_iter().enumerate() {
+                probe_rung = rung + 1;
+                let Some((x, y)) = client_point_on_screen(hwnd, px, py) else {
+                    continue;
+                };
+                if wheel_phase {
                     wheel_scroll(x, y, WHEEL_PROBE_NOTCHES);
                 } else {
                     // Sized small enough that even a short list keeps enough overlap for the
@@ -992,8 +1016,8 @@ fn worker() {
                 if probe.w != first.w || probe.h != first.h {
                     return Err("the window changed size mid-capture".to_owned());
                 }
-                if let Some(r) = detect_region(&first, &probe) {
-                    use_wheel = wheel_try;
+                if let Some((r, _m)) = probe_moved(&first, &probe) {
+                    use_wheel = wheel_phase;
                     probe_notches = WHEEL_PROBE_NOTCHES;
                     aim_probe = Some((x, y));
                     region = Some(r);
@@ -1332,6 +1356,31 @@ mod tests {
             }
         }
         assert!(detect_region(&f0, &strip).is_none(), "a narrow tall strip is chrome");
+    }
+
+    #[test]
+    fn a_probe_must_be_a_placeable_scroll_not_a_screen_change() {
+        let scene = synth();
+        let f0 = viewport(&scene, 0);
+
+        let real = viewport(&scene, 137);
+        let (_r, m) = probe_moved(&f0, &real).expect("a scrolled list is a real probe");
+        assert_eq!(m, 137, "the probe measures the same shift a later step would");
+
+        // A modal closing rewrites the screen with content that never scrolled from anywhere:
+        // a big diff, but no foot band that places inside the next frame.
+        let mut closed = f0.clone();
+        let mut rng = Lcg(0x5ea1_7c0d_e5db_0001);
+        for y in 40..(VIEW_H - 40) {
+            for x in 0..W {
+                let i = (y * W + x) * 4;
+                closed.rgba[i] = (rng.next() % 256) as u8;
+                closed.rgba[i + 1] = (rng.next() % 256) as u8;
+                closed.rgba[i + 2] = (rng.next() % 256) as u8;
+            }
+        }
+        assert!(detect_region(&f0, &closed).is_some(), "the change alone looks huge");
+        assert!(probe_moved(&f0, &closed).is_none(), "huge is not scrolled: the probe must reject it");
     }
 
     #[test]
