@@ -154,6 +154,7 @@ pub(crate) static OBSERVED_SKILLS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::n
 pub(crate) static TIPS_OBSERVED: Mutex<BTreeMap<i32, (Option<i32>, Option<i32>)>> = Mutex::new(BTreeMap::new());
 // skill id -> the row's scalar fields (SkillId, Level, NeedPoint, OriginNeedPoint, HintLv,
 // DiscountRateForDisplay, IsAcquired...), from the last time a binding window carried that id.
+// `IsGet` is not a learned flag: a career that had learned nothing carried it on 10 of 109 rows.
 pub(crate) static ROWS_OBSERVED: Mutex<BTreeMap<i32, Vec<(String, i64)>>> = Mutex::new(BTreeMap::new());
 pub(crate) static ROWS_STAMP_US: AtomicI64 = AtomicI64::new(-1);
 
@@ -416,8 +417,10 @@ fn capture_master_name(row: *mut Il2CppObject) {
     names.insert(id, strings);
 }
 
-/// Record a skill id the screen offered. Bounded so a session that keeps opening screens cannot
-/// grow the set without limit; the cap stops new ids, it never drops old ones.
+/// Record the ids one `CreateSkillInfoBySkillIdList` call carried. The door fires for card
+/// awakenings too, so the set is every id the session asked the game to build, not one screen's
+/// offers. Bounded so a long session cannot grow it without limit. The cap stops new ids and never
+/// drops old ones.
 fn capture_observed_ids(ids: *mut Il2CppObject) {
     if ids.is_null() {
         return;

@@ -5,7 +5,8 @@
 //! acquired skills with level, the skill hints with their levels and discounts, the skill screen's
 //! rows with their prices when the screen was last open, and the master-data names seen for every
 //! skill. The file lands as `career_<charaId>_<epoch>.json` in the game root, the same place the
-//! scrolling screenshot saves.
+//! scrolling screenshot saves. An object whose metadata shows no instance fields is read through
+//! its own zero-parameter getters instead, and names its class in the entry.
 //!
 //! How this stays safe outside the skill screen, where the dump may be pressed:
 //! - No character or screen pointer is ever trusted from a door. The only cached pointer is the
@@ -71,6 +72,11 @@ const WALK_LIST_CAP: usize = 48;
 const WALK_STRING_CAP: usize = 512;
 const WALK_MAX_DEPTH: usize = 2;
 const WALK_NODE_BUDGET: usize = 6000;
+// An object whose metadata shows no instance fields (the acquired-skill list proved one exists)
+// answers through its own zero-parameter getters. Only ints, bools and strings are read back, and
+// the entry keeps the class name and the metadata's field count so the file says what it is.
+const ACCESSOR_CAP: usize = 16;
+const ACCESSOR_SCAN_CAP: usize = 128;
 
 // (section, key, method) triples, all read off the career character by its own getters. The names
 // and return shapes are from the live dump of `Gallop.WorkSingleModeCharaData` (`introspect-run69.log`).
@@ -142,6 +148,10 @@ static BOUND_LIST: Mutex<Vec<GetterEntry>> = Mutex::new(Vec::new());
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static REQUESTED: AtomicBool = AtomicBool::new(false);
+
+// Class labels of objects the field walk found nothing in. One line after the walk names them,
+// so a run shows where the accessor fallback carried the entry without the file being opened.
+static WALK_FIELDLESS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 // The career state, its freshness stamp, and the month the game last reported - the HUD clock,
 // cached from the door that doubles as the liveness stamp.
@@ -466,6 +476,7 @@ unsafe fn json_of_object(obj: *mut Il2CppObject, depth: usize) -> Value {
     let mut map = Map::new();
     let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
     let mut walked = 0usize;
+    let mut seen = 0usize;
 
     loop {
         let field = il2cpp_class_get_fields(klass, &mut iter);
@@ -473,6 +484,8 @@ unsafe fn json_of_object(obj: *mut Il2CppObject, depth: usize) -> Value {
         if field.is_null() {
             break;
         }
+
+        seen += 1;
 
         if il2cpp_field_get_flags(field) & 0x10 != 0 {
             continue;
@@ -491,6 +504,10 @@ unsafe fn json_of_object(obj: *mut Il2CppObject, depth: usize) -> Value {
         };
 
         map.insert(name, json_of_field(obj, field, depth));
+    }
+
+    if map.is_empty() {
+        return fill_from_accessors(obj, klass, seen);
     }
 
     Value::Object(map)
@@ -571,6 +588,94 @@ unsafe fn json_of_field(obj: *mut Il2CppObject, field: *mut FieldInfo, depth: us
 
 fn json_as_number(value: f64) -> Value {
     if value.is_finite() { json!(value) } else { Value::String(format!("{value}")) }
+}
+
+/// The JSON key a getter accessor answers for: `get_SkillId` is `SkillId`, anything else is not a
+/// property accessor.
+fn accessor_property_name(name: &str) -> Option<&str> {
+    let property = name.strip_prefix("get_")?;
+
+    (!property.is_empty()).then_some(property)
+}
+
+/// The runtime name a diagnostic prints.
+unsafe fn class_label(klass: *mut Il2CppClass) -> String {
+    let name = skill_capture::as_string(il2cpp_class_get_name(klass)).unwrap_or_else(|| "?".to_owned());
+    let ns = skill_capture::as_string(il2cpp_class_get_namespace(klass)).unwrap_or_default();
+
+    if ns.is_empty() { name } else { format!("{ns}.{name}") }
+}
+
+/// An object the field walk found nothing in, read through its own zero-parameter getters. A
+/// raised exception skips that one getter. The class label and the metadata's field count stay in
+/// the entry: they name the class a later build must bind by door if the accessors answer nothing.
+unsafe fn fill_from_accessors(obj: *mut Il2CppObject, klass: *mut Il2CppClass, seen_fields: usize) -> Value {
+    let mut map = Map::new();
+    let mut iter: *mut ::std::os::raw::c_void = std::ptr::null_mut();
+    let mut filled = 0usize;
+
+    for _ in 0..ACCESSOR_SCAN_CAP {
+        let method = il2cpp_class_get_methods(klass, &mut iter);
+
+        if method.is_null() || filled >= ACCESSOR_CAP {
+            break;
+        }
+
+        if il2cpp_method_get_param_count(method) != 0 {
+            continue;
+        }
+
+        let Some(name) = skill_capture::as_string(il2cpp_method_get_name(method)) else { continue };
+        let Some(property) = accessor_property_name(&name) else { continue };
+        let ret_type = il2cpp_method_get_return_type(method);
+
+        if ret_type.is_null() {
+            continue;
+        }
+
+        let kind = (*ret_type).type_();
+
+        if !matches!(kind, I4 | BOOL | STRING) {
+            continue;
+        }
+
+        let mut exc: *mut Il2CppException = std::ptr::null_mut();
+        let result = il2cpp_runtime_invoke(method, obj as *mut ::std::os::raw::c_void, std::ptr::null_mut(), &mut exc);
+
+        if !exc.is_null() || result.is_null() {
+            continue;
+        }
+
+        let value = match kind {
+            STRING => match (result as *mut Il2CppString).as_ref() {
+                Some(text) => {
+                    let full = text.as_utf16str().to_string();
+                    json!( full.chars().take(WALK_STRING_CAP).collect::<String>() )
+                },
+                None => continue,
+            },
+            _ => match il2cpp_object_unbox(result) {
+                p if p.is_null() => continue,
+                p if kind == BOOL => json!( *(p as *const u8) != 0 ),
+                p => json!( *(p as *const i32) ),
+            },
+        };
+
+        map.insert(property.to_owned(), value);
+        filled += 1;
+    }
+
+    let label = class_label(klass);
+    map.insert("_class".to_owned(), json!(label.clone()));
+    map.insert("_fields".to_owned(), json!(seen_fields));
+
+    let mut fieldless = lock_or_recover(&WALK_FIELDLESS);
+
+    if fieldless.len() < 8 && !fieldless.contains(&label) {
+        fieldless.push(label);
+    }
+
+    Value::Object(map)
 }
 
 /// A live list as `{count, items}`. Reference elements are walked as objects; an `int` list is read
@@ -869,6 +974,7 @@ fn run_dump() -> Result<String, DumpError> {
     let elapsed = || stage.elapsed().as_millis();
 
     WALK_NODES.with(|nodes| nodes.set(WALK_NODE_BUDGET));
+    lock_or_recover(&WALK_FIELDLESS).clear();
 
     let mut root = Map::new();
     root.insert("kind".to_owned(), json!("hachimi-career-dump"));
@@ -907,6 +1013,12 @@ fn run_dump() -> Result<String, DumpError> {
     }
     info!("Career dump: lists walked in {} ms", elapsed());
 
+    let fieldless = lock_or_recover(&WALK_FIELDLESS).clone();
+
+    if !fieldless.is_empty() {
+        info!("Career dump: no instance fields to walk, read by accessor: {}", fieldless.join(", "));
+    }
+
     if let Some(screen) = screen_snapshot_json(now_us) {
         root.insert("skillLearningScreen".to_owned(), screen);
     }
@@ -917,7 +1029,10 @@ fn run_dump() -> Result<String, DumpError> {
         root.insert("skillRowsObserved".to_owned(), rows);
     }
     root.insert("skillMasterNames".to_owned(), master_names_json());
-    root.insert("skillIdsOffered".to_owned(), observed_ids_json());
+    // Union of ids carried by every `CreateSkillInfoBySkillIdList` call, card awakenings included:
+    // a run that learned nothing here still held the card's seven awakening ids. Not the skill
+    // screen's offer list.
+    root.insert("skillIdsFromCreateCalls".to_owned(), observed_ids_json());
     info!("Career dump: owned snapshots done in {} ms", elapsed());
 
     root.insert("characterFields".to_owned(), unsafe { character_fields_json(chara) });
@@ -1102,5 +1217,14 @@ mod tests {
         assert!(budget_take());
         assert!(budget_take());
         assert!(!budget_take());
+    }
+
+    #[test]
+    fn an_accessor_names_the_property_the_json_key_uses() {
+        assert_eq!(accessor_property_name("get_SkillId"), Some("SkillId"));
+        assert_eq!(accessor_property_name("get_Level"), Some("Level"));
+        assert_eq!(accessor_property_name("GetTipsSkillLevel"), None, "a plain method is not a property accessor");
+        assert_eq!(accessor_property_name("get_"), None);
+        assert_eq!(accessor_property_name("set_Level"), None);
     }
 }
